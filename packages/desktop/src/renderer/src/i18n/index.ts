@@ -3,6 +3,7 @@ import { compile, type MessageCompiler } from '@intlify/core-base'
 import bus from '../bus'
 // Directly import translation files
 import enTranslations from '../../../../static/locales/en.json'
+import { brandTranslations } from '@shared/brand'
 
 // vue-i18n compiles each translation lazily on first use, and its compiler
 // throws a SyntaxError on any value it can't parse — e.g. a literal `{{x}}`
@@ -30,7 +31,7 @@ const i18n = createI18n({
   legacy: false,
   locale: 'en', // default is en
   fallbackLocale: 'en',
-  messages: { en: enTranslations }, // Load en by default only
+  messages: { en: brandTranslations(enTranslations) }, // Load en by default only
   // Disable linking to avoid '@' symbols being misinterpreted
   modifiers: {
     '@': () => '@'

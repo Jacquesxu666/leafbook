@@ -1,249 +1,102 @@
-# MarkText Website
+# LeafBook inherited documentation validation
 
+`leafbook-docs-validation` is a quarantined validation package for documentation
+and presentation code inherited from MarkText. It is kept in the LeafBook
+monorepo so inherited documents can remain searchable and mechanically checked
+while LeafBook establishes its own product experience.
 
+This package is **not the LeafBook product website**. It has no production
+server script, deployment script, public domain, release-download channel, or
+approved hosting target. Never publish `.next/` or any other output from this
+package. A future LeafBook website must be reviewed and introduced separately.
 
-[![Built with React](https://img.shields.io/badge/React-brightgreen?logo=react&logoColor=white)](https://reactjs.org/)
-[![TypeScript](https://img.shields.io/badge/TypeScript-blue?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
-[![Vite](https://img.shields.io/badge/Vite-purple?logo=vite&logoColor=white)](https://vitejs.dev/)
+The site currently uses:
 
-The official website for [MarkText](https://github.com/marktext/marktext) - A simple and elegant markdown editor.
+- Next.js 15.5.19
+- React and React DOM 19.2.7
+- TypeScript 5.9.3
+- Tailwind CSS 4.3.1
 
-## ✨ Features
+`packages/website/package.json` is the source of truth for these dependency
+versions.
 
-- 🚀 **Modern Stack**: Built with React 18 + TypeScript + Vite
-- 📝 **Live Preview**: Interactive markdown editor with real-time rendering
-- 🎨 **Multiple Themes**: Support for Dark, Graphite, Material Dark, One Dark, and Ulysses themes
-- 📊 **Diagram Support**: Mermaid diagrams integration for flowcharts, sequence diagrams, and more
-- 🧮 **Math Rendering**: KaTeX support for mathematical formulas
-- 💅 **Syntax Highlighting**: Prism.js integration for code blocks
-- 📱 **Responsive Design**: Works seamlessly on desktop and mobile devices
+## Requirements
 
-## 📋 Prerequisites
+Use the monorepo toolchain declared by the root `package.json`:
 
-Before you begin, ensure you have the following installed:
+- Node.js 20.19.0 or newer
+- pnpm 10 or newer
 
-- **Node.js**: >= 16.0.0 (recommended: LTS version)
-- **pnpm**: >= 8.0.0 (recommended package manager)
-
-To install pnpm globally:
-
-```bash
-npm install -g pnpm
-```
-
-## 🚀 Getting Started
-
-### Installation
-
-1. Clone the repository:
-
-```bash
-git clone https://github.com/marktext/website.git
-cd website
-```
-
-2. Install dependencies:
+Install dependencies from the repository root:
 
 ```bash
 pnpm install
 ```
 
-### Development
+## Local validation
 
-Start the development server with hot-reload:
+Run these commands from the repository root.
 
-```bash
-pnpm dev
-```
-
-The application will be available at `http://localhost:5173` (or the next available port).
-
-### Building for Production
-
-Build the application for production:
+For short-lived local inspection only, run the Next.js development server on
+<http://localhost:3000>:
 
 ```bash
-pnpm build
+pnpm --filter leafbook-docs-validation run dev
 ```
 
-The optimized files will be generated in the `build/` directory.
-
-### Preview Production Build
-
-Preview the production build locally:
+Regenerate the documentation search index explicitly:
 
 ```bash
-pnpm preview
+pnpm --filter leafbook-docs-validation run docs:index
 ```
 
-### Code Quality
+The development command generates the index only when it is missing. A
+production build always regenerates it through the package's `prebuild`
+script.
 
-Run TypeScript type checking:
+Run the same validation used by the website workflow:
 
 ```bash
-pnpm type-check
+pnpm --filter leafbook-docs-validation run lint
+pnpm --filter leafbook-docs-validation run type-check
+pnpm --filter leafbook-docs-validation run build
 ```
 
-Run ESLint to check code quality:
+Next.js writes validation output to `.next/`. There is intentionally no
+`start`, preview, publish, deploy, Cloudflare, Wrangler, or GitHub Pages script.
+Do not serve or deploy the build output.
 
-```bash
-pnpm lint
+## Project layout
+
+```text
+packages/website/
+├── content/docs/       # Inherited end-user and developer documentation
+├── public/             # Static assets and generated docs-index.json
+├── scripts/            # Documentation index generation
+├── src/app/            # Next.js App Router pages and styles
+├── src/components/     # Site and documentation UI
+├── src/hooks/          # Client-side React hooks
+├── src/lib/            # Documentation parsing, navigation, and search
+├── next.config.ts
+├── package.json
+└── tsconfig.json
 ```
 
-## 🚀 Deployment
+## Deployment status
 
-### Deploy to GitHub Pages
+`.github/workflows/website-deploy.yml` is intentionally a read-only
+documentation validation workflow. It installs dependencies, lints,
+type-checks, and builds this quarantined package, but it has no deployment job
+and no write permission.
 
-This project is configured to automatically deploy to GitHub Pages using GitHub Actions.
+LeafBook does not yet have a reviewed, project-owned website target. Do not
+automatically deploy this fork, manually run an inherited deployment, or
+publish its output anywhere. Deployment can be introduced only as a separate
+LeafBook-owned product-site project after its target, credentials, content, and
+public identity have been reviewed.
 
-#### Setup
+## License
 
-1. Go to your repository **Settings** → **Pages**
-2. Under **Source**, select **GitHub Actions**
-3. Push to the `master` branch or manually trigger the workflow
-
-The site will be available at: `https://marktext.github.io/website/`
-
-#### Manual Deployment
-
-You can also trigger the deployment manually:
-
-1. Go to **Actions** tab in your GitHub repository
-2. Select **Deploy to GitHub Pages** workflow
-3. Click **Run workflow**
-
-#### Local Preview of Production Build
-
-To preview the production build locally before deploying:
-
-```bash
-pnpm build
-pnpm preview
-```
-
-## 📁 Project Structure
-
-```
-website/
-├── src/
-│   ├── assets/          # Static assets (images, SVGs)
-│   │   └── sponsor/     # Sponsor logos
-│   ├── components/      # React components
-│   │   ├── Feature.tsx  # Main feature showcase with markdown preview
-│   │   ├── Footer.tsx   # Website footer
-│   │   ├── Sponsor.tsx  # Sponsors section
-│   │   ├── Theme.tsx    # Theme switcher
-│   │   └── TitleBar.tsx # Navigation bar
-│   ├── markdowns/       # Markdown demo files
-│   ├── muya/            # Muya editor library
-│   ├── themes/          # Theme CSS files
-│   ├── types/           # TypeScript type definitions
-│   ├── utils/           # Utility functions
-│   │   ├── markdownToHtml.ts  # Markdown to HTML converter
-│   │   ├── scrollTo.ts        # Smooth scrolling utilities
-│   │   ├── theme.ts           # Theme management
-│   │   └── themeColor.ts      # Theme color definitions
-│   ├── App.tsx          # Root component
-│   ├── main.tsx         # Application entry point
-│   └── app.global.css   # Global styles
-├── public/              # Public static files
-├── build/               # Production build output (generated)
-├── index.html           # HTML template
-├── package.json         # Project dependencies and scripts
-├── tsconfig.json        # TypeScript configuration
-├── vite.config.js       # Vite configuration
-└── README.md           # This file
-```
-
-## 🛠️ Tech Stack
-
-### Core
-
-- **React** - UI library
-- **TypeScript** - Type-safe JavaScript
-- **Vite** - Build tool and dev server
-
-### Libraries
-
-- **Mermaid** - Diagram and flowchart rendering
-- **KaTeX** - Math typesetting
-- **Prism.js** - Syntax highlighting
-- **DOMPurify** - HTML sanitization
-- **Axios** - HTTP client
-- **GitHub Markdown CSS** - Markdown styling
-
-### Development Tools
-
-- **ESLint** - Code linting
-- **TypeScript ESLint** - TypeScript-specific linting rules
-- **Vite Plugin SVGR** - SVG to React component conversion
-
-## 🎨 Themes
-
-The website supports multiple editor themes:
-
-- **Cadmium Light** (Default)
-- **Dark** - Dark theme with high contrast
-- **Graphite** - Elegant dark gray theme
-- **Material Dark** - Material Design inspired dark theme
-- **One Dark** - Atom One Dark theme
-- **Ulysses** - Minimalist theme inspired by Ulysses app
-
-## 📝 Markdown Features
-
-The editor preview supports:
-
-- ✅ **CommonMark** and **GitHub Flavored Markdown**
-- ✅ Task lists with checkboxes
-- ✅ Tables with alignment
-- ✅ Code blocks with syntax highlighting
-- ✅ Math equations (inline and block)
-- ✅ Mermaid diagrams
-- ✅ HTML sanitization for security
-- ✅ Auto-linking URLs
-- ✅ Emoji support
-
-## 🔧 Configuration
-
-### Vite Configuration
-
-The `vite.config.js` includes:
-
-- Custom markdown plugin for `.md` file imports
-- SVGR plugin for SVG component generation
-- Optimized build settings
-
-### TypeScript Configuration
-
-Two TypeScript configs are used:
-
-- `tsconfig.json` - App source code configuration
-- `tsconfig.node.json` - Build tools configuration
-
-## 🤝 Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
-
-1. Fork the repository
-2. Create your feature branch (`git checkout -b feature/AmazingFeature`)
-3. Commit your changes (`git commit -m 'Add some AmazingFeature'`)
-4. Push to the branch (`git push origin feature/AmazingFeature`)
-5. Open a Pull Request
-
-## 📄 License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## 🔗 Links
-
-- **Main Project**: [MarkText Editor](https://github.com/marktext/marktext)
-- **Website**: [https://marktext.me](https://marktext.me)
-- **Documentation**: [MarkText Docs](https://marktext.me/docs)
-
-## 💖 Sponsors
-
-Special thanks to all our sponsors for supporting the MarkText project!
-
----
-
-Made with ❤️ by the MarkText Team
+LeafBook retains the inherited MarkText notices and license terms. See the
+repository [LICENSE](../../LICENSE), [NOTICE](../../NOTICE), and
+desktop [third-party notices](../desktop/build/THIRD-PARTY-LICENSES.txt).

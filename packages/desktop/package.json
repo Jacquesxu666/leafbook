@@ -1,34 +1,23 @@
 {
-  "name": "marktext",
-  "version": "0.20.0-dev",
-  "description": "MarkText",
+  "name": "leafbook",
+  "version": "0.1.0",
+  "description": "LeafBook — a local-first Markdown book reader and editor",
+  "license": "MIT",
   "main": "./out/main/index.js",
   "author": {
-    "name": "Jocs",
-    "email": "ransixi@gmail.com",
-    "url": "https://github.com/Jocs"
+    "name": "Jacquesxu666",
+    "url": "https://github.com/Jacquesxu666"
   },
   "maintainer": [
     {
-      "name": "Jocs",
-      "email": "ransixi@gmail.com",
-      "url": "https://github.com/Jocs"
-    },
-    {
-      "name": "Felix Häusler",
-      "email": "hfelix@protonmail.ch",
-      "url": "https://github.com/fxha"
-    },
-    {
-      "name": "Tkaixiang",
-      "email": "tkaixiang@gmail.com",
-      "url": "https://github.com/Tkaixiang"
+      "name": "Jacquesxu666",
+      "url": "https://github.com/Jacquesxu666"
     }
   ],
-  "homepage": "https://github.com/marktext/marktext",
+  "homepage": "https://github.com/Jacquesxu666/marktext",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/marktext/marktext.git"
+    "url": "git+https://github.com/Jacquesxu666/marktext.git"
   },
   "scripts": {
     "minify-locales": "tsx ../../scripts/minify-locales.ts",
@@ -75,7 +64,6 @@
     "dragula": "^3.7.3",
     "electron-log": "^5.4.4",
     "electron-store": "^11.0.2",
-    "electron-updater": "^6.8.9",
     "electron-window-state": "^5.0.3",
     "element-plus": "^2.14.2",
     "element-resize-detector": "^1.2.4",

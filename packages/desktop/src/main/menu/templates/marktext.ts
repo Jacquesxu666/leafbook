@@ -3,23 +3,18 @@ import { showAboutDialog } from '../actions/help'
 import * as actions from '../actions/marktext'
 import { t } from '../../i18n'
 import type Keybindings from '../../keyboard/shortcutHandler'
+import { APP_NAME } from '@shared/brand'
 
 // macOS only menu.
 
 export default function(keybindings: Keybindings): MenuItemConstructorOptions {
   return {
-    label: t('menu.marktext.title'),
+    label: APP_NAME,
     submenu: [
       {
-        label: t('menu.marktext.about'),
+        label: `About ${APP_NAME}`,
         click(_menuItem, focusedWindow) {
           showAboutDialog(focusedWindow as BrowserWindow | undefined)
-        }
-      },
-      {
-        label: t('menu.marktext.checkUpdates'),
-        click(_menuItem, focusedWindow) {
-          actions.checkUpdates((focusedWindow as BrowserWindow | undefined) ?? null)
         }
       },
       {
@@ -41,7 +36,7 @@ export default function(keybindings: Keybindings): MenuItemConstructorOptions {
         type: 'separator'
       },
       {
-        label: t('menu.marktext.hide'),
+        label: `Hide ${APP_NAME}`,
         accelerator: keybindings.getAccelerator('mt.hide') ?? undefined,
         click() {
           actions.osxHide()
@@ -64,7 +59,7 @@ export default function(keybindings: Keybindings): MenuItemConstructorOptions {
         type: 'separator'
       },
       {
-        label: t('menu.marktext.quit'),
+        label: `Quit ${APP_NAME}`,
         accelerator: keybindings.getAccelerator('file.quit') ?? undefined,
         click: app.quit
       }

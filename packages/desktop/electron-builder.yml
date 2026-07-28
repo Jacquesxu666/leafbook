@@ -1,5 +1,5 @@
-appId: com.github.marktext.marktext
-productName: marktext
+appId: com.jacquesxu.leafbook
+productName: LeafBook
 directories:
   buildResources: build
   output: ../../dist
@@ -38,6 +38,12 @@ files:
   - '!jsconfig.json'
   - '!docs/*'
 extraResources:
+  - from: ../../LICENSE
+    to: licenses/LICENSE
+  - from: ../../NOTICE
+    to: licenses/NOTICE
+  - from: build/THIRD-PARTY-LICENSES.txt
+    to: licenses/THIRD-PARTY-LICENSES.txt
   - from: build/icons
     to: icons # ends up at resources/icons/
     filter:
@@ -53,52 +59,18 @@ electronLanguages: # Avoid packaging all chromium locales since our app has in-b
 
 asarUnpack:
   - resources/**
-fileAssociations:
-  - ext: md
-    name: Markdown
-    description: Markdown document
-    mimeType: text/markdown
-    role: Editor
-    icon: icons/md.ico
-  - ext: markdown
-    name: Markdown
-    description: Markdown document
-    mimeType: text/markdown
-    role: Editor
-    icon: icons/md.ico
-  - ext: mmd
-    name: Markdown
-    description: Markdown document
-    mimeType: text/markdown
-    role: Editor
-    icon: icons/md.ico
-  - ext: mdown
-    name: Markdown
-    description: Markdown document
-    mimeType: text/markdown
-    role: Editor
-    icon: icons/md.ico
-  - ext: mdtxt
-    name: Markdown
-    description: Markdown document
-    mimeType: text/markdown
-    role: Editor
-    icon: icons/md.ico
-  - ext: mdtext
-    name: Markdown
-    description: Markdown document
-    mimeType: text/markdown
-    role: Editor
-    icon: icons/md.ico
+# Windows associations are deliberately absent here. electron-builder registers
+# top-level associations before our installer prompt. The custom NSIS include
+# below is the sole Windows owner and writes them only after explicit consent.
 win:
-  executableName: marktext
-  artifactName: 'marktext-win-${arch}-${version}.${ext}'
+  executableName: leafbook
+  artifactName: 'leafbook-win-${arch}-${version}.${ext}'
   target:
     - target: 'nsis'
     - target: 'zip'
   icon: static/icon.ico
 nsis:
-  artifactName: 'marktext-win-${arch}-${version}-setup.${ext}'
+  artifactName: 'leafbook-win-${arch}-${version}-setup.${ext}'
   shortcutName: ${productName}
   uninstallDisplayName: ${productName}
   createDesktopShortcut: true
@@ -108,19 +80,30 @@ nsis:
   perMachine: false
   include: windows/installer.nsh
 mac:
-  artifactName: 'marktext-mac-${arch}-${version}.${ext}'
+  artifactName: 'leafbook-mac-${arch}-${version}.${ext}'
   entitlementsInherit: build/mac/entitlements.mac.plist
   extendInfo:
-    - NSCameraUsageDescription: Application requests access to the device's camera.
-    - NSDocumentsFolderUsageDescription: Application requests access to the user's Documents folder.
-    - NSDownloadsFolderUsageDescription: Application requests access to the user's Downloads folder.
+    NSCameraUsageDescription: Application requests access to the device's camera.
+    NSDocumentsFolderUsageDescription: Application requests access to the user's Documents folder.
+    NSDownloadsFolderUsageDescription: Application requests access to the user's Downloads folder.
+    CFBundleDocumentTypes:
+      - CFBundleTypeName: Markdown document
+        CFBundleTypeRole: Editor
+        LSHandlerRank: Alternate
+        CFBundleTypeExtensions:
+          - md
+          - markdown
+          - mkd
+          - mdwn
+          - mdown
+          - mdx
   icon: static/icon.icns
   notarize: false
   target:
     - dmg
     - zip
 dmg:
-  artifactName: 'marktext-mac-${arch}-${version}.${ext}'
+  artifactName: 'leafbook-mac-${arch}-${version}.${ext}'
   contents:
     - x: 410
       y: 240
@@ -130,18 +113,18 @@ dmg:
       y: 240
       type: 'file'
 linux:
-  artifactName: 'marktext-linux-${version}.${ext}'
-  executableName: 'marktext'
-  description: 'A simple and elegant open-source markdown editor that focused on speed and usability.'
-  maintainer: 'MarkText Contributors'
+  artifactName: 'leafbook-linux-${version}.${ext}'
+  executableName: 'leafbook'
+  description: 'A local-first Markdown book reader and editor.'
+  maintainer: 'LeafBook Contributors'
   category: 'Office;TextEditor;Utility'
   mimeTypes:
     - 'text/markdown'
   icon: 'static/icon.png'
   desktop:
     entry:
-      StartupWMClass: 'marktext'
-      Keywords: 'marktext;'
+      StartupWMClass: 'leafbook'
+      Keywords: 'leafbook;markdown;book;'
   target:
     - AppImage
     - snap
@@ -165,5 +148,8 @@ linux:
       name: 'Markdown'
       description: 'Markdown document'
     - ext: 'mdtext'
+      name: 'Markdown'
+      description: 'Markdown document'
+    - ext: 'mdx'
       name: 'Markdown'
       description: 'Markdown document'

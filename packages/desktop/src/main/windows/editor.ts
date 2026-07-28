@@ -12,6 +12,7 @@ import { showEditorContextMenu } from '../contextMenu/editor'
 import { loadMarkdownFile } from '../filesystem/markdown'
 import { switchLanguage } from '../spellchecker'
 import fs from 'fs'
+import { APP_NAME } from '@shared/brand'
 
 type RawMarkdownDocument = Awaited<ReturnType<typeof loadMarkdownFile>>
 
@@ -218,7 +219,7 @@ class EditorWindow extends BaseWindow {
       const { response } = await dialog.showMessageBox(win!, {
         type: 'warning',
         buttons: ['Close', 'Reload', 'Keep It Open'],
-        message: 'MarkText has crashed',
+        message: `${APP_NAME} has crashed`,
         detail: msg
       })
 

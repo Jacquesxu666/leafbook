@@ -11,6 +11,7 @@ import {
 } from 'native-keymap'
 import os from 'os'
 import path from 'path'
+import { APP_SLUG } from '@shared/brand'
 
 export interface KeyboardInfo {
   layout: IKeyboardLayoutInfo
@@ -59,7 +60,10 @@ class KeyboardLayoutMonitor extends EventEmitter {
   // NOTE: Preserves the pre-existing single-argument override; the original JS
   // also delegated to `this.removeListener(channel, callback)` (recursive).
   override removeListener(eventNameOrCallback: unknown, _listener?: unknown): this {
-    this.removeListener(KEYBOARD_LAYOUT_MONITOR_CHANNEL_ID, eventNameOrCallback as KeyboardInfoListener)
+    this.removeListener(
+      KEYBOARD_LAYOUT_MONITOR_CHANNEL_ID,
+      eventNameOrCallback as KeyboardInfoListener
+    )
     return this
   }
 
@@ -88,7 +92,7 @@ export const registerKeyboardListeners = (): void => {
     return getKeyboardInfo()
   })
   ipcMain.on('mt::keybinding-debug-dump-keyboard-info', async() => {
-    const dumpPath = path.join(os.tmpdir(), 'marktext_keyboard_info.json')
+    const dumpPath = path.join(os.tmpdir(), `${APP_SLUG}_keyboard_info.json`)
     const content = JSON.stringify(getKeyboardInfo(), null, 2)
     fsPromises
       .writeFile(dumpPath, content, 'utf8')

@@ -13,10 +13,17 @@ import Accessor from './app/accessor'
 import App from './app'
 import { t } from './i18n'
 import { registerSandboxIpcHandlers } from './ipc'
+import { APP_ID, APP_NAME, APP_SLUG } from '@shared/brand'
 
 // Set version strings into global and process.versions
 process.env.MARKTEXT_VERSION = MARKTEXT_VERSION
 process.env.MARKTEXT_VERSION_STRING = MARKTEXT_VERSION_STRING
+
+// Establish LeafBook's public identity and storage root before any component
+// reads Electron paths. An explicit slug keeps the directory independent from
+// both MarkText and platform-specific product-name casing.
+app.setName(APP_NAME)
+app.setPath('userData', path.join(app.getPath('appData'), APP_SLUG))
 
 // -----------------------------------------------
 // Exception handling and logging setup
@@ -53,7 +60,7 @@ initializeLogger(appEnvironment)
 // Handles native level crashes
 crashReporter.start({
   companyName: '',
-  productName: 'marktext',
+  productName: APP_NAME,
   uploadToServer: false, // collect locally
   compress: true
 })
@@ -83,7 +90,7 @@ if (!process.mas && process.env.NODE_ENV !== 'development') {
 registerSandboxIpcHandlers()
 
 // Windows-specific AppUserModelID
-electronApp.setAppUserModelId('com.electron.marktext')
+electronApp.setAppUserModelId(APP_ID)
 
 // Dev shortcuts and reload suppression
 app.on('browser-window-created', (_, window) => {

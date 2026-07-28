@@ -111,6 +111,7 @@
 import log from 'electron-log'
 import { setKeyboardLayout } from '@hfelix/electron-localshortcut'
 import { ref, onMounted, onUnmounted, watch } from 'vue'
+import { DOCUMENTATION_URLS } from '@shared/brand'
 import Separator from '../common/separator/index.vue'
 import KeyInputDialog from './key-input-dialog.vue'
 import KeybindingConfigurator from './KeybindingConfigurator'
@@ -168,9 +169,7 @@ onUnmounted(() => {
 })
 
 const openKeybindingDocs = (): void => {
-  window.electron.shell.openExternal(
-    'https://marktext.me/docs/key-bindings'
-  )
+  window.electron.shell.openExternal(DOCUMENTATION_URLS.keybindings)
 }
 
 const saveKeybindings = (): void => {

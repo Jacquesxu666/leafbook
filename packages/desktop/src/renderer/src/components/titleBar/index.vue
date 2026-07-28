@@ -19,7 +19,7 @@
         class="title"
         @dblclick.stop="toggleMaxmizeOnMacOS"
       >
-        <span v-if="!filename">MarkText</span>
+        <span v-if="!filename">{{ APP_NAME }}</span>
         <span v-else>
           <span
             v-for="(path, index) of paths"
@@ -149,6 +149,7 @@ import { useEditorStore } from '@/store/editor'
 import { useI18n } from 'vue-i18n'
 import { ArrowRight } from '@element-plus/icons-vue'
 import type { FileWordCount } from '@shared/types/files'
+import { APP_NAME } from '@shared/brand'
 
 interface ProjectInfo {
   name?: string

@@ -52,6 +52,21 @@ jobs:
 
       - uses: ./.github/actions/setup
 
+      - name: Verify LeafBook generated metadata
+        run: pnpm verify-leafbook-metadata
+
+      - name: Verify Windows association policy
+        run: pnpm verify-windows-associations
+
+      - name: Regenerate and verify third-party notices
+        run: |
+          pnpm gen-third-party
+          git diff --exit-code -- packages/desktop/build/THIRD-PARTY-LICENSES.txt
+
+      - name: Verify checked-in LeafBook icons
+        if: matrix.platform == 'macos'
+        run: pnpm verify-leafbook-icons
+
       # Must be set before postinstall runs electron-rebuild
       - name: Set C++20 for MacOS
         if: matrix.platform == 'macos'
@@ -79,10 +94,23 @@ jobs:
         if: matrix.platform == 'windows'
         run: pnpm run build:win:${{ matrix.arch }}
 
+      - name: Audit LeafBook macOS artifacts
+        if: matrix.platform == 'macos'
+        run: pnpm audit:mac-artifact -- ${{ matrix.arch }}
+
+      - name: Audit LeafBook Linux artifacts
+        if: matrix.platform == 'linux'
+        run: pnpm audit:platform-artifacts -- linux
+
+      - name: Audit LeafBook Windows artifacts
+        if: matrix.platform == 'windows'
+        shell: bash
+        run: pnpm audit:platform-artifacts -- windows ${{ matrix.arch }}
+
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: marktext-${{ matrix.name }}
+          name: leafbook-${{ matrix.name }}
           retention-days: 30
           path: |
             dist/*.exe

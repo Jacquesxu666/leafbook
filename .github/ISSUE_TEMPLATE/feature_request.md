@@ -1,6 +1,6 @@
 ---
 name: Feature Request
-about: Suggest an idea or improvement for MarkText
+about: Suggest an idea or improvement for LeafBook
 title: "[Feature] "
 labels: ["enhancement"]
 ---

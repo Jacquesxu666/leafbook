@@ -26,9 +26,9 @@ export default function Hero() {
           Realtime preview, beautiful typography, and zero distractions.
         </p>
         <div className={revealClass('d3', 'hero-cta')}>
-          <a className="btn btn-primary btn-lg" href={DOWNLOAD.releases} {...EXT_LINK}>
+          <a className="btn btn-primary btn-lg" href={DOWNLOAD.source} {...EXT_LINK}>
             <DownloadIcon />
-            Download for free
+            View source
           </a>
           <a className="btn btn-ghost btn-lg" href={DOWNLOAD.repo} {...EXT_LINK}>
             <GitHubIcon />
@@ -55,8 +55,9 @@ export default function Hero() {
             </h1>
             <p className="doc-sub">A living document, written entirely in Markdown.</p>
             <p className="lead">
-              MarkText renders your formatting <strong>as you type</strong> — headings grow, <em>emphasis</em> leans, and{' '}
-              <code className="inline">code</code> snaps into place without ever leaving the page.
+              MarkText renders your formatting <strong>as you type</strong> — headings grow,{' '}
+              <em>emphasis</em> leans, and <code className="inline">code</code> snaps into place
+              without ever leaving the page.
             </p>
             <h2>What changed</h2>
             <ul>
@@ -64,7 +65,9 @@ export default function Hero() {
               <li>33 built-in themes plus full custom CSS</li>
               <li>Tables, math, footnotes &amp; diagrams out of the box</li>
             </ul>
-            <blockquote>“The best Markdown editors disappear. MarkText disappears beautifully.”</blockquote>
+            <blockquote>
+              “The best Markdown editors disappear. MarkText disappears beautifully.”
+            </blockquote>
             <pre>
               <span className="c">{'# export.sh'}</span>
               {'\n'}

@@ -15,52 +15,36 @@ const geistMono = Geist_Mono({
   display: 'swap'
 })
 
-const SITE_URL = 'https://marktext.me'
-const TITLE = 'MarkText — The Markdown editor that gets out of your way'
+const TITLE = 'LeafBook inherited documentation validation'
 const DESCRIPTION =
-  'A free, open-source, real-time preview Markdown editor for macOS, Windows and Linux. Beautiful typography, 33 built-in themes, math, diagrams, footnotes — all rendered live.'
+  'A non-deployable validation build for documentation inherited by the LeafBook project.'
 
 export const metadata: Metadata = {
-  metadataBase: new URL(SITE_URL),
-  title: {
-    default: TITLE,
-    template: '%s | MarkText'
-  },
+  title: TITLE,
   description: DESCRIPTION,
-  applicationName: 'MarkText',
-  keywords: [
-    'markdown editor',
-    'WYSIWYG markdown',
-    'CommonMark',
-    'GitHub Flavored Markdown',
-    'GFM',
-    'KaTeX',
-    'Mermaid',
-    'PlantUML',
-    'Electron',
-    'macOS',
-    'Windows',
-    'Linux'
-  ],
-  authors: [{ name: 'Ran Luo', url: 'https://github.com/Jocs' }],
-  creator: 'Ran Luo',
-  alternates: { canonical: '/' },
+  applicationName: 'LeafBook docs validation',
+  robots: {
+    index: false,
+    follow: false,
+    nocache: true,
+    googleBot: {
+      index: false,
+      follow: false,
+      noimageindex: true
+    }
+  },
   icons: { icon: '/favicon.png' },
   openGraph: {
     type: 'website',
     locale: 'en_US',
-    url: SITE_URL,
-    siteName: 'MarkText',
+    siteName: 'LeafBook docs validation',
     title: TITLE,
-    description: DESCRIPTION,
-    images: [{ url: '/favicon.png', width: 512, height: 512, alt: 'MarkText logo' }]
+    description: DESCRIPTION
   },
   twitter: {
-    card: 'summary_large_image',
-    site: '@marktextapp',
+    card: 'summary',
     title: TITLE,
-    description: DESCRIPTION,
-    images: ['/favicon.png']
+    description: DESCRIPTION
   }
 }
 
@@ -70,37 +54,20 @@ export const viewport: Viewport = {
   themeColor: '#08080b'
 }
 
-const jsonLd = {
-  '@context': 'https://schema.org',
-  '@type': 'SoftwareApplication',
-  name: 'MarkText',
-  applicationCategory: 'DeveloperApplication',
-  operatingSystem: 'macOS, Windows, Linux',
-  description: DESCRIPTION,
-  url: SITE_URL,
-  license: 'https://github.com/marktext/marktext/blob/develop/LICENSE',
-  author: { '@type': 'Person', name: 'Ran Luo', url: 'https://github.com/Jocs' },
-  offers: { '@type': 'Offer', price: '0', priceCurrency: 'USD' },
-  downloadUrl: 'https://github.com/marktext/marktext/releases/latest',
-  softwareVersion: 'latest'
-}
-
 // Inline before paint to avoid theme flash.
 const themeBootstrap = `(function(){try{var t=localStorage.getItem(${JSON.stringify(THEME_STORAGE_KEY)});if(!t)t=${JSON.stringify(DEFAULT_THEME)};document.documentElement.setAttribute('data-theme',t);}catch(e){document.documentElement.setAttribute('data-theme',${JSON.stringify(DEFAULT_THEME)});}})();`
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en" data-theme={DEFAULT_THEME} className={`${geistSans.variable} ${geistMono.variable}`}>
+    <html
+      lang="en"
+      data-theme={DEFAULT_THEME}
+      className={`${geistSans.variable} ${geistMono.variable}`}
+    >
       <head>
         <script dangerouslySetInnerHTML={{ __html: themeBootstrap }} />
       </head>
-      <body>
-        {children}
-        <script
-          type="application/ld+json"
-          dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd) }}
-        />
-      </body>
+      <body>{children}</body>
     </html>
   )
 }

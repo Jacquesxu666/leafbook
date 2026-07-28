@@ -1,0 +1,17 @@
+[Desktop Entry]
+Name=LeafBook
+Comment=Local-first Markdown book reader and editor
+Exec=leafbook %F
+Terminal=false
+Type=Application
+Icon=leafbook
+Categories=Office;TextEditor;Utility;
+MimeType=text/markdown;
+Keywords=leafbook;markdown;book;
+StartupWMClass=leafbook
+Actions=NewWindow;
+
+[Desktop Action NewWindow]
+Name=New Window
+Exec=leafbook --new-window %F
+Icon=leafbook

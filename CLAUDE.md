@@ -2,33 +2,37 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-# MarkText
+# LeafBook
 
 ## Project Overview
 
-MarkText is a WYSIWYG markdown editor built on Electron + Vue 3. It supports CommonMark, GitHub Flavored Markdown, math (KaTeX), Mermaid diagrams, PlantUML, and multiple editing modes (focus, typewriter, source-code).
+LeafBook is a local-first Markdown book reader and editor derived from MarkText.
+The current fork lives at `https://github.com/Jacquesxu666/marktext`; inherited
+editor documentation and internal package names may still refer to the upstream
+MarkText project.
 
-- **Version**: see `package.json`
+- **Version**: `packages/desktop/package.json` is the single source of truth
 - **License**: MIT
-- **Repository**: https://github.com/marktext/marktext
+- **Repository**: https://github.com/Jacquesxu666/marktext
+- **Upstream**: https://github.com/marktext/marktext
 
 ## Tech Stack
 
-| Layer | Technology |
-|---|---|
-| Language | TypeScript 5.9 (strict mode) — `packages/muyajs/` retained as JS via ambient shim |
-| Desktop shell | Electron 42 |
-| Build system | electron-vite 5 |
-| Packaging | electron-builder 26 |
-| Frontend framework | Vue 3 |
-| State management | Pinia 3 |
-| Routing | Vue Router 4 |
-| UI library | Element Plus |
-| Unit tests | Vitest 4 |
-| E2E tests | Playwright |
-| Package manager | pnpm >=10 workspace (`packageManager: pnpm@10.33.4`) |
-| Repo layout | pnpm monorepo — see Directory Structure |
-| Node.js minimum | >=20.19.0 (PR CI: Node 22.21.1 · release CI: Node 24.14.1) |
+| Layer              | Technology                                                                        |
+| ------------------ | --------------------------------------------------------------------------------- |
+| Language           | TypeScript 5.9 (strict mode) — `packages/muyajs/` retained as JS via ambient shim |
+| Desktop shell      | Electron 42                                                                       |
+| Build system       | electron-vite 5                                                                   |
+| Packaging          | electron-builder 26                                                               |
+| Frontend framework | Vue 3                                                                             |
+| State management   | Pinia 3                                                                           |
+| Routing            | Vue Router 4                                                                      |
+| UI library         | Element Plus                                                                      |
+| Unit tests         | Vitest 4                                                                          |
+| E2E tests          | Playwright                                                                        |
+| Package manager    | pnpm >=10 workspace (`packageManager: pnpm@10.33.4`)                              |
+| Repo layout        | pnpm monorepo — see Directory Structure                                           |
+| Node.js minimum    | >=20.19.0 (PR CI: Node 22.21.1 · release CI: Node 24.14.1)                        |
 
 ## Directory Structure
 
@@ -39,7 +43,7 @@ root holds only shared tooling and CI-facing scripts.
 <repo-root>/
   package.json              Workspace orchestrator — every CI-facing script
                             proxies to packages/desktop via `pnpm --filter
-                            marktext ...`. CI invocations are unchanged.
+                            leafbook ...`. CI invocations are unchanged.
   pnpm-workspace.yaml       `packages: ['packages/*']` plus allowBuilds.
   pnpm-lock.yaml            Single lockfile, shared across all packages.
   eslint.config.js          Root ESLint v9 flat config (covers desktop +
@@ -55,7 +59,7 @@ root holds only shared tooling and CI-facing scripts.
                             `directories.output: ../../dist` so CI artifact
                             globs `dist/*` still apply).
   packages/
-    desktop/                The Electron app (name: "marktext").
+    desktop/                The Electron app (name: "leafbook").
       package.json          Holds all Electron / Vue / build-time deps and
                             the dev/build/test/typecheck scripts. Depends on
                             @marktext/muyajs via workspace:*.
@@ -77,7 +81,9 @@ root holds only shared tooling and CI-facing scripts.
         common/             Pure Node.js utilities usable from main, preload,
                             and renderer.
         main/               Electron main process (IO, native dialogs, window
-                            management, auto-updater).
+                            management; the update-check command is a disabled
+                            runtime stub (there is no `electron-updater`
+                            dependency).
         preload/            Electron preload scripts. The renderer runs
                             sandboxed (contextIsolation: true,
                             nodeIntegration: false, sandbox: true since
@@ -130,11 +136,15 @@ root holds only shared tooling and CI-facing scripts.
                             wired in playwright.config.ts but deferred
                             until BACKLOG Phase 3 lands engine-independent
                             specs.
-    website/                marktext-website (Vite + React 18). Standalone
-                            toolchain; depends on @muyajs/core from npm,
-                            not on the local muyajs package. Not part of
-                            desktop CI today.
-      src/ / public/ / build/ / vite.config.ts / tsconfig.json
+    website/                leafbook-docs-validation (Next.js 15 + React 19).
+                            Quarantined inherited documentation validation
+                            package; it is not a LeafBook product website and
+                            its build output must never be deployed.
+      content/docs/         Markdown documentation sources.
+      scripts/              Documentation-index generator.
+      src/app/              Next.js App Router pages and styles.
+      public/               Static files and generated docs-index.json.
+      .next/                Generated development and build output.
 ```
 
 The root has no `src/`, `test/`, `static/`, or `build/` of its own anymore — they all live in `packages/desktop/`.
@@ -142,7 +152,7 @@ The root has no `src/`, `test/`, `static/`, or `build/` of its own anymore — t
 ## Development Workflow
 
 All commands run from the repo root. The root `package.json` proxies every
-desktop-specific script to `packages/desktop` via `pnpm --filter marktext`,
+desktop-specific script to `packages/desktop` via `pnpm --filter leafbook`,
 so the names and behavior are unchanged from the pre-monorepo layout.
 
 ```bash
@@ -172,9 +182,9 @@ pnpm run minify-locales
 pnpm run perf:inspect       # attach when ready
 pnpm run perf:inspect-brk   # break on first line
 
-# Website (not yet wired into CI)
-pnpm --filter marktext-website dev      # Vite dev server
-pnpm --filter marktext-website build    # static build → packages/website/build/
+# Inherited docs validation (no start/deploy target; never publish .next/)
+pnpm --filter leafbook-docs-validation dev    # short-lived local inspection
+pnpm --filter leafbook-docs-validation build  # validation build only
 ```
 
 If you need to invoke a script directly inside a package, use
@@ -234,7 +244,8 @@ alias / `@marktext/muyajs` workspace dep.
 ```
 main process  (packages/desktop/src/main/)
   ├── Full Node.js + Electron API access
-  ├── IO, file system, native dialogs, auto-updater, spell checker
+  ├── IO, file system, native dialogs, spell checker
+  ├── Runtime update checks are disabled; electron-updater is not installed
   ├── One instance per application launch
   └── Controls editor windows via IPC
 
@@ -267,7 +278,10 @@ See `packages/website/content/docs/dev/IPC.md` for conventions and examples.
 
 ## Further Reading
 
-`packages/website/content/docs/dev/` contains the deeper developer documentation referenced by this guide. Same files are published as the developer docs section on https://marktext.me/docs/dev/overview:
+`packages/website/content/docs/dev/` contains inherited upstream developer
+documentation referenced by this guide. The checked-in files are authoritative
+for this fork; `https://marktext.me/docs/dev/overview` is the upstream MarkText
+publication and is not a LeafBook-owned website:
 
 - `ARCHITECTURE.md` — process/module layering beyond the summary above
 - `BUILD.md` — full platform build prerequisites (including the Arch Linux deps added recently)

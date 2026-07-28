@@ -1,0 +1,14 @@
+LeafBook
+========
+
+LeafBook is derived from MarkText:
+
+  https://github.com/marktext/marktext
+
+MarkText is Copyright (c) 2018-present MarkText Contributors and is licensed
+under the MIT License. The original license text is preserved in LICENSE.
+
+LeafBook is an independent derivative project and is not affiliated with or
+endorsed by the MarkText project. Internal MarkText and Muya identifiers are
+intentionally retained where changing them would add merge risk without
+affecting LeafBook's public identity.
