@@ -16,6 +16,7 @@ import type { BookNavigationNode } from 'common/book/model'
 import type {
   BookChapterDto,
   BookLinkNavigationDto,
+  BookReadingProgressDto,
   BookReaderNodeDto,
   BookReaderResult,
   BookshelfEntryDto,
@@ -26,12 +27,31 @@ const MAX_BOOKS = 50
 const MAX_SESSIONS = 20
 const MAX_ID_LENGTH = 128
 const MAX_HREF_LENGTH = 8_192
+const MAX_READING_POSITIONS = 500
+const MAX_STABLE_KEY_LENGTH = 16_384
+const MAX_CHAPTER_TITLE_LENGTH = 512
+const READING_PROGRESS_EPSILON = 0.001
+
+interface PersistedChapterPosition {
+  targetKey: string
+  ratio: number
+  updatedAt: string
+}
+
+interface PersistedReadingState {
+  lastTargetKey: string
+  lastChapterTitle: string
+  overallProgress: number
+  updatedAt: string
+  positions: PersistedChapterPosition[]
+}
 
 interface PersistedLibrary {
   libraryId: string
   rootPath: string
   title: string
   lastOpenedAt: string
+  reading?: PersistedReadingState
 }
 
 interface BookshelfSchema {
@@ -39,8 +59,14 @@ interface BookshelfSchema {
 }
 
 type SessionTarget =
-  | { kind: 'chapter'; path: string; fragment: string | null; title: string }
-  | { kind: 'external'; url: string; title: string }
+  | {
+      kind: 'chapter'
+      path: string
+      fragment: string | null
+      title: string
+      stableKey: string
+    }
+  | { kind: 'external'; url: string; title: string; stableKey: string }
 
 interface BookSession {
   libraryId: string
@@ -51,6 +77,7 @@ interface BookSession {
   targets: Map<string, SessionTarget>
   chapterNodeByPath: Map<string, string>
   opaqueNodeIds: Map<string, string>
+  readableNodeIds: string[]
 }
 
 interface RootIdentity {
@@ -85,6 +112,72 @@ const validOpaqueId = (value: unknown): value is string =>
   value.length <= MAX_ID_LENGTH &&
   /^[a-zA-Z0-9-]+$/.test(value)
 
+const validTimestamp = (value: unknown): value is string =>
+  typeof value === 'string' && value.length <= 64 && !Number.isNaN(Date.parse(value))
+
+const validProgress = (value: unknown): value is number =>
+  typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 1
+
+const validStableKey = (value: unknown): value is string =>
+  typeof value === 'string' &&
+  value.length > 0 &&
+  value.length <= MAX_STABLE_KEY_LENGTH &&
+  !value.includes('\0')
+
+const normalizeChapterTitle = (value: string): string => {
+  const normalized = value.normalize('NFC').trim()
+  if (normalized.length <= MAX_CHAPTER_TITLE_LENGTH) return normalized || 'Untitled chapter'
+  let truncated = normalized.slice(0, MAX_CHAPTER_TITLE_LENGTH)
+  const finalCodeUnit = truncated.charCodeAt(truncated.length - 1)
+  if (finalCodeUnit >= 0xd800 && finalCodeUnit <= 0xdbff) truncated = truncated.slice(0, -1)
+  return truncated || 'Untitled chapter'
+}
+
+const normalizeReadingState = (value: unknown): PersistedReadingState | undefined => {
+  if (!value || typeof value !== 'object') return undefined
+  const item = value as Partial<PersistedReadingState>
+  if (
+    !validStableKey(item.lastTargetKey) ||
+    typeof item.lastChapterTitle !== 'string' ||
+    !item.lastChapterTitle ||
+    item.lastChapterTitle.length > 512 ||
+    !validProgress(item.overallProgress) ||
+    !validTimestamp(item.updatedAt)
+  ) {
+    return undefined
+  }
+  const positions: PersistedChapterPosition[] = []
+  const seen = new Set<string>()
+  if (Array.isArray(item.positions)) {
+    for (const candidate of item.positions.slice(0, MAX_READING_POSITIONS * 2)) {
+      if (!candidate || typeof candidate !== 'object') continue
+      const position = candidate as Partial<PersistedChapterPosition>
+      if (
+        !validStableKey(position.targetKey) ||
+        !validProgress(position.ratio) ||
+        !validTimestamp(position.updatedAt) ||
+        seen.has(position.targetKey)
+      ) {
+        continue
+      }
+      seen.add(position.targetKey)
+      positions.push({
+        targetKey: position.targetKey,
+        ratio: position.ratio,
+        updatedAt: position.updatedAt
+      })
+      if (positions.length >= MAX_READING_POSITIONS) break
+    }
+  }
+  return {
+    lastTargetKey: item.lastTargetKey,
+    lastChapterTitle: item.lastChapterTitle,
+    overallProgress: item.overallProgress,
+    updatedAt: item.updatedAt,
+    positions
+  }
+}
+
 const validPersistedLibrary = (value: unknown): value is PersistedLibrary => {
   if (!value || typeof value !== 'object') return false
   const item = value as Partial<PersistedLibrary>
@@ -97,8 +190,7 @@ const validPersistedLibrary = (value: unknown): value is PersistedLibrary => {
     typeof item.title === 'string' &&
     item.title.length > 0 &&
     item.title.length <= 512 &&
-    typeof item.lastOpenedAt === 'string' &&
-    !Number.isNaN(Date.parse(item.lastOpenedAt))
+    validTimestamp(item.lastOpenedAt)
   )
 }
 
@@ -213,6 +305,16 @@ export class BookSessionManager {
     const seenRoots = new Set<string>()
     return raw
       .filter(validPersistedLibrary)
+      .map((item) => {
+        const reading = normalizeReadingState(item.reading)
+        return {
+          libraryId: item.libraryId,
+          rootPath: item.rootPath,
+          title: item.title,
+          lastOpenedAt: item.lastOpenedAt,
+          ...(reading ? { reading } : {})
+        }
+      })
       .filter((item) => {
         const rootKey =
           process.platform === 'win32' || process.platform === 'darwin'
@@ -257,7 +359,8 @@ export class BookSessionManager {
 
   private async validateSessionRoot(
     sessionId: string,
-    session: BookSession
+    session: BookSession,
+    invalidate: boolean = true
   ): Promise<'valid' | 'invalid' | 'revoked'> {
     const current = await this.identifyRoot(session.rootPath)
     if (this.ownedSession(sessionId, session.ownerId) !== session) return 'revoked'
@@ -267,7 +370,7 @@ export class BookSessionManager {
       current.dev === session.rootIdentity.dev &&
       current.ino === session.rootIdentity.ino
     if (!valid) {
-      this.sessions.delete(sessionId)
+      if (invalidate) this.sessions.delete(sessionId)
       return 'invalid'
     }
     return 'valid'
@@ -307,6 +410,13 @@ export class BookSessionManager {
           title: library.title,
           lastOpenedAt: library.lastOpenedAt,
           available,
+          readingProgress: library.reading?.overallProgress ?? 0,
+          ...(library.reading
+            ? {
+                lastChapterTitle: library.reading.lastChapterTitle,
+                readingUpdatedAt: library.reading.updatedAt
+              }
+            : {}),
           ...(available
             ? {}
             : {
@@ -412,7 +522,8 @@ export class BookSessionManager {
         libraryId,
         rootPath,
         title: result.book.metadata.title,
-        lastOpenedAt: new Date().toISOString()
+        lastOpenedAt: new Date().toISOString(),
+        ...(prior?.reading ? { reading: prior.reading } : {})
       }
       this.writeLibraries([persisted, ...libraries.filter((item) => item.libraryId !== libraryId)])
       return {
@@ -454,7 +565,8 @@ export class BookSessionManager {
         kind: 'chapter',
         path: landingPath,
         fragment: null,
-        title
+        title,
+        stableKey: stableId
       }
       const nodeId = allocateNodeId(stableId)
       targets.set(nodeId, target)
@@ -463,18 +575,20 @@ export class BookSessionManager {
     }
     const mapNode = (node: BookNavigationNode): BookReaderNodeDto => {
       const children = node.children.map(mapNode)
+      const stableKey = `navigation:${node.id}`
       const target: SessionTarget | null =
         node.type === 'chapter'
           ? {
               kind: 'chapter',
               path: node.path,
               fragment: node.fragment,
-              title: node.title
+              title: node.title,
+              stableKey
             }
           : node.type === 'external'
-            ? { kind: 'external', url: node.url, title: node.title }
+            ? { kind: 'external', url: node.url, title: node.title, stableKey }
             : null
-      const nodeId = allocateNodeId(`navigation:${node.id}`)
+      const nodeId = allocateNodeId(stableKey)
       if (node.type === 'chapter') {
         targets.set(nodeId, target as Extract<SessionTarget, { kind: 'chapter' }>)
         if (!chapterNodeByPath.has(node.path)) chapterNodeByPath.set(node.path, nodeId)
@@ -505,6 +619,24 @@ export class BookSessionManager {
     const entryNodeId = result.book.navigation.entryPath
       ? (chapterNodeByPath.get(result.book.navigation.entryPath) ?? null)
       : (landingNodeId ?? null)
+    const readableNodeIds: string[] = []
+    const appendReadable = (node: BookReaderNodeDto): void => {
+      if (node.type === 'chapter') readableNodeIds.push(node.nodeId)
+      if (node.type === 'group' && node.landingNodeId) readableNodeIds.push(node.landingNodeId)
+      node.children.forEach(appendReadable)
+    }
+    nodes.forEach(appendReadable)
+    if (landingNodeId && !landingAlreadyInContents) readableNodeIds.unshift(landingNodeId)
+    const reading = this.readLibraries().find((item) => item.libraryId === libraryId)?.reading
+    const savedNodeId = reading ? opaqueNodeIds.get(reading.lastTargetKey) : undefined
+    const savedIndex = savedNodeId ? readableNodeIds.indexOf(savedNodeId) : -1
+    const savedPosition =
+      reading?.positions.find((item) => item.targetKey === reading.lastTargetKey)?.ratio ?? 0
+    const resumeNodeId = savedIndex >= 0 && savedNodeId ? savedNodeId : entryNodeId
+    const readingProgress =
+      savedIndex >= 0 && readableNodeIds.length
+        ? Math.min(1, Math.max(0, (savedIndex + savedPosition) / readableNodeIds.length))
+        : 0
     const dto: BookSessionDto = {
       libraryId,
       sessionId,
@@ -513,6 +645,8 @@ export class BookSessionManager {
       nodes,
       entryNodeId,
       landingNodeId: landingAlreadyInContents ? null : (landingNodeId ?? null),
+      resumeNodeId,
+      readingProgress,
       diagnostics: result.diagnostics
     }
     return {
@@ -523,7 +657,8 @@ export class BookSessionManager {
       dto,
       targets,
       chapterNodeByPath,
-      opaqueNodeIds
+      opaqueNodeIds,
+      readableNodeIds
     }
   }
 
@@ -679,15 +814,120 @@ export class BookSessionManager {
       return error('book-unavailable', 'This book folder changed and the session was invalidated.')
     }
     if (!result) return error('chapter-read-failed', 'LeafBook could not safely read this chapter.')
+    const savedPosition = this.readLibraries()
+      .find((item) => item.libraryId === session.libraryId)
+      ?.reading?.positions.find((item) => item.targetKey === target.stableKey)
     return {
       ok: true,
       value: {
         nodeId,
         title: target.title,
         markdown: result.content,
-        fragment: target.fragment
+        fragment: target.fragment,
+        readingPosition: savedPosition?.ratio ?? 0,
+        hasReadingPosition: Boolean(savedPosition)
       }
     }
+  }
+
+  async saveReadingPosition(
+    sessionId: unknown,
+    nodeId: unknown,
+    chapterProgress: unknown,
+    ownerId: number = 0
+  ): Promise<BookReaderResult<BookReadingProgressDto>> {
+    if (!validOpaqueId(sessionId) || !validOpaqueId(nodeId) || !validProgress(chapterProgress)) {
+      return error('invalid-request', 'Invalid reading position.')
+    }
+    const session = this.ownedSession(sessionId, ownerId)
+    if (!session) return error('session-not-found', 'This book session has expired.')
+    const target = session.targets.get(nodeId)
+    if (!target) return error('node-not-found', 'This chapter is not part of the current book.')
+    if (target.kind !== 'chapter') {
+      return error('node-not-readable', 'This navigation item is not a local chapter.')
+    }
+    const orderIndex = session.readableNodeIds.indexOf(nodeId)
+    if (orderIndex < 0 || !session.readableNodeIds.length) {
+      return error('node-not-readable', 'This chapter is not in the readable book order.')
+    }
+
+    return this.mutateShelf(async () => {
+      if (this.ownedSession(sessionId, ownerId) !== session) {
+        return error('session-not-found', 'This book session has expired.')
+      }
+      const rootState = await this.validateSessionRoot(sessionId, session, false)
+      if (rootState === 'revoked') {
+        return error('session-not-found', 'This book session has expired.')
+      }
+      if (rootState === 'invalid') {
+        return error('book-unavailable', 'This book folder changed and the position was not saved.')
+      }
+      if (this.ownedSession(sessionId, ownerId) !== session) {
+        return error('session-not-found', 'This book session has expired.')
+      }
+      const libraries = this.readLibraries()
+      const library = libraries.find((item) => item.libraryId === session.libraryId)
+      if (!library) {
+        return error('library-not-found', 'The bookshelf entry no longer exists.')
+      }
+      const updatedAt = new Date().toISOString()
+      const overallProgress = Math.min(
+        1,
+        Math.max(0, (orderIndex + chapterProgress) / session.readableNodeIds.length)
+      )
+      const lastChapterTitle = normalizeChapterTitle(target.title)
+      const previousPosition = library.reading?.positions.find(
+        (item) => item.targetKey === target.stableKey
+      )
+      const previousReading = library.reading
+      const unchanged =
+        previousReading?.lastTargetKey === target.stableKey &&
+        previousReading.lastChapterTitle === lastChapterTitle &&
+        previousPosition !== undefined &&
+        Math.abs(previousPosition.ratio - chapterProgress) < READING_PROGRESS_EPSILON &&
+        Math.abs(previousReading.overallProgress - overallProgress) < READING_PROGRESS_EPSILON
+      if (unchanged && previousReading) {
+        session.dto.resumeNodeId = nodeId
+        session.dto.readingProgress = previousReading.overallProgress
+        return {
+          ok: true,
+          value: {
+            chapterProgress: previousPosition.ratio,
+            overallProgress: previousReading.overallProgress,
+            updatedAt: previousReading.updatedAt
+          }
+        }
+      }
+      const positions = [
+        { targetKey: target.stableKey, ratio: chapterProgress, updatedAt },
+        ...(library.reading?.positions ?? []).filter((item) => item.targetKey !== target.stableKey)
+      ].slice(0, MAX_READING_POSITIONS)
+      const reading: PersistedReadingState = {
+        lastTargetKey: target.stableKey,
+        lastChapterTitle,
+        overallProgress,
+        updatedAt,
+        positions
+      }
+      const updatedLibrary: PersistedLibrary = {
+        ...library,
+        lastOpenedAt: updatedAt,
+        reading
+      }
+      this.writeLibraries([
+        updatedLibrary,
+        ...libraries.filter((item) => item.libraryId !== session.libraryId)
+      ])
+      if (this.ownedSession(sessionId, ownerId) !== session) {
+        return error('session-not-found', 'This book session has expired.')
+      }
+      session.dto.resumeNodeId = nodeId
+      session.dto.readingProgress = overallProgress
+      return {
+        ok: true,
+        value: { chapterProgress, overallProgress, updatedAt }
+      }
+    })
   }
 
   async followLink(

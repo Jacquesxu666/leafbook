@@ -235,6 +235,8 @@ const booksAPI = {
   closeSession: (sessionId: string) => invoke('lb::books::close-session', sessionId),
   readChapter: (sessionId: string, nodeId: string) =>
     invoke('lb::books::read-chapter', sessionId, nodeId),
+  saveReadingPosition: (sessionId: string, nodeId: string, chapterProgress: number) =>
+    invoke('lb::books::save-reading-position', sessionId, nodeId, chapterProgress),
   followLink: (sessionId: string, nodeId: string, href: string) =>
     invoke('lb::books::follow-link', sessionId, nodeId, href)
 }

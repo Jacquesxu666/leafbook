@@ -10,6 +10,18 @@ import type {
 } from '@shared/types/bookReader'
 import { adjacentChapter, flattenReadableNodeIds } from '@/book/readerModel'
 
+const SAVE_DEBOUNCE_MS = 2_000
+const SAVE_EPSILON = 0.002
+
+interface PendingReadingPosition {
+  sessionId: string
+  nodeId: string
+  ratio: number
+  origin: 'user' | 'programmatic'
+}
+
+type NavigationIntent = 'explicit' | 'restore'
+
 const unexpectedError = (): BookReaderError => ({
   code: 'invalid-request',
   message: 'LeafBook could not complete this request. Please try again.'
@@ -26,6 +38,23 @@ export const useBooksStore = defineStore('books', () => {
   let generation = 0
   let operation = 0
   let refreshInFlight: Promise<void> | null = null
+  let readingPositionProvider: (() => number | null) | null = null
+  let saveTimer: ReturnType<typeof setTimeout> | null = null
+  let pendingSave: PendingReadingPosition | null = null
+  let inFlightSave: PendingReadingPosition | null = null
+  let saveInFlight: Promise<void> | null = null
+  let lastPersisted: PendingReadingPosition | null = null
+  const restoringReadingPosition = ref(false)
+  let restorationInFlight: Promise<void> | null = null
+  let resolveRestoration: (() => void) | null = null
+  let restorationGeneration = 0
+  const readingPositionReady = computed(
+    () =>
+      mode.value === 'reader' &&
+      !loading.value &&
+      !restoringReadingPosition.value &&
+      Boolean(session.value && chapter.value)
+  )
 
   const start = (): { token: number; operationId: number } => {
     const value = { token: ++generation, operationId: ++operation }
@@ -43,17 +72,247 @@ export const useBooksStore = defineStore('books', () => {
     if (current(token)) error.value = unexpectedError()
   }
 
-  const previousNodeId = computed(() =>
-    session.value ? adjacentChapter(session.value.nodes, chapter.value?.nodeId ?? null, -1) : null
-  )
-  const nextNodeId = computed(() =>
-    session.value ? adjacentChapter(session.value.nodes, chapter.value?.nodeId ?? null, 1) : null
-  )
+  const previousNodeId = computed(() => {
+    const currentSession = session.value
+    if (!currentSession) return null
+    return adjacentChapter(
+      currentSession.nodes,
+      chapter.value?.nodeId ?? null,
+      -1,
+      currentSession.landingNodeId
+    )
+  })
+  const nextNodeId = computed(() => {
+    const currentSession = session.value
+    if (!currentSession) return null
+    return adjacentChapter(
+      currentSession.nodes,
+      chapter.value?.nodeId ?? null,
+      1,
+      currentSession.landingNodeId
+    )
+  })
+
+  const samePosition = (
+    left: PendingReadingPosition | null,
+    right: PendingReadingPosition
+  ): boolean =>
+    left?.sessionId === right.sessionId &&
+    left.nodeId === right.nodeId &&
+    Math.abs(left.ratio - right.ratio) < SAVE_EPSILON
+
+  const clearSaveTimer = (): void => {
+    if (saveTimer) clearTimeout(saveTimer)
+    saveTimer = null
+  }
+
+  const applyLiveProgress = (ratio: number): void => {
+    const currentSession = session.value
+    const currentChapter = chapter.value
+    if (!currentSession || !currentChapter) return
+    const readable = flattenReadableNodeIds(currentSession.nodes, currentSession.landingNodeId)
+    const index = readable.indexOf(currentChapter.nodeId)
+    const overallProgress =
+      index < 0 || !readable.length
+        ? currentSession.readingProgress
+        : (index + ratio) / readable.length
+    session.value = {
+      ...currentSession,
+      resumeNodeId: currentChapter.nodeId,
+      readingProgress: Math.min(1, Math.max(0, overallProgress))
+    }
+    chapter.value = { ...currentChapter, readingPosition: ratio, hasReadingPosition: true }
+  }
+
+  const startPersisting = (): void => {
+    if (saveInFlight || !pendingSave) return
+    const request = pendingSave
+    pendingSave = null
+    inFlightSave = request
+    const work = (async () => {
+      try {
+        const result = await window.electron.books.saveReadingPosition(
+          request.sessionId,
+          request.nodeId,
+          request.ratio
+        )
+        if (!result.ok) return
+        lastPersisted = {
+          sessionId: request.sessionId,
+          nodeId: request.nodeId,
+          ratio: result.value.chapterProgress,
+          origin: request.origin
+        }
+        const latestPending = pendingSave as PendingReadingPosition | null
+        const superseded =
+          latestPending?.sessionId === request.sessionId &&
+          latestPending.nodeId === request.nodeId &&
+          !samePosition(latestPending, request)
+        if (
+          !superseded &&
+          session.value?.sessionId === request.sessionId &&
+          chapter.value?.nodeId === request.nodeId
+        ) {
+          session.value = {
+            ...session.value,
+            resumeNodeId: request.nodeId,
+            readingProgress: result.value.overallProgress
+          }
+          chapter.value = {
+            ...chapter.value,
+            readingPosition: result.value.chapterProgress,
+            hasReadingPosition: true
+          }
+        }
+      } catch {
+        // Reading-position persistence is best-effort and must not interrupt reading.
+      } finally {
+        saveInFlight = null
+        inFlightSave = null
+        if (pendingSave && !saveTimer) startPersisting()
+      }
+    })()
+    saveInFlight = work
+  }
+
+  const queueReadingPosition = (
+    ratio: number,
+    debounce: boolean,
+    origin: PendingReadingPosition['origin'] = 'user'
+  ): void => {
+    const currentSession = session.value
+    const currentChapter = chapter.value
+    if (!currentSession || !currentChapter || !Number.isFinite(ratio) || ratio < 0 || ratio > 1) {
+      return
+    }
+    const request = {
+      sessionId: currentSession.sessionId,
+      nodeId: currentChapter.nodeId,
+      ratio,
+      origin
+    }
+    if (
+      samePosition(pendingSave, request) ||
+      (!pendingSave && samePosition(inFlightSave, request)) ||
+      (!pendingSave && !inFlightSave && samePosition(lastPersisted, request))
+    ) {
+      return
+    }
+    pendingSave = request
+    clearSaveTimer()
+    if (debounce) {
+      saveTimer = setTimeout(() => {
+        saveTimer = null
+        startPersisting()
+      }, SAVE_DEBOUNCE_MS)
+    } else {
+      startPersisting()
+    }
+  }
+
+  const reportReadingPosition = (ratio: number): void => {
+    if (
+      mode.value !== 'reader' ||
+      loading.value ||
+      restoringReadingPosition.value ||
+      !session.value ||
+      !chapter.value ||
+      !Number.isFinite(ratio) ||
+      ratio < 0 ||
+      ratio > 1
+    ) {
+      return
+    }
+    applyLiveProgress(ratio)
+    queueReadingPosition(ratio, true)
+  }
+
+  const beginReadingPositionRestore = (): number => {
+    resolveRestoration?.()
+    const generation = ++restorationGeneration
+    restoringReadingPosition.value = true
+    restorationInFlight = new Promise<void>((resolve) => {
+      resolveRestoration = resolve
+    })
+    if (pendingSave?.origin === 'programmatic') {
+      clearSaveTimer()
+      pendingSave = null
+    }
+    return generation
+  }
+
+  const completeReadingPositionRestore = (
+    generation: number,
+    ratio: number,
+    persist: boolean
+  ): void => {
+    if (generation !== restorationGeneration) return
+    restoringReadingPosition.value = false
+    if (
+      mode.value !== 'reader' ||
+      !session.value ||
+      !chapter.value ||
+      !Number.isFinite(ratio) ||
+      ratio < 0 ||
+      ratio > 1
+    ) {
+      resolveRestoration?.()
+      resolveRestoration = null
+      restorationInFlight = null
+      return
+    }
+    applyLiveProgress(ratio)
+    if (persist) queueReadingPosition(ratio, true, 'programmatic')
+    resolveRestoration?.()
+    resolveRestoration = null
+    restorationInFlight = null
+  }
+
+  const cancelReadingPositionRestore = (generation: number): void => {
+    if (generation !== restorationGeneration) return
+    restoringReadingPosition.value = false
+    resolveRestoration?.()
+    resolveRestoration = null
+    restorationInFlight = null
+  }
+
+  const flushReadingPosition = async (): Promise<void> => {
+    const activeRestoration = restorationInFlight
+    if (activeRestoration) await activeRestoration
+    // A scroll event is the authoritative latest user intent. Only sample the
+    // DOM provider when no reported position is already waiting; this avoids a
+    // late layout/fragment scroll replacing a newer explicit user scroll.
+    if (!pendingSave) {
+      const provided = readingPositionProvider?.()
+      if (provided !== null && provided !== undefined) {
+        if (Number.isFinite(provided) && provided >= 0 && provided <= 1) {
+          applyLiveProgress(provided)
+          queueReadingPosition(provided, false)
+        }
+      }
+    }
+    clearSaveTimer()
+    startPersisting()
+    for (;;) {
+      const activeSave = saveInFlight
+      if (activeSave) await activeSave
+      else if (pendingSave) startPersisting()
+      else break
+    }
+  }
+
+  const registerReadingPositionProvider = (provider: () => number | null): (() => void) => {
+    readingPositionProvider = provider
+    return () => {
+      if (readingPositionProvider === provider) readingPositionProvider = null
+    }
+  }
 
   const readNode = async (
     sessionSnapshot: BookSessionDto,
     nodeId: string,
     token: number,
+    intent: NavigationIntent,
     fragmentOverride?: string | null
   ): Promise<void> => {
     try {
@@ -63,10 +322,20 @@ export const useBooksStore = defineStore('books', () => {
         error.value = result.error
         return
       }
-      chapter.value =
-        fragmentOverride === undefined
-          ? result.value
-          : { ...result.value, fragment: fragmentOverride }
+      const explicitFragment =
+        fragmentOverride === undefined ? result.value.fragment : fragmentOverride
+      if (intent === 'restore' && result.value.hasReadingPosition) {
+        chapter.value = { ...result.value, fragment: null }
+      } else {
+        chapter.value = {
+          ...result.value,
+          fragment: explicitFragment,
+          readingPosition: intent === 'explicit' ? 0 : result.value.readingPosition
+        }
+      }
+      if (intent === 'explicit') {
+        applyLiveProgress(0)
+      }
     } catch {
       setUnexpected(token)
     }
@@ -85,6 +354,7 @@ export const useBooksStore = defineStore('books', () => {
   }
 
   const showBookshelf = async (): Promise<void> => {
+    await flushReadingPosition()
     const { token, operationId } = start()
     const oldSession = session.value
     mode.value = 'bookshelf'
@@ -101,17 +371,32 @@ export const useBooksStore = defineStore('books', () => {
     }
   }
 
-  const enterSession = async (value: BookSessionDto, token: number): Promise<void> => {
+  const enterSession = async (
+    value: BookSessionDto,
+    token: number,
+    oldSession: BookSessionDto | null
+  ): Promise<void> => {
     if (!current(token)) return
+    if (oldSession && oldSession.sessionId !== value.sessionId) {
+      await window.electron.books.closeSession(oldSession.sessionId)
+      if (!current(token)) {
+        await window.electron.books.closeSession(value.sessionId)
+        return
+      }
+    }
     session.value = value
     chapter.value = null
     mode.value = 'reader'
-    if (value.entryNodeId) await readNode(value, value.entryNodeId, token)
+    lastPersisted = null
+    const target = value.resumeNodeId ?? value.entryNodeId
+    if (target) await readNode(value, target, token, 'restore')
   }
 
   const openPicker = async (): Promise<void> => {
+    const oldSession = session.value
     const { token, operationId } = start()
     try {
+      await flushReadingPosition()
       const result = await window.electron.books.openPicker()
       if (!current(token)) {
         if (result.ok) await window.electron.books.closeSession(result.value.sessionId)
@@ -121,7 +406,7 @@ export const useBooksStore = defineStore('books', () => {
         if (result.error.code !== 'cancelled') error.value = result.error
         return
       }
-      await enterSession(result.value, token)
+      await enterSession(result.value, token, oldSession)
     } catch {
       setUnexpected(token)
     } finally {
@@ -130,8 +415,10 @@ export const useBooksStore = defineStore('books', () => {
   }
 
   const openLibrary = async (libraryId: string): Promise<void> => {
+    const oldSession = session.value
     const { token, operationId } = start()
     try {
+      await flushReadingPosition()
       const result = await window.electron.books.openLibrary(libraryId)
       if (!current(token)) {
         if (result.ok) await window.electron.books.closeSession(result.value.sessionId)
@@ -141,7 +428,7 @@ export const useBooksStore = defineStore('books', () => {
         error.value = result.error
         return
       }
-      await enterSession(result.value, token)
+      await enterSession(result.value, token, oldSession)
     } catch {
       setUnexpected(token)
     } finally {
@@ -151,11 +438,12 @@ export const useBooksStore = defineStore('books', () => {
 
   const openNode = async (nodeId: string, fragmentOverride?: string | null): Promise<void> => {
     if (refreshInFlight) await refreshInFlight
+    await flushReadingPosition()
     const sessionSnapshot = session.value
     if (!sessionSnapshot) return
     const { token, operationId } = start()
     try {
-      await readNode(sessionSnapshot, nodeId, token, fragmentOverride)
+      await readNode(sessionSnapshot, nodeId, token, 'explicit', fragmentOverride)
     } finally {
       finish(operationId)
     }
@@ -165,6 +453,7 @@ export const useBooksStore = defineStore('books', () => {
     if (node.type === 'chapter') return openNode(node.nodeId)
     if (node.type === 'group' && node.landingNodeId) return openNode(node.landingNodeId)
     if (node.type !== 'external' || !session.value) return
+    await flushReadingPosition()
     const sessionSnapshot = session.value
     const { token, operationId } = start()
     try {
@@ -182,6 +471,7 @@ export const useBooksStore = defineStore('books', () => {
   }
 
   const followLink = async (href: string): Promise<void> => {
+    await flushReadingPosition()
     const sessionSnapshot = session.value
     const chapterSnapshot = chapter.value
     if (!sessionSnapshot || !chapterSnapshot) return
@@ -198,7 +488,13 @@ export const useBooksStore = defineStore('books', () => {
         return
       }
       if (result.value) {
-        await readNode(sessionSnapshot, result.value.nodeId, token, result.value.fragment)
+        await readNode(
+          sessionSnapshot,
+          result.value.nodeId,
+          token,
+          'explicit',
+          result.value.fragment
+        )
       }
     } catch {
       setUnexpected(token)
@@ -207,7 +503,13 @@ export const useBooksStore = defineStore('books', () => {
     }
   }
 
+  const saveReadingPosition = async (chapterProgress: number): Promise<void> => {
+    reportReadingPosition(chapterProgress)
+    await flushReadingPosition()
+  }
+
   const performRefresh = async (): Promise<void> => {
+    await flushReadingPosition()
     const sessionSnapshot = session.value
     if (!sessionSnapshot) return
     const priorNodeId = chapter.value?.nodeId ?? null
@@ -221,11 +523,14 @@ export const useBooksStore = defineStore('books', () => {
       }
       session.value = result.value
       chapter.value = null
-      const readable = new Set(flattenReadableNodeIds(result.value.nodes))
-      if (result.value.landingNodeId) readable.add(result.value.landingNodeId)
+      const readable = new Set(
+        flattenReadableNodeIds(result.value.nodes, result.value.landingNodeId)
+      )
       const target =
-        priorNodeId && readable.has(priorNodeId) ? priorNodeId : result.value.entryNodeId
-      if (target) await readNode(result.value, target, token)
+        priorNodeId && readable.has(priorNodeId)
+          ? priorNodeId
+          : (result.value.resumeNodeId ?? result.value.entryNodeId)
+      if (target) await readNode(result.value, target, token, 'restore')
     } catch {
       setUnexpected(token)
     } finally {
@@ -234,12 +539,12 @@ export const useBooksStore = defineStore('books', () => {
   }
   const refresh = async (): Promise<void> => {
     if (refreshInFlight) return refreshInFlight
-    const operation = performRefresh()
-    refreshInFlight = operation
+    const refreshOperation = performRefresh()
+    refreshInFlight = refreshOperation
     try {
-      await operation
+      await refreshOperation
     } finally {
-      if (refreshInFlight === operation) refreshInFlight = null
+      if (refreshInFlight === refreshOperation) refreshInFlight = null
     }
   }
 
@@ -273,6 +578,7 @@ export const useBooksStore = defineStore('books', () => {
     if (nextNodeId.value) await openNode(nextNodeId.value)
   }
   const showEditor = async (): Promise<void> => {
+    await flushReadingPosition()
     const { token, operationId } = start()
     const oldSession = session.value
     mode.value = 'editor'
@@ -294,6 +600,7 @@ export const useBooksStore = defineStore('books', () => {
     chapter,
     loading,
     error,
+    readingPositionReady,
     previousNodeId,
     nextNodeId,
     loadBookshelf,
@@ -303,6 +610,13 @@ export const useBooksStore = defineStore('books', () => {
     openNode,
     activateNode,
     followLink,
+    reportReadingPosition,
+    beginReadingPositionRestore,
+    completeReadingPositionRestore,
+    cancelReadingPositionRestore,
+    flushReadingPosition,
+    registerReadingPositionProvider,
+    saveReadingPosition,
     refresh,
     removeLibrary,
     previous,

@@ -34,7 +34,20 @@
           </button>
           <div class="book-card-info">
             <h2>{{ library.title }}</h2>
-            <p v-if="library.available">Last opened {{ formatDate(library.lastOpenedAt) }}</p>
+            <template v-if="library.available">
+              <p>Last opened {{ formatDate(library.lastOpenedAt) }}</p>
+              <div class="reading-progress">
+                <progress
+                  :value="library.readingProgress"
+                  max="1"
+                  :aria-label="`${library.title} reading progress`"
+                />
+                <span>{{ formatProgress(library.readingProgress) }}</span>
+              </div>
+              <p v-if="library.lastChapterTitle" class="last-chapter">
+                Continue from {{ library.lastChapterTitle }}
+              </p>
+            </template>
             <p v-else class="unavailable">
               {{ library.error?.message }}
             </p>
@@ -61,8 +74,18 @@
 
     <div v-else class="reader">
       <header class="reader-header">
-        <button class="secondary" @click="books.showBookshelf">← Bookshelf</button>
-        <strong>{{ books.session?.title }}</strong>
+        <button class="secondary" @click="leaveReader">← Bookshelf</button>
+        <div class="reader-title">
+          <strong>{{ books.session?.title }}</strong>
+          <div class="reading-progress">
+            <progress
+              :value="books.session?.readingProgress ?? 0"
+              max="1"
+              aria-label="Book reading progress"
+            />
+            <span>{{ formatProgress(books.session?.readingProgress ?? 0) }}</span>
+          </div>
+        </div>
         <div class="reader-actions">
           <button
             ref="contentsButton"
@@ -130,7 +153,14 @@
           </details>
         </nav>
 
-        <main ref="contentElement" class="book-content" tabindex="-1">
+        <main
+          ref="contentElement"
+          class="book-content"
+          tabindex="-1"
+          :aria-busy="!books.readingPositionReady"
+          :data-reading-ready="books.readingPositionReady ? 'true' : 'false'"
+          @scroll.passive="handleReaderScroll"
+        >
           <p v-if="books.loading" class="state-message" role="status">Loading chapter…</p>
           <div v-else-if="books.chapter" class="chapter-wrap">
             <!-- Sanitized by renderBookMarkdown immediately before assignment. -->
@@ -143,10 +173,10 @@
             />
             <!-- eslint-enable vue/no-v-html -->
             <footer class="chapter-navigation">
-              <button class="secondary" :disabled="!books.previousNodeId" @click="books.previous">
+              <button class="secondary" :disabled="!books.previousNodeId" @click="navigatePrevious">
                 ← Previous
               </button>
-              <button class="secondary" :disabled="!books.nextNodeId" @click="books.next">
+              <button class="secondary" :disabled="!books.nextNodeId" @click="navigateNext">
                 Next →
               </button>
             </footer>
@@ -184,6 +214,7 @@ import { nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import type { BookReaderNodeDto } from '@shared/types/bookReader'
 import { useBooksStore } from '@/store/books'
 import { renderBookMarkdown, type RenderedBookChapter } from '@/book/renderMarkdown'
+import { restoreReadingPosition, waitForPaint } from '@/book/restoreReadingPosition'
 import BookTreeNode from './BookTreeNode.vue'
 
 const books = useBooksStore()
@@ -193,39 +224,126 @@ const contentElement = ref<HTMLElement | null>(null)
 const contentsButton = ref<HTMLButtonElement | null>(null)
 const rendered = reactive<RenderedBookChapter>({ html: '', outline: [] })
 const formatDate = (value: string): string => new Date(value).toLocaleDateString()
+const formatProgress = (value: number): string => `${Math.round(value * 100)}%`
+let restoreGeneration = 0
+let restoringPosition = false
+let unregisterReadingPositionProvider: (() => void) | null = null
+
+const currentReadingRatio = (): number => {
+  const element = contentElement.value
+  if (!element) return 0
+  const scrollable = Math.max(0, element.scrollHeight - element.clientHeight)
+  return scrollable > 0 ? Math.min(1, Math.max(0, element.scrollTop / scrollable)) : 0
+}
+const handleReaderScroll = (): void => {
+  if (
+    books.mode !== 'reader' ||
+    books.loading ||
+    !books.session ||
+    !books.chapter ||
+    restoringPosition
+  ) {
+    return
+  }
+  books.reportReadingPosition(currentReadingRatio())
+}
+const fragmentKey = (value: string): string =>
+  value
+    .normalize('NFKC')
+    .trim()
+    .toLocaleLowerCase()
+    .replace(/[^\p{Letter}\p{Number}]+/gu, '-')
+    .replace(/^-+|-+$/g, '')
 
 watch(
-  () => books.chapter,
-  async (chapter, _previous, onCleanup) => {
+  [
+    () => books.session?.sessionId,
+    () => books.chapter?.nodeId,
+    () => books.chapter?.markdown,
+    () => books.chapter?.fragment
+  ],
+  async (_identity, _previous, onCleanup) => {
+    const chapter = books.chapter
+    const generation = ++restoreGeneration
+    const storeGeneration = books.beginReadingPositionRestore()
+    const paintWaitController = new AbortController()
+    restoringPosition = true
     let active = true
     const sessionId = books.session?.sessionId
     const nodeId = chapter?.nodeId
     onCleanup(() => {
       active = false
+      paintWaitController.abort()
+      if (generation === restoreGeneration) {
+        restoringPosition = false
+      }
+      books.cancelReadingPositionRestore(storeGeneration)
     })
     if (!chapter) {
       rendered.html = ''
       rendered.outline = []
+      if (generation === restoreGeneration) {
+        restoringPosition = false
+      }
+      books.cancelReadingPositionRestore(storeGeneration)
       return
     }
-    const result = await renderBookMarkdown(chapter.markdown)
-    if (!active || books.session?.sessionId !== sessionId || books.chapter?.nodeId !== nodeId) {
-      return
-    }
-    rendered.html = result.html
-    rendered.outline = result.outline
-    await nextTick()
-    contentElement.value?.scrollTo({ top: 0 })
-    if (chapter.fragment) {
-      const decoded = chapter.fragment.toLocaleLowerCase()
-      const heading = rendered.outline.find(
-        (item) => item.id === chapter.fragment || item.text.toLocaleLowerCase() === decoded
-      )
-      if (heading) scrollToHeading(heading.id)
-    }
-    contentElement.value?.focus({ preventScroll: true })
+    await restoreReadingPosition({
+      render: () => renderBookMarkdown(chapter.markdown),
+      isCurrent: () =>
+        active &&
+        generation === restoreGeneration &&
+        books.session?.sessionId === sessionId &&
+        books.chapter?.nodeId === nodeId,
+      mount: (result) => {
+        rendered.html = result.html
+        rendered.outline = result.outline
+      },
+      waitForMount: nextTick,
+      waitForPaint: () => waitForPaint(paintWaitController.signal),
+      position: () => {
+        if (chapter.fragment) {
+          const decoded = fragmentKey(chapter.fragment)
+          const heading = rendered.outline.find(
+            (item) =>
+              item.id === chapter.fragment ||
+              fragmentKey(item.id) === decoded ||
+              fragmentKey(item.text) === decoded
+          )
+          if (heading) scrollToHeading(heading.id, 'auto')
+          else contentElement.value?.scrollTo({ top: 0 })
+        } else {
+          const element = contentElement.value
+          if (element) {
+            const scrollable = Math.max(0, element.scrollHeight - element.clientHeight)
+            element.scrollTo({ top: scrollable * chapter.readingPosition })
+          }
+        }
+      },
+      sample: currentReadingRatio,
+      complete: (ratio) => {
+        const activeElement = document.activeElement
+        if (!activeElement || activeElement === document.body) {
+          contentElement.value?.focus({ preventScroll: true })
+        }
+        books.completeReadingPositionRestore(storeGeneration, ratio, Boolean(chapter.fragment))
+        restoringPosition = false
+      },
+      fail: () => {
+        rendered.html = ''
+        rendered.outline = []
+        books.error = {
+          code: 'chapter-read-failed',
+          message: 'LeafBook could not safely render this chapter.'
+        }
+      },
+      release: () => {
+        books.cancelReadingPositionRestore(storeGeneration)
+        if (generation === restoreGeneration) restoringPosition = false
+      }
+    })
   },
-  { immediate: true }
+  { immediate: true, flush: 'sync' }
 )
 const handleContentClick = async (event: MouseEvent): Promise<void> => {
   const anchor = (event.target as Element | null)?.closest<HTMLAnchorElement>('a[data-book-href]')
@@ -246,13 +364,21 @@ const activateNavigationNode = async (node: BookReaderNodeDto): Promise<void> =>
   await books.activateNode(node)
   if (window.matchMedia('(max-width: 700px)').matches) navCollapsed.value = true
 }
-const scrollToHeading = (id: string): void => {
+const scrollToHeading = (id: string, behavior: 'auto' | 'smooth' = 'smooth'): void => {
   const escaped =
     typeof CSS !== 'undefined' && CSS.escape ? CSS.escape(id) : id.replace(/"/g, '\\"')
-  contentElement.value?.querySelector<HTMLElement>(`#${escaped}`)?.scrollIntoView({
-    behavior: 'smooth',
-    block: 'start'
-  })
+  const container = contentElement.value
+  const target = container?.querySelector<HTMLElement>(`#${escaped}`)
+  if (!container || !target) return
+  if (behavior === 'auto') {
+    const top =
+      container.scrollTop +
+      target.getBoundingClientRect().top -
+      container.getBoundingClientRect().top
+    container.scrollTo({ top })
+  } else {
+    target.scrollIntoView({ behavior, block: 'start' })
+  }
 }
 const keyboardNavigation = async (event: KeyboardEvent): Promise<void> => {
   if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) {
@@ -275,14 +401,38 @@ const keyboardNavigation = async (event: KeyboardEvent): Promise<void> => {
   }
   if (event.key === 'ArrowLeft' && books.previousNodeId) {
     event.preventDefault()
-    await books.previous()
+    await navigatePrevious()
   } else if (event.key === 'ArrowRight' && books.nextNodeId) {
     event.preventDefault()
-    await books.next()
+    await navigateNext()
   }
 }
-onMounted(() => window.addEventListener('keydown', keyboardNavigation))
-onBeforeUnmount(() => window.removeEventListener('keydown', keyboardNavigation))
+const navigatePrevious = async (): Promise<void> => {
+  await books.previous()
+}
+const navigateNext = async (): Promise<void> => {
+  await books.next()
+}
+const leaveReader = async (): Promise<void> => {
+  await books.showBookshelf()
+}
+onMounted(() => {
+  unregisterReadingPositionProvider = books.registerReadingPositionProvider(() =>
+    restoringPosition ||
+    books.loading ||
+    books.mode !== 'reader' ||
+    !books.session ||
+    !books.chapter
+      ? null
+      : currentReadingRatio()
+  )
+  window.addEventListener('keydown', keyboardNavigation)
+})
+onBeforeUnmount(() => {
+  books.flushReadingPosition().catch(() => undefined)
+  unregisterReadingPositionProvider?.()
+  window.removeEventListener('keydown', keyboardNavigation)
+})
 </script>
 
 <style scoped>
@@ -389,6 +539,28 @@ button:disabled {
   min-height: 34px;
   opacity: 0.7;
 }
+.reading-progress {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--editorColor);
+  font-size: 12px;
+}
+.reading-progress progress {
+  width: min(150px, 28vw);
+  height: 7px;
+  accent-color: var(--themeColor);
+}
+.book-card .reading-progress {
+  margin-top: 7px;
+}
+.book-card-info .last-chapter {
+  min-height: 0;
+  margin-top: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .unavailable,
 .error-banner {
   color: #d05656;
@@ -420,6 +592,17 @@ button:disabled {
 }
 .reader-header button {
   -webkit-app-region: no-drag;
+}
+.reader-title {
+  display: grid;
+  min-width: 160px;
+  max-width: 420px;
+  gap: 4px;
+}
+.reader-title strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .reader-error {
   position: absolute;
@@ -482,7 +665,6 @@ button:disabled {
 .book-content {
   min-width: 0;
   overflow: auto;
-  scroll-behavior: smooth;
 }
 .chapter-wrap {
   max-width: 850px;

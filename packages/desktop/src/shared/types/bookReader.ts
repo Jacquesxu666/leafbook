@@ -24,7 +24,16 @@ export interface BookshelfEntryDto {
   title: string
   lastOpenedAt: string
   available: boolean
+  readingProgress: number
+  lastChapterTitle?: string
+  readingUpdatedAt?: string
   error?: BookReaderError
+}
+
+export interface BookReadingProgressDto {
+  chapterProgress: number
+  overallProgress: number
+  updatedAt: string
 }
 
 export interface BookReaderNodeDto {
@@ -43,6 +52,8 @@ export interface BookSessionDto {
   nodes: BookReaderNodeDto[]
   entryNodeId: string | null
   landingNodeId: string | null
+  resumeNodeId: string | null
+  readingProgress: number
   diagnostics: BookDiagnostic[]
 }
 
@@ -51,6 +62,8 @@ export interface BookChapterDto {
   title: string
   markdown: string
   fragment: string | null
+  readingPosition: number
+  hasReadingPosition: boolean
 }
 
 export interface BookLinkNavigationDto {

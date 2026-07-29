@@ -35,6 +35,7 @@ import type { MenuTemplate, MenuPopupPosition } from './menu'
 import type {
   BookChapterDto,
   BookLinkNavigationDto,
+  BookReadingProgressDto,
   BookReaderResult,
   BookshelfEntryDto,
   BookSessionDto
@@ -57,6 +58,10 @@ export interface IpcInvokeChannels {
   'lb::books::read-chapter': {
     args: [sessionId: string, nodeId: string]
     ret: BookReaderResult<BookChapterDto>
+  }
+  'lb::books::save-reading-position': {
+    args: [sessionId: string, nodeId: string, chapterProgress: number]
+    ret: BookReaderResult<BookReadingProgressDto>
   }
   'lb::books::follow-link': {
     args: [sessionId: string, nodeId: string, href: string]

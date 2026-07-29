@@ -1,8 +1,9 @@
 # LeafBook reader workspace
 
 Phase 4 adds a local-first bookshelf, book contents tree, and immersive
-read-only chapter view. Full-text search, reading progress, annotations,
-editing, and publishing remain outside this phase.
+read-only chapter view. Phase 5 adds bounded reading progress and per-chapter
+position memory. Full-text search, annotations, editing, local-resource
+transport, and publishing remain outside these phases.
 
 ## Security and process ownership
 
@@ -128,6 +129,85 @@ Anchors retain no native `href`; sanitized destinations are copied to
 `data-book-href`, receive link role/tab stop semantics, and are handled by
 delegated click or Enter/Space before the main process revalidates them.
 
+## Reading progress and position memory
+
+Reading state remains main-process owned and is stored only in LeafBook's
+`bookshelf.json`. A library record may contain:
+
+- the last main-only stable navigation target;
+- at most 500 stable-target chapter positions as finite ratios from 0 through
+  1;
+- the last chapter title, overall progress, and update timestamp.
+
+Legacy bookshelf records without reading state remain valid. Invalid reading
+subrecords are discarded without dropping the library. Opaque renderer node
+IDs are never persisted because they are regenerated for a new session.
+Instead, the main process maps Phase 3 stable navigation identity, including
+duplicate-target occurrence, to each session's opaque node ID. Stable keys and
+chapter paths never enter renderer DTOs.
+
+The renderer can save only an opaque `sessionId`, opaque `nodeId`, and bounded
+ratio through `saveReadingPosition`. The main process resolves the target from
+the owned session, requires a readable node, and rechecks exact session object,
+owner, and pinned root identity after acquiring the bookshelf mutation queue.
+A close, remove, renderer cleanup, or root replacement therefore prevents a
+late save. A failed save against a replaced root does not consume the session,
+so the following refresh still reports `book-unavailable` with the established
+refresh semantics. Chapter titles are normalized and bounded to 512 UTF-16 code
+units before persistence. Concurrent shelf updates retain the Phase 4
+serialized read-modify-write semantics.
+
+Overall progress uses the same flattened readable order as Previous/Next:
+
+```text
+(current chapter index + chapter ratio) / readable chapter count
+```
+
+The result is clamped to 0 through 1. Group landing pages participate in the
+same place as Previous/Next. When the root landing is not already represented
+in the contents tree, it is always the first readable item for main-process
+persistence, renderer progress, Previous/Next, and Book home; it is never
+duplicated when the tree already contains it. A saved stable target that no
+longer exists after refresh falls back to the current book entry with zero
+session progress.
+
+The reader updates visible progress immediately, while disk writes use a
+two-second trailing debounce. Persistence permits at most one request in flight
+and one coalesced latest ratio. Insignificant changes are skipped. A unified
+store flush waits for active position restoration, its timer, in-flight
+request, and latest queued ratio before refresh, chapter or link navigation,
+opening/switching books, or returning to the bookshelf/editor. Those normal
+transitions await completion. Component destruction can only start the same
+flush as a best-effort cleanup because Vue's unmount hook cannot await it; it
+is not a durability guarantee.
+
+Programmatic restoration suppresses its own scroll writes. Navigation intent
+determines restoration after sanitized HTML is mounted:
+
+1. explicit tree/previous/next/link navigation uses its requested fragment,
+   otherwise the top of the chapter; it never prequeues zero for a fragment,
+   and records the actual container ratio only after the anchor is positioned;
+2. reopen, resume, and refresh use the saved chapter ratio when one exists;
+3. without a saved ratio, resume may use the chapter's declared fragment and
+   otherwise starts at the top.
+
+The restoration pipeline is generation-scoped from Markdown rendering through
+DOM mount, layout frames, scroll placement, and ratio sampling. Every current
+generation exits through completion or cancellation, including render/layout
+failures, so a transition flush cannot wait forever. Stale cleanup carries its
+own token and cannot release or complete a newer chapter. Layout waits prefer
+two animation frames, but fall back after 180 ms when a hidden/background
+window stops delivering frames. Either path cancels the remaining frames and
+timer; chapter cleanup or component unmount aborts the wait immediately.
+Environments without `requestAnimationFrame` safely use the same bounded
+fallback. The content surface exposes path-free `data-reading-ready` and
+`aria-busy` UI readiness state.
+
+Bookshelf cards and the reader header expose native, labelled progress
+elements. A reopen resumes the last valid opaque node derived from the
+persisted stable target; each previously visited chapter restores its own
+bounded ratio.
+
 ## User interface
 
 `File -> Open Book…` (`CmdOrCtrl+Alt+O`) and the editor empty state open the
@@ -172,7 +252,17 @@ non-destructive removal, landing de-duplication, external-link policy, inert
 PlantUML/static rendering, SVG and legacy resource-attribute sanitization,
 media placeholders, flattened previous/next ordering, atomic same-session
 refresh, duplicate-target identity, deferred refresh/open ordering, stale
-renderer responses, and unique duplicate-heading outline targets.
+renderer responses, unique duplicate-heading outline targets, legacy reading
+records, bounded position retention, restart recovery, duplicate occurrence
+identity, deleted-target fallback, root/session revocation, and stale renderer
+progress responses. Progress tests also cover delayed persistence,
+single-flight/latest coalescing, flush-before-refresh ordering, explicit versus
+restore navigation intent, replaced-root refresh semantics, and normalized
+bounded chapter titles across restart. Controlled render rejection, layout
+failure, and stale cleanup tests verify that flush is released and subsequent
+persistence remains usable. Fake-timer coverage verifies missing animation
+frames, a stalled second frame, normal two-frame completion, and abort cleanup
+without leaking a frame callback or timeout.
 
 The Electron vertical-slice test replaces only the native dialog result with a
 temporary book, then exercises:
@@ -182,3 +272,11 @@ Open Book menu -> contents -> first chapter -> Next -> bookshelf -> editor
 ```
 
 The temporary source folder is removed by the test, not by LeafBook.
+
+A second vertical slice follows an explicit deep fragment into a long chapter,
+verifies immediate overall progress, scrolls elsewhere, and confirms that
+bookshelf reopen restores the saved ratio rather than replaying the fragment.
+It then scrolls again and immediately refreshes inside the debounce window,
+confirming that refresh waits for and restores the latest ratio. The restored
+ratio remains stable after the full debounce interval, demonstrating that
+loading/restoration scroll events did not enqueue a later zero.

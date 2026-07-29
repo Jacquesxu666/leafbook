@@ -65,6 +65,11 @@ export const registerBookHandlers = (): void => {
       ? getManager().readChapter(sessionId, nodeId, event.sender.id)
       : rejected()
   )
+  ipcMain.handle('lb::books::save-reading-position', (event, sessionId, nodeId, chapterProgress) =>
+    isTrustedEditorSender(event)
+      ? getManager().saveReadingPosition(sessionId, nodeId, chapterProgress, event.sender.id)
+      : rejected()
+  )
   ipcMain.handle('lb::books::follow-link', (event, sessionId, nodeId, href) =>
     isTrustedEditorSender(event)
       ? getManager().followLink(sessionId, nodeId, href, event.sender.id)

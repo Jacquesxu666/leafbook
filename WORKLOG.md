@@ -1044,3 +1044,277 @@
 - 尚未解决的问题：
   - `ownerGenerations` 的 P3 审查项按范围要求暂不修改。
 - Git commit：将随本次提交入库，最终 SHA 见 Git 历史（不推送）。
+
+## 2026-07-28 — Phase 5 阅读进度与章节位置记忆
+
+- 用户目标：在 Phase 4 只读书籍工作区之上实现 main-owned 阅读进度与每章
+  位置记忆，支持书架进度展示、最后章节恢复和跨进程重启恢复；不扩展到搜索、
+  编辑、批注、本地资源桥、同步或发布，不提交、不推送。
+- 实际完成：
+  - 扩展 `bookshelf.json` 的兼容 schema：每本书可保存最后 main-only stable
+    target、最多 500 个章节位置比例、最后章节标题、整体进度和更新时间；旧
+    bookshelf 记录继续可读，非法 reading 子记录会被清理而不会丢弃整本书。
+  - 复用 Phase 3 稳定 navigation identity 与 occurrence，在 main session 内
+    建立 stable key 到随机 opaque node ID 的映射；从不持久化 opaque ID，也不向
+    renderer 暴露绝对/相对路径或 stable key。
+  - 新增 typed invoke-only `saveReadingPosition(sessionId, nodeId, ratio)` IPC 与
+    preload API；main 在书架 mutation queue 内复核 exact session object、owner
+    和 pinned root identity，close/remove/cleanup/root replacement 可阻止迟到
+    写入。
+  - 整体进度严格按 Previous/Next 相同的 readable order 计算：
+    `(chapter index + chapter ratio) / chapter count`；重复目标 occurrence 独立，
+    refresh 后目标删除则安全回退 entry 和 0 session progress。
+  - renderer 使用 400ms throttle 加 trailing flush 保存滚动比例，章节导航、
+    返回书架和卸载前尽力 flush；独立请求序号及 session/node guard 防止迟到
+    结果覆盖新阅读状态。
+  - Markdown 渲染后按 `fragment > saved ratio > top` 恢复位置，并抑制程序化
+    恢复产生的 scroll 回写。移除 `.book-content` 全局 smooth scrolling，避免
+    异步动画在恢复抑制结束后写入中间比例；用户点击 outline 仍显式平滑滚动。
+  - 书架卡片和 reader header 增加带可访问名称的原生 progress 元素、百分比和
+    “Continue from”章节提示。
+  - 更新阅读器契约，补充持久化边界、容量、授权撤销、进度公式与恢复优先级。
+- 修改或创建的文件：
+  - `docs/BOOK_READER.md`
+  - `packages/desktop/src/main/book/sessionManager.ts`
+  - `packages/desktop/src/main/ipc/books.ts`
+  - `packages/desktop/src/preload/index.ts`
+  - `packages/desktop/src/shared/types/bookReader.ts`
+  - `packages/desktop/src/shared/types/ipc.ts`
+  - `packages/desktop/src/types/global.d.ts`
+  - `packages/desktop/src/renderer/src/store/books.ts`
+  - `packages/desktop/src/renderer/src/components/bookWorkspace/index.vue`
+  - `packages/desktop/test/unit/specs/book-reader.spec.ts`
+  - `packages/desktop/test/e2e/book-reader.spec.ts`
+  - `WORKLOG.md`
+- 测试及结果：
+  - Phase 5 定向单元测试：33 项通过。
+  - desktop 全量单元测试：53 个测试文件、840 项通过。
+  - `pnpm --filter leafbook typecheck`：通过。
+  - `pnpm lint`：通过，0 errors；保留 135 条上游既有 warnings。
+  - `pnpm --filter leafbook build`：main、preload、renderer production build
+    通过；仅有既有 CodeMirror 动静态导入提示。
+  - LeafBook reader E2E：3 项通过；新增长书滚动、书架进度、重开恢复章节和
+    近似滚动比例的纵向闭环。
+  - Phase 5 文件定向 ESLint：通过，0 errors、0 warnings。
+  - Phase 5 文件 Prettier check 与 `git diff --check`：通过。
+- 关键决策：
+  - 持久化 stable target 而非 session opaque ID；stable target 只存在 main
+    用户数据和 session 内部，renderer 继续只能操作随机 ID。
+  - 每章保存相对 scroll ratio 而非像素，降低窗口尺寸和内容布局变化导致的漂移。
+  - 滚动写入进入既有书架串行队列；save 先完成再 remove 时最终记录仍被删除，
+    remove/cleanup/close 先完成时 save 返回 session expired。
+  - Refresh 不强制先保存：若书根已被替换，Refresh 自己负责返回
+    `book-unavailable`，避免前置 save 先撤销 session 而改变既有错误语义。
+- 尚未解决的问题：
+  - 全书搜索属于下一 phase；编辑桥、批注、本地图片/附件与图表增强、发布/
+    同步/协作仍不在本阶段范围。
+  - Phase 4 已记录的 `ownerGenerations` P3 留项未在本阶段扩围。
+- Git commit：无（按要求未提交、未推送）。
+
+## 2026-07-28 — Phase 5 审查返修：可靠 flush 与导航意图
+
+- 用户目标：修复 Phase 5 审查发现的刷新竞态、显式导航与恢复冲突、写放大、
+  长标题持久化和跨工作区切换漏 flush；保持 main 授权边界，不进入 Phase 6，
+  不提交、不推送。
+- 实际完成：
+  - 将滚动位置调度统一上移到 Pinia store：可见进度即时更新，持久化使用 2 秒
+    trailing debounce；全局最多一个 in-flight 和一个合并后的 latest ratio，
+    小于阈值的重复位置不再写盘。
+  - `flushReadingPosition` 会等待 timer、in-flight 和 latest 全部完成；刷新、
+    章节/链接导航、打开或切换书籍、返回书架/编辑器和卸载统一经过该边界。
+    已报告的 scroll pending 优先于 DOM provider，避免迟到 fragment/layout
+    滚动覆盖更新的用户滚动。
+  - 明确区分 explicit 与 restore intent：目录、前后章和链接使用显式 fragment
+    或章节顶部；重开、resume、refresh 在确有保存位置时使用 ratio 并忽略章节
+    默认 fragment。章节标题 fragment 还支持按规范化标题 slug 匹配。
+  - explicit 切换章节时立即更新 header overall progress 并安全排队保存；恢复
+    已有位置不会无意义地先覆盖为 0。
+  - main 保存根校验失败不再抢先销毁 session，因此随后 Refresh 仍返回既有
+    `book-unavailable` 语义；持久化标题在写入前 NFC、trim 并安全限长 512，
+    微小重复保存由 main 再次 no-op。
+  - `BookChapterDto` 增加 `hasReadingPosition`，从协议层区分“保存过 0”与“没有
+    保存记录”。
+- 修改或创建的文件：
+  - `docs/BOOK_READER.md`
+  - `packages/desktop/src/main/book/sessionManager.ts`
+  - `packages/desktop/src/shared/types/bookReader.ts`
+  - `packages/desktop/src/renderer/src/store/books.ts`
+  - `packages/desktop/src/renderer/src/components/bookWorkspace/index.vue`
+  - `packages/desktop/test/unit/specs/book-reader.spec.ts`
+  - `packages/desktop/test/e2e/book-reader.spec.ts`
+  - `WORKLOG.md`
+- 测试及结果：
+  - Phase 5 定向单元测试：37 项通过。
+  - desktop 全量单元测试：53 个测试文件、844 项通过。
+  - `pnpm --filter leafbook typecheck`：通过。
+  - `pnpm lint`：通过，0 errors；保留 135 条上游既有 warnings。
+  - `pnpm --filter leafbook build`：main、preload、renderer production build
+    通过；仅有既有 CodeMirror 动静态导入提示。
+  - LeafBook reader E2E：3 项通过，覆盖显式深链接、立即 overall progress、
+    重开按 ratio 而非 fragment 恢复，以及防抖窗口内快速滚动后立即刷新。
+  - Phase 5 文件 Prettier check 与 `git diff --check`：通过。
+- 关键决策：
+  - scroll 事件报告的 pending 是最新用户意图；DOM provider 仅在没有 pending
+    时补采样，避免布局或 fragment 的迟到滚动反向覆盖用户位置。
+  - renderer 负责降低写频率和单航班合并，main 仍独立校验 owner/session/root
+    并对微小重复写做最终 no-op，性能优化不削弱安全边界。
+  - refresh 必须先等待最新位置落盘；保存遇到 root replacement 只拒绝写入，
+    session 的最终失效仍由 refresh/read 的既有路径执行。
+- 尚未解决的问题：
+  - 全书搜索、编辑桥、批注、本地资源、发布/同步/协作仍属于后续阶段。
+  - Phase 4 已记录的 `ownerGenerations` P3 留项未在本次返修扩围。
+- Git commit：无（按要求未提交、未推送）。
+
+## 2026-07-28 — Phase 5 第二轮审查返修：恢复隔离与统一阅读顺序
+
+- 用户目标：解决 loading/programmatic restore 产生的迟到位置写入、root landing
+  与 tree 阅读顺序不一致、显式 fragment 预写 0，以及卸载 flush 保证描述过强；
+  不扩大 Phase 5，不提交、不推送。
+- 实际完成：
+  - renderer scroll handler、位置 provider 和 store report 在 loading、非 reader、
+    无有效 session/chapter 或 programmatic restore 时统一忽略。
+  - chapter watcher 改为只跟踪 session/chapter/content/fragment 身份，live ratio
+    更新不再触发 Markdown 重渲染和再次恢复；恢复使用同步 watcher 建立 promise，
+    正常 transition flush 会等待定位完成。
+  - HTML layout 稳定后才执行 ratio/fragment 定位；自动 fragment 使用容器内同步
+    offset scroll，定位后再采样实际 ratio。显式 fragment 不再预排队 0，立即
+    离开时也会等待并保存 anchor 附近的位置。
+  - scroll pending 标记 user/programmatic 来源；新恢复只清理由程序化定位产生的
+    pending，不丢用户已报告的最新位置。旧 in-flight 结果仍不能回退 live ratio。
+  - main 与 renderer 统一 readable order：独立 root landing 始终位于 tree
+    之前，参与 Book home、Previous/Next、保存授权、overall denominator/index
+    和重启恢复；README 已在 tree 中时不重复。
+  - 文档明确正常 File/recent/open/书架/editor 路径会 await flush，而 Vue
+    `onBeforeUnmount` 只能启动 best-effort cleanup，不能宣称同步耐久。
+- 修改或创建的文件：
+  - `docs/BOOK_READER.md`
+  - `packages/desktop/src/main/book/sessionManager.ts`
+  - `packages/desktop/src/renderer/src/book/readerModel.ts`
+  - `packages/desktop/src/renderer/src/store/books.ts`
+  - `packages/desktop/src/renderer/src/components/bookWorkspace/index.vue`
+  - `packages/desktop/test/unit/specs/book-reader.spec.ts`
+  - `packages/desktop/test/e2e/book-reader.spec.ts`
+  - `WORKLOG.md`
+- 测试及结果：
+  - Phase 5 定向单元测试：40 项通过。
+  - desktop 全量单元测试：53 个测试文件、847 项通过。
+  - `pnpm --filter leafbook typecheck`：通过。
+  - `pnpm lint`：通过，0 errors；保留 135 条上游既有 warnings。
+  - `pnpm --filter leafbook build`：main、preload、renderer production build
+    通过；仅有既有 CodeMirror 动静态导入提示。
+  - LeafBook reader E2E：3 项通过；增强进度用例覆盖 anchor 后不手动滚动立即
+    离开/重开、防抖窗口内快速滚动立即 Refresh，以及恢复后超过 2 秒仍保持
+    最新比例。
+  - Phase 5 文件 Prettier check 与 `git diff --check`：通过。
+- 关键决策：
+  - root landing 的唯一顺序契约是“未在 tree 中时始终为第一项”，main 与
+    renderer 不再分别补丁式处理。
+  - programmatic restore 不是用户 scroll；只有定位完成后的明确采样可形成
+    fragment 保存值，loading/恢复过程中的浏览器 scroll 事件不得进入队列。
+  - component destruction 无法 await Promise；耐久边界由所有正常离开路径的
+    store transition flush 提供，unmount 仅保留 best-effort。
+- 尚未解决的问题：
+  - 全书搜索、编辑桥、批注、本地资源、发布/同步/协作仍属于后续阶段。
+  - Phase 4 已记录的 `ownerGenerations` P3 留项未在本次第二轮返修扩围。
+- Git commit：无（按要求未提交、未推送）。
+
+## 2026-07-28 — Phase 5 第三轮最终返修：generation-safe 恢复
+
+- 用户目标：保证 Markdown render、DOM mount、layout frame、scroll 和 sample
+  任一失败或 stale cleanup 都不会让 flush 永久等待；用产品可观察 ready 状态
+  稳定真实 E2E，并以隔离基线判断 editor-input 波动是否由 Phase 5 引入。
+- 实际完成：
+  - 新增 `restoreReadingPosition` generation-scoped pipeline，以
+    `try/catch/finally` 统一覆盖 render、mount、nextTick、双 layout frame、
+    position 与 sample；当前 generation 的异常必定 fail 并 release。
+  - store restoration API 返回单调 token；complete/cancel 必须携带匹配 token，
+    stale generation 不能完成或释放新的 restoration promise。
+  - 修复 sync watcher 重入根因：原 getter 每次返回新数组，chapter live update
+    会被当成 source 变化而再次恢复；改为 Vue multi-source watch，逐个比较稳定
+    sessionId/nodeId/markdown/fragment 标量。
+  - 渲染失败清空 HTML/outline 并显示稳定的安全错误，不暴露底层异常；content
+    surface 增加 `data-reading-ready` 和 `aria-busy`，真实 E2E 不再用任意 rAF
+    数量猜测恢复是否完成。
+  - 强化 Reader E2E：anchor 定位后立即离开/重开、0.2 保存/重开、0.82 快速
+    scroll 后立即 Refresh、等待超过 2.2 秒、再次书架重开，均验证持久 ratio。
+  - 当前 Phase 5 构建与隔离 `21b1eaa6` 基线分别独立运行 editor-input 两轮：
+    两侧均为第一轮 8/8、第二轮相同的 typing 用例截断失败而其余 7/8 通过；
+    证据表明该输入时序波动为基线 flake，并非 Phase 5 Reader 回归。未修改
+    editor-input 产品路径或测试。
+- 修改或创建的文件：
+  - `docs/BOOK_READER.md`
+  - `packages/desktop/src/renderer/src/book/restoreReadingPosition.ts`
+  - `packages/desktop/src/renderer/src/store/books.ts`
+  - `packages/desktop/src/renderer/src/components/bookWorkspace/index.vue`
+  - `packages/desktop/test/unit/specs/book-reader.spec.ts`
+  - `packages/desktop/test/e2e/book-reader.spec.ts`
+  - `WORKLOG.md`
+- 测试及结果：
+  - Phase 5 定向单元测试：43 项通过；render/paint 受控失败后均验证
+    flush 释放、后续保存成功且可继续导航到下一章节。
+  - Reader E2E 完整 spec 连续独立 3 轮：每轮 3/3，共 9/9 通过；修复后另有
+    完整单轮 3/3 通过。
+  - editor-input 当前 Phase 5：第一轮 8/8；第二轮 7/8，typing 截断。
+  - editor-input 隔离基线 `21b1eaa6`：第一轮 8/8；第二轮 7/8，同一 typing
+    截断；临时 worktree 已移除。
+  - desktop 全量单元测试：53 个文件、850 项全部通过。
+  - desktop typecheck：通过。
+  - 全量 lint：0 error、135 个既有 warning；Phase 5 文件定向 ESLint：
+    0 error、0 warning（仅 Node 报告既有 eslint config module-type 提示）。
+  - desktop build：通过；仅保留既有 CodeMirror 动态/静态 import 提示。
+  - Phase 5 全部变更文件 Prettier check：通过。
+  - `git diff --check`：通过。
+- 关键决策：
+  - 生命周期释放权由 store token 而不是组件布尔值决定；组件 generation 负责
+    DOM 身份，store generation 负责 Promise 所有权，两层均匹配才可 complete。
+  - UI ready 是产品状态，不包含路径、stable key 或其他授权数据，可供辅助技术
+    与 E2E 判断恢复是否真正结束。
+  - 对 editor-input 只做同环境隔离基线对照；两边相同的偶发截断记录为基线
+    flake，不以放宽断言或修改非 Reader 产品代码掩盖。
+- 尚未解决的问题：
+  - editor-input typing 偶发截断属于既有基线 flake，后续应在独立编辑器测试
+    稳定性任务中处理。
+  - 全书搜索、编辑桥、批注、本地资源、发布/同步/协作仍属于后续阶段。
+- Git commit：无（按要求未提交、未推送）。
+
+## 2026-07-28 — Phase 5 最终极小返修：bounded paint wait
+
+- 用户目标：防止隐藏或后台窗口停止派发 `requestAnimationFrame` 时，阅读位置
+  恢复和导航 flush 永久等待；要求双帧成功路径、短超时 fallback、可取消清理
+  和无 rAF 环境均安全。
+- 实际完成：
+  - 新增 180 ms 有界 `waitForPaint`：优先等待双 rAF，超时只继续布局流程，
+    不作为渲染失败。
+  - rAF、timeout 或 AbortSignal 任一路完成时，统一取消剩余 frame、清除 timer
+    和 abort listener；第一帧已执行而第二帧停滞也不会遗留 callback。
+  - chapter watcher 为每个恢复 generation 创建 AbortController，切章、stale
+    cleanup 或组件卸载时立即终止旧 paint wait；旧 token 仍不能释放新恢复。
+  - 无 `requestAnimationFrame` 的 SSR/test 环境自动使用同一有界 timer fallback。
+  - fake timer 测试覆盖无 frame 回调、仅第一帧回调、无 rAF API、正常双帧和
+    abort cleanup；完全停帧后验证 flush、保存与后续章节导航仍可用。
+- 修改或创建的文件：
+  - `docs/BOOK_READER.md`
+  - `packages/desktop/src/renderer/src/book/restoreReadingPosition.ts`
+  - `packages/desktop/src/renderer/src/components/bookWorkspace/index.vue`
+  - `packages/desktop/test/unit/specs/book-reader.spec.ts`
+  - `WORKLOG.md`
+- 测试及结果：
+  - Phase 5 定向单元测试：48 项通过。
+  - desktop 全量单元测试单独重跑：53 个文件、855 项全部通过。
+  - 首次将全量单测与 lint/build 并行时，PDF spec 出现两个 5 秒加载超时及
+    一个连带初始化失败；单独按原命令重跑即全部通过，未修改 PDF 路径。
+  - desktop typecheck：通过。
+  - 全量 lint：0 error、135 个既有 warning。
+  - desktop production build：通过；仅保留既有 CodeMirror 动静态 import
+    提示。
+  - Reader E2E 完整 spec：3/3 通过。
+  - 变更文件 Prettier check 与 `git diff --check`：通过。
+- 关键决策：
+  - timeout 是浏览器调度缺失时的布局进度保证，不进入 `fail` 路径；后续仍执行
+    position、第二次有界 paint wait 和 sample。
+  - AbortSignal 只负责释放浏览器调度资源；恢复结果是否可写入仍由组件
+    generation、session/node identity 与 store token 共同决定。
+- 尚未解决的问题：
+  - editor-input typing 的既有基线 flake 仍留给独立编辑器测试稳定性任务。
+  - 全书搜索、编辑桥、批注、本地资源、发布/同步/协作仍属于后续阶段。
+- Git commit：将随本次提交入库，最终 SHA 见 Git 历史（不推送）。

@@ -15,6 +15,7 @@ import type { SerializedStat } from '@shared/types/files'
 import type {
   BookChapterDto,
   BookLinkNavigationDto,
+  BookReadingProgressDto,
   BookReaderResult,
   BookshelfEntryDto,
   BookSessionDto
@@ -109,6 +110,11 @@ declare global {
       refresh(sessionId: string): Promise<BookReaderResult<BookSessionDto>>
       closeSession(sessionId: string): Promise<BookReaderResult<true>>
       readChapter(sessionId: string, nodeId: string): Promise<BookReaderResult<BookChapterDto>>
+      saveReadingPosition(
+        sessionId: string,
+        nodeId: string,
+        chapterProgress: number
+      ): Promise<BookReaderResult<BookReadingProgressDto>>
       followLink(
         sessionId: string,
         nodeId: string,

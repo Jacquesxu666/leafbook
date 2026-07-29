@@ -12,6 +12,11 @@ import type {
 } from '@shared/types/bookReader'
 import { adjacentChapter, flattenReadableNodeIds } from '@/book/readerModel'
 import { renderBookMarkdown } from '@/book/renderMarkdown'
+import {
+  PAINT_WAIT_TIMEOUT_MS,
+  restoreReadingPosition,
+  waitForPaint
+} from '@/book/restoreReadingPosition'
 import { useBooksStore } from '@/store/books'
 
 const mocks = vi.hoisted(() => ({
@@ -167,6 +172,247 @@ describe('BookSessionManager authorization boundary', () => {
     expect(await second.removeLibrary(opened.value.libraryId)).toEqual({ ok: true, value: true })
     expect(await second.listLibraries()).toEqual([])
     expect((await fs.stat(root)).isDirectory()).toBe(true)
+  })
+
+  it('persists per-chapter reading positions and resumes them across manager restarts', async () => {
+    const root = await makeBook({
+      'SUMMARY.md': '- [First](README.md)\n- [Second](second.md)\n',
+      'README.md': '# First\n\nStart',
+      'second.md': '# Second\n\nContinue'
+    })
+    mocks.selectedPath = root
+    const first = new BookSessionManager('/reading-progress-user-data')
+    const opened = await first.openPicker({ sender: { id: 31 } } as never)
+    expect(opened.ok).toBe(true)
+    if (!opened.ok) return
+    const [firstNode, secondNode] = opened.value.nodes
+    expect(firstNode).toBeDefined()
+    expect(secondNode).toBeDefined()
+    if (!firstNode || !secondNode) return
+
+    expect(
+      await first.saveReadingPosition(opened.value.sessionId, firstNode.nodeId, 0.4, 31)
+    ).toMatchObject({
+      ok: true,
+      value: { chapterProgress: 0.4, overallProgress: 0.2 }
+    })
+    expect(
+      await first.saveReadingPosition(opened.value.sessionId, secondNode.nodeId, 0.5, 31)
+    ).toMatchObject({
+      ok: true,
+      value: { chapterProgress: 0.5, overallProgress: 0.75 }
+    })
+
+    const second = new BookSessionManager('/reading-progress-user-data')
+    const listed = await second.listLibraries()
+    expect(listed).toMatchObject([
+      {
+        libraryId: opened.value.libraryId,
+        readingProgress: 0.75,
+        lastChapterTitle: 'Second'
+      }
+    ])
+    const reopened = await second.openLibrary(opened.value.libraryId, 32)
+    expect(reopened.ok).toBe(true)
+    if (!reopened.ok || !reopened.value.resumeNodeId) return
+    expect(reopened.value.readingProgress).toBe(0.75)
+    const resumed = await second.readChapter(
+      reopened.value.sessionId,
+      reopened.value.resumeNodeId,
+      32
+    )
+    expect(resumed).toMatchObject({
+      ok: true,
+      value: { title: 'Second', readingPosition: 0.5 }
+    })
+
+    const reopenedFirst = reopened.value.nodes[0]
+    expect(reopenedFirst).toBeDefined()
+    if (!reopenedFirst) return
+    expect(
+      await second.readChapter(reopened.value.sessionId, reopenedFirst.nodeId, 32)
+    ).toMatchObject({
+      ok: true,
+      value: { title: 'First', readingPosition: 0.4 }
+    })
+  })
+
+  it('rejects invalid or revoked reading-position writes', async () => {
+    const root = await makeBook({ 'README.md': '# Progress safety' })
+    mocks.selectedPath = root
+    const manager = new BookSessionManager('/reading-progress-safety-user-data')
+    const opened = await manager.openPicker({ sender: { id: 41 } } as never)
+    expect(opened.ok).toBe(true)
+    if (!opened.ok || !opened.value.entryNodeId) return
+
+    for (const value of [Number.NaN, Number.POSITIVE_INFINITY, -0.1, 1.1]) {
+      expect(
+        await manager.saveReadingPosition(
+          opened.value.sessionId,
+          opened.value.entryNodeId,
+          value,
+          41
+        )
+      ).toMatchObject({ ok: false, error: { code: 'invalid-request' } })
+    }
+    expect(
+      await manager.saveReadingPosition(opened.value.sessionId, opened.value.entryNodeId, 0.5, 42)
+    ).toMatchObject({ ok: false, error: { code: 'session-not-found' } })
+    manager.cleanupOwner(41)
+    expect(
+      await manager.saveReadingPosition(opened.value.sessionId, opened.value.entryNodeId, 0.5, 41)
+    ).toMatchObject({ ok: false, error: { code: 'session-not-found' } })
+  })
+
+  it('invalidates reading-position writes when the authorized root is replaced', async () => {
+    const root = await makeBook({ 'README.md': '# Replace progress root' })
+    const movedRoot = `${root}-moved`
+    temporaryDirectories.push(movedRoot)
+    mocks.selectedPath = root
+    const manager = new BookSessionManager('/reading-progress-root-user-data')
+    const opened = await manager.openPicker({ sender: { id: 45 } } as never)
+    expect(opened.ok).toBe(true)
+    if (!opened.ok || !opened.value.entryNodeId) return
+
+    await fs.rename(root, movedRoot)
+    await fs.mkdir(root)
+    await fs.writeFile(path.join(root, 'README.md'), '# Replacement')
+    expect(
+      await manager.saveReadingPosition(opened.value.sessionId, opened.value.entryNodeId, 0.5, 45)
+    ).toMatchObject({ ok: false, error: { code: 'book-unavailable' } })
+    expect(await manager.listLibraries()).toMatchObject([{ readingProgress: 0 }])
+    expect(await manager.refresh(opened.value.sessionId, 45)).toMatchObject({
+      ok: false,
+      error: { code: 'book-unavailable' }
+    })
+  })
+
+  it('normalizes and bounds long chapter titles without losing resume state', async () => {
+    const longTitle = `${'章节'.repeat(300)}😀`
+    const root = await makeBook({
+      'SUMMARY.md': `- [${longTitle}](README.md)\n`,
+      'README.md': '# Long title'
+    })
+    mocks.selectedPath = root
+    const first = new BookSessionManager('/long-progress-title-user-data')
+    const opened = await first.openPicker({ sender: { id: 46 } } as never)
+    expect(opened.ok).toBe(true)
+    if (!opened.ok || !opened.value.entryNodeId) return
+    expect(
+      await first.saveReadingPosition(opened.value.sessionId, opened.value.entryNodeId, 0.4, 46)
+    ).toMatchObject({ ok: true })
+    const listed = await first.listLibraries()
+    expect(listed[0]?.lastChapterTitle?.length).toBeLessThanOrEqual(512)
+    expect(listed[0]?.lastChapterTitle?.endsWith('\ud83d')).toBe(false)
+
+    const second = new BookSessionManager('/long-progress-title-user-data')
+    const reopened = await second.openLibrary(opened.value.libraryId, 47)
+    expect(reopened.ok).toBe(true)
+    if (!reopened.ok || !reopened.value.resumeNodeId) return
+    expect(
+      await second.readChapter(reopened.value.sessionId, reopened.value.resumeNodeId, 47)
+    ).toMatchObject({
+      ok: true,
+      value: { readingPosition: 0.4, hasReadingPosition: true }
+    })
+  })
+
+  it('falls back safely when the saved chapter disappears after refresh', async () => {
+    const root = await makeBook({
+      'SUMMARY.md': '- [First](README.md)\n- [Second](second.md)\n',
+      'README.md': '# First',
+      'second.md': '# Second'
+    })
+    mocks.selectedPath = root
+    const manager = new BookSessionManager('/reading-progress-refresh-user-data')
+    const opened = await manager.openPicker({ sender: { id: 51 } } as never)
+    expect(opened.ok).toBe(true)
+    if (!opened.ok) return
+    const secondNode = opened.value.nodes[1]
+    expect(secondNode).toBeDefined()
+    if (!secondNode) return
+    expect(
+      await manager.saveReadingPosition(opened.value.sessionId, secondNode.nodeId, 0.6, 51)
+    ).toMatchObject({ ok: true })
+
+    await fs.writeFile(path.join(root, 'SUMMARY.md'), '- [First](README.md)\n')
+    await fs.rm(path.join(root, 'second.md'))
+    const refreshed = await manager.refresh(opened.value.sessionId, 51)
+    expect(refreshed.ok).toBe(true)
+    if (!refreshed.ok) return
+    expect(refreshed.value.resumeNodeId).toBe(refreshed.value.entryNodeId)
+    expect(refreshed.value.readingProgress).toBe(0)
+  })
+
+  it('keeps duplicate chapter occurrences distinct when resuming', async () => {
+    const root = await makeBook({
+      'SUMMARY.md': '- [First copy](README.md)\n- [Second copy](README.md)\n',
+      'README.md': '# Duplicate target'
+    })
+    mocks.selectedPath = root
+    const first = new BookSessionManager('/duplicate-progress-user-data')
+    const opened = await first.openPicker({ sender: { id: 61 } } as never)
+    expect(opened.ok).toBe(true)
+    if (!opened.ok) return
+    const [firstCopy, secondCopy] = opened.value.nodes
+    expect(firstCopy).toBeDefined()
+    expect(secondCopy).toBeDefined()
+    if (!firstCopy || !secondCopy) return
+    expect(firstCopy.nodeId).not.toBe(secondCopy.nodeId)
+    expect(
+      await first.saveReadingPosition(opened.value.sessionId, secondCopy.nodeId, 0.25, 61)
+    ).toMatchObject({ ok: true, value: { overallProgress: 0.625 } })
+
+    const second = new BookSessionManager('/duplicate-progress-user-data')
+    const reopened = await second.openLibrary(opened.value.libraryId, 62)
+    expect(reopened.ok).toBe(true)
+    if (!reopened.ok) return
+    expect(reopened.value.resumeNodeId).toBe(reopened.value.nodes[1]?.nodeId)
+    expect(reopened.value.resumeNodeId).not.toBe(reopened.value.nodes[0]?.nodeId)
+  })
+
+  it('bounds and sanitizes persisted chapter positions without dropping a legacy book', async () => {
+    const root = await makeBook({ 'README.md': '# Capacity' })
+    const key = '/capacity-user-data/bookshelf'
+    mocks.stores.set(key, {
+      libraries: [
+        {
+          libraryId: 'capacity-library-id',
+          rootPath: root,
+          title: 'Capacity',
+          lastOpenedAt: new Date(0).toISOString(),
+          reading: {
+            lastTargetKey: 'target-0',
+            lastChapterTitle: 'Chapter',
+            overallProgress: 0.5,
+            updatedAt: new Date(0).toISOString(),
+            positions: [
+              ...Array.from({ length: 600 }, (_, index) => ({
+                targetKey: `target-${index}`,
+                ratio: 0.5,
+                updatedAt: new Date(index).toISOString()
+              })),
+              { targetKey: 'invalid-ratio', ratio: 2, updatedAt: new Date(0).toISOString() }
+            ]
+          }
+        },
+        {
+          libraryId: 'legacy-library-id',
+          rootPath: `${root}-legacy`,
+          title: 'Legacy',
+          lastOpenedAt: new Date(0).toISOString()
+        }
+      ]
+    })
+    const manager = new BookSessionManager('/capacity-user-data')
+    const persisted = mocks.stores.get(key) as {
+      libraries: Array<{ title: string; reading?: { positions: unknown[] } }>
+    }
+    expect(persisted.libraries).toHaveLength(2)
+    expect(persisted.libraries[0]?.reading?.positions).toHaveLength(500)
+    expect(persisted.libraries[1]?.title).toBe('Legacy')
+    expect(persisted.libraries[1]?.reading).toBeUndefined()
+    expect(await manager.listLibraries()).toHaveLength(2)
   })
 
   it('opens only stored safe external nodes and rejects executable chapter links', async () => {
@@ -347,6 +593,50 @@ describe('BookSessionManager authorization boundary', () => {
     expect(opened.value.entryNodeId).toBe(opened.value.nodes[0]?.nodeId)
   })
 
+  it('keeps a separate root landing first in reading order and resumes it across restart', async () => {
+    const root = await makeBook({
+      'SUMMARY.md': '- [Next](next.md)\n',
+      'README.md': '# Book home',
+      'next.md': '# Next'
+    })
+    mocks.selectedPath = root
+    const first = new BookSessionManager('/root-landing-progress-user-data')
+    const opened = await first.openPicker({ sender: { id: 71 } } as never)
+    expect(opened.ok).toBe(true)
+    if (!opened.ok || !opened.value.landingNodeId) return
+    const rootLanding = opened.value.landingNodeId
+    const nextNode = opened.value.nodes[0]?.nodeId
+    expect(nextNode).toBeDefined()
+    if (!nextNode) return
+    expect(
+      await first.saveReadingPosition(opened.value.sessionId, rootLanding, 0.4, 71)
+    ).toMatchObject({
+      ok: true,
+      value: { chapterProgress: 0.4, overallProgress: 0.2 }
+    })
+
+    const second = new BookSessionManager('/root-landing-progress-user-data')
+    const reopened = await second.openLibrary(opened.value.libraryId, 72)
+    expect(reopened.ok).toBe(true)
+    if (!reopened.ok || !reopened.value.resumeNodeId) return
+    expect(reopened.value.resumeNodeId).toBe(reopened.value.landingNodeId)
+    expect(reopened.value.readingProgress).toBe(0.2)
+    expect(
+      await second.readChapter(reopened.value.sessionId, reopened.value.resumeNodeId, 72)
+    ).toMatchObject({
+      ok: true,
+      value: { title: 'Book home', readingPosition: 0.4, hasReadingPosition: true }
+    })
+    expect(
+      await second.saveReadingPosition(
+        reopened.value.sessionId,
+        reopened.value.nodes[0]?.nodeId,
+        0,
+        72
+      )
+    ).toMatchObject({ ok: true, value: { overallProgress: 0.5 } })
+  })
+
   it('preserves an existing chapter node across refresh', async () => {
     const root = await makeBook({
       'SUMMARY.md': '- [Home](README.md)\n- [Next](next.md)\n',
@@ -508,6 +798,9 @@ describe('reader presentation boundary', () => {
     expect(adjacentChapter(nodes, 'one', -1)).toBe('landing')
     expect(adjacentChapter(nodes, 'one', 1)).toBe('two')
     expect(adjacentChapter(nodes, 'two', 1)).toBeNull()
+    expect(flattenReadableNodeIds(nodes, 'root')).toEqual(['root', 'landing', 'one', 'two'])
+    expect(adjacentChapter(nodes, 'landing', -1, 'root')).toBe('root')
+    expect(adjacentChapter(nodes, 'root', 1, 'root')).toBe('landing')
   })
 
   it('sanitizes active content, disables native links and replaces local media', async () => {
@@ -573,6 +866,8 @@ describe('book store async generations', () => {
     nodes: [],
     entryNodeId: null,
     landingNodeId: null,
+    resumeNodeId: null,
+    readingProgress: 0,
     diagnostics: []
   })
   const deferred = <T>(): {
@@ -735,11 +1030,726 @@ describe('book store async generations', () => {
         libraryId: 'late-library-id-01',
         title: 'Late',
         lastOpenedAt: new Date(0).toISOString(),
-        available: true
+        available: true,
+        readingProgress: 0
       }
     ])
     await Promise.all([removing, leaving])
     expect(store.mode).toBe('editor')
     expect(store.libraries).toEqual([])
+  })
+
+  it('saves progress only for the current session and applies the returned overall progress', async () => {
+    setActivePinia(createPinia())
+    const saveReadingPosition = vi.fn().mockResolvedValue({
+      ok: true,
+      value: {
+        chapterProgress: 0.5,
+        overallProgress: 0.75,
+        updatedAt: new Date(0).toISOString()
+      }
+    })
+    Object.defineProperty(window, 'electron', {
+      configurable: true,
+      value: { books: { saveReadingPosition } }
+    })
+    const store = useBooksStore()
+    store.session = {
+      ...sessionDto('stable-session-id', 'Progress'),
+      nodes: [{ nodeId: 'stable-node-id-0001', type: 'chapter', title: 'Chapter', children: [] }]
+    }
+    store.chapter = {
+      nodeId: 'stable-node-id-0001',
+      title: 'Chapter',
+      markdown: '# Chapter',
+      fragment: null,
+      readingPosition: 0,
+      hasReadingPosition: false
+    }
+    store.mode = 'reader'
+
+    await store.saveReadingPosition(0.5)
+    expect(saveReadingPosition).toHaveBeenCalledWith(
+      'stable-session-id',
+      'stable-node-id-0001',
+      0.5
+    )
+    expect(store.session.readingProgress).toBe(0.75)
+
+    const pending = deferred<
+      BookReaderResult<{
+        chapterProgress: number
+        overallProgress: number
+        updatedAt: string
+      }>
+    >()
+    saveReadingPosition.mockImplementationOnce(() => pending.promise)
+    const stale = store.saveReadingPosition(0.8)
+    store.session = sessionDto('replacement-session', 'Replacement')
+    pending.resolve({
+      ok: true,
+      value: {
+        chapterProgress: 0.8,
+        overallProgress: 0.9,
+        updatedAt: new Date(1).toISOString()
+      }
+    })
+    await stale
+    expect(store.session.readingProgress).toBe(0)
+  })
+
+  it('debounces writes and coalesces them to one in-flight request plus the latest position', async () => {
+    vi.useFakeTimers()
+    try {
+      setActivePinia(createPinia())
+      const first = deferred<
+        BookReaderResult<{
+          chapterProgress: number
+          overallProgress: number
+          updatedAt: string
+        }>
+      >()
+      const second = deferred<
+        BookReaderResult<{
+          chapterProgress: number
+          overallProgress: number
+          updatedAt: string
+        }>
+      >()
+      const saveReadingPosition = vi
+        .fn()
+        .mockImplementationOnce(() => first.promise)
+        .mockImplementationOnce(() => second.promise)
+      Object.defineProperty(window, 'electron', {
+        configurable: true,
+        value: {
+          books: {
+            saveReadingPosition
+          }
+        }
+      })
+      const store = useBooksStore()
+      store.mode = 'reader'
+      store.session = {
+        ...sessionDto('stable-session-id', 'Progress'),
+        nodes: [{ nodeId: 'stable-node-id-0001', type: 'chapter', title: 'Chapter', children: [] }]
+      }
+      store.chapter = {
+        nodeId: 'stable-node-id-0001',
+        title: 'Chapter',
+        markdown: '# Chapter',
+        fragment: null,
+        readingPosition: 0,
+        hasReadingPosition: false
+      }
+      store.reportReadingPosition(0.1)
+      store.reportReadingPosition(0.2)
+      store.reportReadingPosition(0.3)
+      expect(saveReadingPosition).not.toHaveBeenCalled()
+      await vi.advanceTimersByTimeAsync(2_000)
+      expect(saveReadingPosition).toHaveBeenCalledTimes(1)
+      expect(saveReadingPosition).toHaveBeenLastCalledWith(
+        'stable-session-id',
+        'stable-node-id-0001',
+        0.3
+      )
+
+      store.reportReadingPosition(0.4)
+      store.reportReadingPosition(0.5)
+      await vi.advanceTimersByTimeAsync(2_000)
+      expect(saveReadingPosition).toHaveBeenCalledTimes(1)
+      const flushing = store.flushReadingPosition()
+      first.resolve({
+        ok: true,
+        value: { chapterProgress: 0.3, overallProgress: 0.3, updatedAt: new Date(0).toISOString() }
+      })
+      await vi.waitFor(() => expect(saveReadingPosition).toHaveBeenCalledTimes(2))
+      expect(store.chapter?.readingPosition).toBe(0.5)
+      expect(saveReadingPosition).toHaveBeenLastCalledWith(
+        'stable-session-id',
+        'stable-node-id-0001',
+        0.5
+      )
+      second.resolve({
+        ok: true,
+        value: { chapterProgress: 0.5, overallProgress: 0.5, updatedAt: new Date(1).toISOString() }
+      })
+      await flushing
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('ignores reading-position reports while loading and does not enqueue a delayed write', async () => {
+    vi.useFakeTimers()
+    try {
+      setActivePinia(createPinia())
+      const listed = deferred<BookshelfEntryDto[]>()
+      const saveReadingPosition = vi.fn()
+      Object.defineProperty(window, 'electron', {
+        configurable: true,
+        value: {
+          books: {
+            list: vi.fn(() => listed.promise),
+            saveReadingPosition
+          }
+        }
+      })
+      const store = useBooksStore()
+      store.mode = 'reader'
+      store.session = {
+        ...sessionDto('stable-session-id', 'Loading'),
+        nodes: [{ nodeId: 'stable-node-id-0001', type: 'chapter', title: 'Chapter', children: [] }]
+      }
+      store.chapter = {
+        nodeId: 'stable-node-id-0001',
+        title: 'Chapter',
+        markdown: '# Chapter',
+        fragment: null,
+        readingPosition: 0.4,
+        hasReadingPosition: true
+      }
+      const loading = store.loadBookshelf()
+      expect(store.loading).toBe(true)
+      store.reportReadingPosition(0)
+      await vi.advanceTimersByTimeAsync(3_000)
+      expect(saveReadingPosition).not.toHaveBeenCalled()
+      expect(store.chapter.readingPosition).toBe(0.4)
+      listed.resolve([])
+      await loading
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('does not prequeue zero for an explicit fragment and saves the completed anchor ratio', async () => {
+    vi.useFakeTimers()
+    try {
+      setActivePinia(createPinia())
+      const saveReadingPosition = vi.fn().mockResolvedValue({
+        ok: true,
+        value: {
+          chapterProgress: 0.8,
+          overallProgress: 0.9,
+          updatedAt: new Date().toISOString()
+        }
+      })
+      Object.defineProperty(window, 'electron', {
+        configurable: true,
+        value: {
+          books: {
+            readChapter: vi.fn().mockResolvedValue({
+              ok: true,
+              value: {
+                nodeId: 'second-node-id-0001',
+                title: 'Second',
+                markdown: '# Second',
+                fragment: null,
+                readingPosition: 0,
+                hasReadingPosition: false
+              }
+            }),
+            saveReadingPosition
+          }
+        }
+      })
+      const store = useBooksStore()
+      store.mode = 'reader'
+      store.session = {
+        ...sessionDto('stable-session-id', 'Anchor'),
+        nodes: [
+          { nodeId: 'first-node-id-00001', type: 'chapter', title: 'First', children: [] },
+          { nodeId: 'second-node-id-0001', type: 'chapter', title: 'Second', children: [] }
+        ]
+      }
+      await store.openNode('second-node-id-0001', 'section-80')
+      await vi.advanceTimersByTimeAsync(3_000)
+      expect(saveReadingPosition).not.toHaveBeenCalled()
+
+      const restoration = store.beginReadingPositionRestore()
+      const flushing = store.flushReadingPosition()
+      await Promise.resolve()
+      expect(saveReadingPosition).not.toHaveBeenCalled()
+      store.completeReadingPositionRestore(restoration, 0.8, true)
+      await flushing
+      expect(saveReadingPosition).toHaveBeenCalledOnce()
+      expect(saveReadingPosition).toHaveBeenCalledWith(
+        'stable-session-id',
+        'second-node-id-0001',
+        0.8
+      )
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it.each(['render', 'paint'] as const)(
+    'releases restoration after a controlled %s failure and keeps later saves usable',
+    async (failure) => {
+      setActivePinia(createPinia())
+      const saveReadingPosition = vi.fn().mockResolvedValue({
+        ok: true,
+        value: {
+          chapterProgress: 0.4,
+          overallProgress: 0.4,
+          updatedAt: new Date().toISOString()
+        }
+      })
+      Object.defineProperty(window, 'electron', {
+        configurable: true,
+        value: {
+          books: {
+            readChapter: vi.fn().mockImplementation(async (_sessionId, nodeId) => ({
+              ok: true,
+              value: {
+                nodeId,
+                title: 'Next chapter',
+                markdown: '# Next chapter',
+                fragment: null,
+                readingPosition: 0.4,
+                hasReadingPosition: true
+              }
+            })),
+            saveReadingPosition
+          }
+        }
+      })
+      const store = useBooksStore()
+      store.mode = 'reader'
+      store.session = {
+        ...sessionDto('stable-session-id', 'Failure'),
+        nodes: [
+          { nodeId: 'stable-node-id-0001', type: 'chapter', title: 'Chapter', children: [] },
+          { nodeId: 'stable-node-id-0002', type: 'chapter', title: 'Next', children: [] }
+        ]
+      }
+      store.chapter = {
+        nodeId: 'stable-node-id-0001',
+        title: 'Chapter',
+        markdown: '# Chapter',
+        fragment: null,
+        readingPosition: 0,
+        hasReadingPosition: false
+      }
+      const generation = store.beginReadingPositionRestore()
+      const failed = vi.fn()
+      const flushing = store.flushReadingPosition()
+      await restoreReadingPosition({
+        render: async () => {
+          if (failure === 'render') throw new Error('controlled render failure')
+          return { html: '<h1>Chapter</h1>' }
+        },
+        isCurrent: () => true,
+        mount: vi.fn(),
+        waitForMount: async () => undefined,
+        waitForPaint: async () => {
+          if (failure === 'paint') throw new Error('controlled paint failure')
+        },
+        position: vi.fn(),
+        sample: () => 0,
+        complete: vi.fn(),
+        fail: failed,
+        release: () => store.cancelReadingPositionRestore(generation)
+      })
+      await flushing
+      expect(failed).toHaveBeenCalledOnce()
+      expect(store.readingPositionReady).toBe(true)
+
+      store.reportReadingPosition(0.4)
+      await store.flushReadingPosition()
+      expect(saveReadingPosition).toHaveBeenCalledWith(
+        'stable-session-id',
+        'stable-node-id-0001',
+        0.4
+      )
+
+      await store.openNode('stable-node-id-0002')
+      expect(store.chapter?.markdown).toBe('# Next chapter')
+    }
+  )
+
+  it('bounds restoration when animation frames never run and keeps later work usable', async () => {
+    vi.useFakeTimers()
+    try {
+      let frameId = 0
+      const cancelAnimationFrame = vi.fn()
+      vi.stubGlobal(
+        'requestAnimationFrame',
+        vi.fn(() => ++frameId)
+      )
+      vi.stubGlobal('cancelAnimationFrame', cancelAnimationFrame)
+      setActivePinia(createPinia())
+      const saveReadingPosition = vi.fn().mockResolvedValue({
+        ok: true,
+        value: {
+          chapterProgress: 0.4,
+          overallProgress: 0.4,
+          updatedAt: new Date().toISOString()
+        }
+      })
+      Object.defineProperty(window, 'electron', {
+        configurable: true,
+        value: {
+          books: {
+            readChapter: vi.fn().mockResolvedValue({
+              ok: true,
+              value: {
+                nodeId: 'stable-node-id-0002',
+                title: 'Next chapter',
+                markdown: '# Next chapter',
+                fragment: null,
+                readingPosition: 0,
+                hasReadingPosition: false
+              }
+            }),
+            saveReadingPosition
+          }
+        }
+      })
+      const store = useBooksStore()
+      store.mode = 'reader'
+      store.session = {
+        ...sessionDto('stable-session-id', 'Bounded paint'),
+        nodes: [
+          { nodeId: 'stable-node-id-0001', type: 'chapter', title: 'Chapter', children: [] },
+          { nodeId: 'stable-node-id-0002', type: 'chapter', title: 'Next', children: [] }
+        ]
+      }
+      store.chapter = {
+        nodeId: 'stable-node-id-0001',
+        title: 'Chapter',
+        markdown: '# Chapter',
+        fragment: null,
+        readingPosition: 0,
+        hasReadingPosition: false
+      }
+      const generation = store.beginReadingPositionRestore()
+      const restoration = restoreReadingPosition({
+        render: async () => ({ html: '<h1>Chapter</h1>' }),
+        isCurrent: () => true,
+        mount: vi.fn(),
+        waitForMount: async () => undefined,
+        waitForPaint,
+        position: vi.fn(),
+        sample: () => 0,
+        complete: (ratio) => store.completeReadingPositionRestore(generation, ratio, false),
+        fail: vi.fn(),
+        release: () => store.cancelReadingPositionRestore(generation)
+      })
+      let flushed = false
+      const flushing = store.flushReadingPosition().then(() => {
+        flushed = true
+      })
+
+      await vi.advanceTimersByTimeAsync(PAINT_WAIT_TIMEOUT_MS * 2 - 1)
+      expect(flushed).toBe(false)
+      await vi.advanceTimersByTimeAsync(1)
+      await Promise.all([restoration, flushing])
+      expect(flushed).toBe(true)
+      expect(cancelAnimationFrame).toHaveBeenCalledTimes(2)
+
+      store.reportReadingPosition(0.4)
+      await store.flushReadingPosition()
+      expect(saveReadingPosition).toHaveBeenCalledWith(
+        'stable-session-id',
+        'stable-node-id-0001',
+        0.4
+      )
+      await store.openNode('stable-node-id-0002')
+      expect(store.chapter?.markdown).toBe('# Next chapter')
+    } finally {
+      vi.useRealTimers()
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('falls back and cancels the second frame when only one animation frame runs', async () => {
+    vi.useFakeTimers()
+    try {
+      const callbacks = new Map<number, FrameRequestCallback>()
+      let frameId = 0
+      vi.stubGlobal(
+        'requestAnimationFrame',
+        vi.fn((callback: FrameRequestCallback) => {
+          callbacks.set(++frameId, callback)
+          return frameId
+        })
+      )
+      const cancelAnimationFrame = vi.fn((id: number) => callbacks.delete(id))
+      vi.stubGlobal('cancelAnimationFrame', cancelAnimationFrame)
+
+      const waiting = waitForPaint()
+      callbacks.get(1)?.(0)
+      callbacks.delete(1)
+      expect(callbacks.has(2)).toBe(true)
+      await vi.advanceTimersByTimeAsync(PAINT_WAIT_TIMEOUT_MS)
+      await waiting
+
+      expect(cancelAnimationFrame).toHaveBeenCalledWith(2)
+      expect(callbacks.size).toBe(0)
+      expect(vi.getTimerCount()).toBe(0)
+    } finally {
+      vi.useRealTimers()
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('uses the bounded fallback when animation frame APIs are unavailable', async () => {
+    vi.useFakeTimers()
+    try {
+      vi.stubGlobal('requestAnimationFrame', undefined)
+      vi.stubGlobal('cancelAnimationFrame', undefined)
+      let finished = false
+      const waiting = waitForPaint().then(() => {
+        finished = true
+      })
+
+      await vi.advanceTimersByTimeAsync(PAINT_WAIT_TIMEOUT_MS - 1)
+      expect(finished).toBe(false)
+      await vi.advanceTimersByTimeAsync(1)
+      await waiting
+      expect(finished).toBe(true)
+      expect(vi.getTimerCount()).toBe(0)
+    } finally {
+      vi.useRealTimers()
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('finishes on two animation frames without waiting for the timeout', async () => {
+    vi.useFakeTimers()
+    try {
+      const callbacks = new Map<number, FrameRequestCallback>()
+      let frameId = 0
+      vi.stubGlobal(
+        'requestAnimationFrame',
+        vi.fn((callback: FrameRequestCallback) => {
+          callbacks.set(++frameId, callback)
+          return frameId
+        })
+      )
+      vi.stubGlobal(
+        'cancelAnimationFrame',
+        vi.fn((id: number) => callbacks.delete(id))
+      )
+
+      let finished = false
+      const waiting = waitForPaint().then(() => {
+        finished = true
+      })
+      callbacks.get(1)?.(0)
+      callbacks.delete(1)
+      await Promise.resolve()
+      expect(finished).toBe(false)
+      callbacks.get(2)?.(0)
+      callbacks.delete(2)
+      await waiting
+
+      expect(finished).toBe(true)
+      expect(vi.getTimerCount()).toBe(0)
+    } finally {
+      vi.useRealTimers()
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('cancels a pending second frame and timeout when restoration becomes stale', async () => {
+    vi.useFakeTimers()
+    try {
+      const callbacks = new Map<number, FrameRequestCallback>()
+      let frameId = 0
+      vi.stubGlobal(
+        'requestAnimationFrame',
+        vi.fn((callback: FrameRequestCallback) => {
+          callbacks.set(++frameId, callback)
+          return frameId
+        })
+      )
+      const cancelAnimationFrame = vi.fn((id: number) => callbacks.delete(id))
+      vi.stubGlobal('cancelAnimationFrame', cancelAnimationFrame)
+      const controller = new AbortController()
+
+      const waiting = waitForPaint(controller.signal)
+      const firstFrame = callbacks.get(1)
+      callbacks.delete(1)
+      firstFrame?.(0)
+      expect(callbacks.has(2)).toBe(true)
+      controller.abort()
+      await waiting
+
+      expect(cancelAnimationFrame).toHaveBeenCalledWith(2)
+      expect(callbacks.size).toBe(0)
+      expect(vi.getTimerCount()).toBe(0)
+    } finally {
+      vi.useRealTimers()
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('does not let stale restoration cleanup release the current generation', async () => {
+    setActivePinia(createPinia())
+    Object.defineProperty(window, 'electron', {
+      configurable: true,
+      value: { books: { saveReadingPosition: vi.fn() } }
+    })
+    const store = useBooksStore()
+    store.mode = 'reader'
+    store.session = {
+      ...sessionDto('stable-session-id', 'Stale'),
+      nodes: [{ nodeId: 'stable-node-id-0001', type: 'chapter', title: 'Chapter', children: [] }]
+    }
+    store.chapter = {
+      nodeId: 'stable-node-id-0001',
+      title: 'Chapter',
+      markdown: '# Chapter',
+      fragment: null,
+      readingPosition: 0,
+      hasReadingPosition: false
+    }
+    const oldGeneration = store.beginReadingPositionRestore()
+    let current = true
+    const rendered = deferred<{ html: string }>()
+    const oldWork = restoreReadingPosition({
+      render: () => rendered.promise,
+      isCurrent: () => current,
+      mount: vi.fn(),
+      waitForMount: async () => undefined,
+      waitForPaint: async () => undefined,
+      position: vi.fn(),
+      sample: () => 0,
+      complete: vi.fn(),
+      fail: vi.fn(),
+      release: () => store.cancelReadingPositionRestore(oldGeneration)
+    })
+    current = false
+    const currentGeneration = store.beginReadingPositionRestore()
+    let flushed = false
+    const flushing = store.flushReadingPosition().then(() => {
+      flushed = true
+    })
+    rendered.resolve({ html: '<h1>Stale</h1>' })
+    await oldWork
+    await Promise.resolve()
+    expect(flushed).toBe(false)
+    expect(store.readingPositionReady).toBe(false)
+
+    store.cancelReadingPositionRestore(currentGeneration)
+    await flushing
+    expect(store.readingPositionReady).toBe(true)
+  })
+
+  it('flushes the latest provider position before refresh reads the restored chapter', async () => {
+    setActivePinia(createPinia())
+    const saved = deferred<
+      BookReaderResult<{
+        chapterProgress: number
+        overallProgress: number
+        updatedAt: string
+      }>
+    >()
+    const refreshed = {
+      ...sessionDto('stable-session-id', 'Refreshed'),
+      nodes: [
+        { nodeId: 'stable-node-id-0001', type: 'chapter' as const, title: 'Chapter', children: [] }
+      ],
+      entryNodeId: 'stable-node-id-0001',
+      resumeNodeId: 'stable-node-id-0001'
+    }
+    const refresh = vi.fn().mockResolvedValue({ ok: true, value: refreshed })
+    Object.defineProperty(window, 'electron', {
+      configurable: true,
+      value: {
+        books: {
+          saveReadingPosition: vi.fn(() => saved.promise),
+          refresh,
+          readChapter: vi.fn().mockResolvedValue({
+            ok: true,
+            value: {
+              nodeId: 'stable-node-id-0001',
+              title: 'Chapter',
+              markdown: '# Chapter',
+              fragment: null,
+              readingPosition: 0.82,
+              hasReadingPosition: true
+            }
+          })
+        }
+      }
+    })
+    const store = useBooksStore()
+    store.session = refreshed
+    store.chapter = {
+      nodeId: 'stable-node-id-0001',
+      title: 'Chapter',
+      markdown: '# Chapter',
+      fragment: null,
+      readingPosition: 0.2,
+      hasReadingPosition: true
+    }
+    store.registerReadingPositionProvider(() => 0.82)
+    const refreshing = store.refresh()
+    await vi.waitFor(() =>
+      expect(window.electron.books.saveReadingPosition).toHaveBeenCalledWith(
+        'stable-session-id',
+        'stable-node-id-0001',
+        0.82
+      )
+    )
+    expect(refresh).not.toHaveBeenCalled()
+    saved.resolve({
+      ok: true,
+      value: { chapterProgress: 0.82, overallProgress: 0.82, updatedAt: new Date().toISOString() }
+    })
+    await refreshing
+    expect(refresh).toHaveBeenCalledOnce()
+    expect(store.chapter?.readingPosition).toBe(0.82)
+  })
+
+  it('lets explicit fragments win while restore intent uses a saved ratio', async () => {
+    setActivePinia(createPinia())
+    const value = {
+      ...sessionDto('stable-session-id', 'Intent'),
+      nodes: [
+        { nodeId: 'first-node-id-00001', type: 'chapter' as const, title: 'First', children: [] },
+        { nodeId: 'second-node-id-0001', type: 'chapter' as const, title: 'Second', children: [] }
+      ],
+      entryNodeId: 'first-node-id-00001',
+      resumeNodeId: 'second-node-id-0001'
+    }
+    const readChapter = vi.fn().mockResolvedValue({
+      ok: true,
+      value: {
+        nodeId: 'second-node-id-0001',
+        title: 'Second',
+        markdown: '# Second',
+        fragment: 'section-80',
+        readingPosition: 0.6,
+        hasReadingPosition: true
+      }
+    })
+    Object.defineProperty(window, 'electron', {
+      configurable: true,
+      value: {
+        books: {
+          openLibrary: vi.fn().mockResolvedValue({ ok: true, value }),
+          readChapter,
+          saveReadingPosition: vi.fn().mockResolvedValue({
+            ok: true,
+            value: {
+              chapterProgress: 0,
+              overallProgress: 0.5,
+              updatedAt: new Date().toISOString()
+            }
+          })
+        }
+      }
+    })
+    const store = useBooksStore()
+    await store.openLibrary(value.libraryId)
+    expect(store.chapter).toMatchObject({ fragment: null, readingPosition: 0.6 })
+
+    await store.openNode('second-node-id-0001', 'section-80')
+    expect(store.chapter).toMatchObject({ fragment: 'section-80', readingPosition: 0 })
+    expect(store.session?.readingProgress).toBe(0.5)
   })
 })
