@@ -17,7 +17,11 @@ import type {
   IpcMainEventChannels,
   BootInfo
 } from '@shared/types/ipc'
-import type { BookSearchProgressDto, BookSearchRequestDto } from '@shared/types/bookReader'
+import type {
+  BookEditSaveRequestDto,
+  BookSearchProgressDto,
+  BookSearchRequestDto
+} from '@shared/types/bookReader'
 
 type RendererEventListener<K extends keyof IpcMainEventChannels> = (
   event: IpcRendererEvent,
@@ -236,6 +240,11 @@ const booksAPI = {
   closeSession: (sessionId: string) => invoke('lb::books::close-session', sessionId),
   readChapter: (sessionId: string, nodeId: string) =>
     invoke('lb::books::read-chapter', sessionId, nodeId),
+  beginEdit: (sessionId: string, nodeId: string) =>
+    invoke('lb::books::begin-edit', sessionId, nodeId),
+  saveEdit: (request: BookEditSaveRequestDto) => invoke('lb::books::save-edit', request),
+  reloadEdit: (editId: string) => invoke('lb::books::reload-edit', editId),
+  closeEdit: (editId: string) => invoke('lb::books::close-edit', editId),
   saveReadingPosition: (sessionId: string, nodeId: string, chapterProgress: number) =>
     invoke('lb::books::save-reading-position', sessionId, nodeId, chapterProgress),
   followLink: (sessionId: string, nodeId: string, href: string) =>

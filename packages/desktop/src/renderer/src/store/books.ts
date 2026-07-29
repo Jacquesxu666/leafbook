@@ -12,6 +12,7 @@ import type {
   BookSessionDto
 } from '@shared/types/bookReader'
 import { adjacentChapter, flattenReadableNodeIds } from '@/book/readerModel'
+import bus from '@/bus'
 
 const SAVE_DEBOUNCE_MS = 2_000
 const SAVE_EPSILON = 0.002
@@ -700,6 +701,43 @@ export const useBooksStore = defineStore('books', () => {
   const next = async (): Promise<void> => {
     if (nextNodeId.value) await openNode(nextNodeId.value)
   }
+  const editCurrentChapter = async (): Promise<void> => {
+    await cancelSearch(true)
+    await flushReadingPosition()
+    const sessionSnapshot = session.value
+    const chapterSnapshot = chapter.value
+    if (!sessionSnapshot || !chapterSnapshot) return
+    const { token, operationId } = start()
+    try {
+      const result = await window.electron.books.beginEdit(
+        sessionSnapshot.sessionId,
+        chapterSnapshot.nodeId
+      )
+      if (!current(token) || session.value?.sessionId !== sessionSnapshot.sessionId) {
+        if (result.ok) await window.electron.books.closeEdit(result.value.editId)
+        return
+      }
+      if (!result.ok) {
+        error.value = result.error
+        return
+      }
+      mode.value = 'editor'
+      bus.emit('lb::open-book-edit', result.value)
+    } catch {
+      setUnexpected(token)
+    } finally {
+      finish(operationId)
+    }
+  }
+  const returnToBook = async (): Promise<void> => {
+    if (!session.value) return
+    const canReturn = await new Promise<boolean>((resolve) => {
+      bus.emit('lb::prepare-return-to-book', resolve)
+    })
+    if (!canReturn || !session.value) return
+    await refresh()
+    if (!error.value && session.value) mode.value = 'reader'
+  }
   const showEditor = async (): Promise<void> => {
     cancelSearch(true)
     await flushReadingPosition()
@@ -766,6 +804,8 @@ export const useBooksStore = defineStore('books', () => {
     removeLibrary,
     previous,
     next,
+    editCurrentChapter,
+    returnToBook,
     showEditor
   }
 })

@@ -88,6 +88,15 @@ export interface IFileState {
   // Muya block tree; only populated for the actively edited tab.
   blocks?: unknown
   isMixedLineEndings?: boolean
+  tabKind?: 'file' | 'book'
+  bookEdit?: {
+    editId: string
+    sessionId: string
+    nodeId: string
+    revision: string
+    mixedLineEndings: boolean
+    readOnly: boolean
+  }
 }
 
 /**

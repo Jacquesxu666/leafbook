@@ -34,6 +34,9 @@ import type { BufferedState as BufferedStateType } from './bufferedState'
 import type { MenuTemplate, MenuPopupPosition } from './menu'
 import type {
   BookChapterDto,
+  BookEditDto,
+  BookEditSaveDto,
+  BookEditSaveRequestDto,
   BookLinkNavigationDto,
   BookReadingProgressDto,
   BookReaderResult,
@@ -61,6 +64,22 @@ export interface IpcInvokeChannels {
   'lb::books::read-chapter': {
     args: [sessionId: string, nodeId: string]
     ret: BookReaderResult<BookChapterDto>
+  }
+  'lb::books::begin-edit': {
+    args: [sessionId: string, nodeId: string]
+    ret: BookReaderResult<BookEditDto>
+  }
+  'lb::books::save-edit': {
+    args: [request: BookEditSaveRequestDto]
+    ret: BookReaderResult<BookEditSaveDto>
+  }
+  'lb::books::reload-edit': {
+    args: [editId: string]
+    ret: BookReaderResult<BookEditDto>
+  }
+  'lb::books::close-edit': {
+    args: [editId: string]
+    ret: BookReaderResult<true>
   }
   'lb::books::save-reading-position': {
     args: [sessionId: string, nodeId: string, chapterProgress: number]

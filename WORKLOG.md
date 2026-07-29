@@ -1603,3 +1603,166 @@
     独立变更中引入并审计生成数据；本轮未增加依赖或 lockfile。
   - 编辑桥、批注、本地资源、发布/同步/协作仍属于后续阶段。
 - Git commit：将随本次提交入库，最终 SHA 见 Git 历史（不推送）。
+
+## 2026-07-29 — Phase 7 current-chapter editing
+
+- **用户目标**：在 LeafBook Reader 中用现有 Muya 编辑当前章节，同时保持
+  opaque IPC、冲突保护、格式保真和 book session/search 一致性。
+- **实际完成**：新增 main-owned edit lease、begin/save/reload/close typed
+  IPC、strict UTF-8/BOM/EOL 检测、8 MiB 限制、SHA-256 revision、一次性
+  overwrite token、同目录安全原子写、保存后 session refresh/stable-key
+  重绑；Reader 的 Edit 接入现有 editor tab，Book tab 保存分流并禁用
+  auto-save/Save As/Move/Rename/encoding/EOL 设置，增加 dirty close guard 和
+  Back to Book。
+- **修改或创建的文件**：见本条对应的 `git diff --name-only`；新增
+  `docs/BOOK_EDITING.md`。
+- **测试及结果**：Book manager 与 editor 保存/关闭定向测试 2 个文件、
+  73 项通过；desktop 全量单测 54 个文件、892 项通过；typecheck 和 production
+  build 通过；本轮文件定向 ESLint 0 error（5 个 non-null assertion warning，
+  其中 editor 2 个为既有代码）；`git diff --check` 通过。首次将全量单测与
+  build 并行运行时 `pdf.spec.ts` 出现 1 个超时和 1 个全局 window fixture
+  污染失败，随后单独重跑全量单测全部通过。
+- **关键决策**：renderer 永不持有 book 路径；lease 在 begin 后独立持有
+  root/parent/target 快照；外部 revision 默认拒绝；保存成功由 main 直接
+  refresh/invalidate search，不使用时间窗压制 watcher。
+- **尚未解决的问题**：Phase 7 不含新建/重命名章节、`SUMMARY.md` 写入、
+  附件、Save As 或非 UTF-8 转换；完整 scoped filesystem observer 留待后续。
+- **Git commit**：未提交（按用户要求）。
+
+### Phase 7 E2E and accessible conflict-dialog follow-up
+
+- 新增真实 Electron 流程：Reader 滚动 → Edit → source 更新 H1/正文并在
+  Muya 输入 token → Cmd/Ctrl+S → Back → Reader 立即显示新内容且恢复阅读比例。
+- 同一 E2E 覆盖外部修改后的 Cancel 不覆盖、Reload 外部版本、显式 Overwrite
+  三条路径；冲突 UI 改为可见、带 label 的三按钮 modal，Cancel 默认聚焦，
+  Escape 等同 Cancel。
+- 移动宽度 E2E 增加 Edit、现有 editor mount、Back 按钮与返回 ready reader
+  覆盖。
+- 完整 Book Reader Electron E2E：5/5 通过（含 Book Edit、冲突三路径与
+  mobile Edit/Back）。普通
+  `all-blocks-roundtrip` 5/5 通过；与 editor-input 并行运行时复现既有
+  `typed-token` 截断 flake，随后独立运行 editor-input 8/8 通过。
+- scoped filesystem watcher 仍明确留待后续；本轮继续依赖 revision-before-save
+  冲突检测与成功写入后的同步 session refresh/search invalidation。
+- 最终共享门禁复核：实现阶段 desktop 全量单测曾 892/892 通过；后续共享高负载
+  下连续三次全量均只在 `pdf.spec.ts` 首个动态 import 出现 5 秒 timeout，并
+  连带污染其后一项 window fixture，Phase 7 之外其余 889/890 通过；
+  `pdf.spec.ts` 单独运行 16/16 通过，因此记录为并发负载 flake，不改 PDF
+  产品或测试。全量 lint 为 0 error、135 个既有 warning。Phase 7 三个最终
+  格式文件 Prettier check 通过，`git diff --check` 通过。
+
+## 2026-07-29 — Phase 7 adversarial lease and editor-race hardening
+
+- **用户目标**：对当前章节编辑进行最终安全返修，覆盖 lease 生命周期并发、
+  路径祖先替换、overwrite 授权绑定、保存/重载期间的新输入、commit-point
+  不确定语义、buffer 泄漏和 modal 键盘边界。
+- **实际完成**：
+  - Main lease 增加 generation、AbortController 和 exact-request
+    single-flight；所有关键 await 后确认同一 lease 仍有效，session
+    close/remove/eviction、root invalidation 和 owner teardown 会统一撤销。
+  - begin/save/reload 重复校验 root 到 parent 的每一级物理 identity，并要求
+    parent/target 具备写权限；IPC 与 manager 均限制 8 MiB UTF-8 bytes，
+    拒绝 lone CR 和超长标识。
+  - overwrite grant 绑定 owner、lease generation、root、target、base/external
+    revision 和 candidate hash，并在写入 await 前一次性消费。
+  - rename 明确定义为 commit point：目录 fsync 失败但 final bytes 可验证时
+    成功并提示 durability uncertain；final verify 失败返回
+    `edit-commit-uncertain`/`committed: true`、撤销 lease，renderer 保留 dirty
+    candidate 并进入 read-only。
+  - Renderer 为每个 book tab 增加 operation generation 和 save/reload
+    single-flight；操作期间的新输入不会被 late result 覆盖或错误标 saved。
+    guard 复用 in-flight save；buffer snapshot 完全过滤 book tabs/lease。
+  - Modal 增加 capture Escape、Tab/Shift+Tab focus trap 和关闭后 focus restore。
+    Electron E2E 新增真实键盘焦点、dirty Back Cancel/Discard、dirty window-close
+    Cancel 分支。
+- **修改或创建的文件**：继续保持 Phase 7 原文件范围；主要返修
+  `packages/desktop/src/main/book/sessionManager.ts`、
+  `packages/desktop/src/main/ipc/books.ts`、
+  `packages/desktop/src/renderer/src/store/editor.ts`、
+  `packages/desktop/src/renderer/src/components/bookEditDialog.vue`、
+  `packages/desktop/src/shared/types/bookReader.ts`、Book Reader E2E/相关 unit、
+  `docs/BOOK_EDITING.md` 和本日志。
+- **测试及结果**：
+  - Main/editor 定向单测：2 个文件、84 项通过。
+  - Typecheck：通过；production build：通过，仅有既有 CodeMirror import
+    提示。
+  - Book Reader Electron E2E：编辑场景独立 1/1，通过；完整 spec 5/5 通过。
+  - Desktop 全量 unit：54 个文件、903 项通过。
+  - 全量 lint：0 error、135 个既有 warning；本轮定向 ESLint：0 error，仅
+    editor 2 个既有 non-null assertion warning。
+  - Typecheck、production build、最终 Prettier check 和 `git diff --check`
+    均通过；build 仅有既有 CodeMirror import 提示。
+- **关键决策**：不能把“rename 后无法验证”当作普通成功；只有 final bytes
+  已确认时 directory fsync 失败才可报告 saved。无法确认时明确告诉 renderer
+  文件可能已经提交，同时禁止在旧 lease 上盲重试。
+- **尚未解决的问题**：scoped filesystem watcher 仍按 Phase 7 既定范围延期；
+  新建/重命名章节、`SUMMARY.md` 写入、附件、Save As 和非 UTF-8 转换仍不包含。
+- **Git commit**：未提交（按用户要求）。
+
+## 2026-07-29 — Phase 7 linearization, refresh isolation, and dialog ownership
+
+- **用户目标**：完成当前章节编辑第二轮安全返修，消除 guard/save、
+  validate→rename、public refresh/save refresh、dialog ownership 与移动端焦点的
+  最后竞态。
+- **实际完成**：
+  - Guard 统一先 flush Muya pending input、等待同一 tab 的既有 save promise，
+    再重算 dirty；Back、tab close、window close 不提前弹窗或发第二次 save。
+  - Main lease 绑定 exact session object/session generation/lease generation/op
+    generation。每个临时文件异步 await 后重新断言；最终 realpath、逐级 lstat
+    identity/mode、target revision 与权限在同步临界区重验并 `renameSync`，critical
+    开始后的 close/session revoke 延迟到原子提交结束。
+  - Public refresh 在开始时推进 session generation 并撤销 lease；save 使用不共享
+    public single-flight 的 private refresh capability，只能消费自身 scan 并原子
+    rebind。保存后再次 Edit 会把已有 tab 换绑到新授权 lease。
+  - begin/reload 在 read await 后再次执行 exact session/lease/full ancestry/target
+    验证。测试 hooks 仅存在于 manager 构造边界，不增加 production IPC。
+  - Decision dialog 改为 FIFO requestId 队列，绑定 tab/op generation，可定向
+    dispose；document capture 处理 Tab/Escape，unmount 清 listener/queue 并恢复焦点。
+  - Reader→editor 在 rendered frames 用 Muya API 重试焦点，移动布局最终
+    `activeElement` 保持在 editor content 内；普通 editor file-loaded 路径不变。
+- **修改或创建的文件**：沿用 Phase 7 文件范围，另为移动焦点最小修改
+  `packages/desktop/src/renderer/src/components/editorWithTabs/editor.vue`；主要文件为
+  `packages/desktop/src/main/book/sessionManager.ts`、
+  `packages/desktop/src/renderer/src/store/editor.ts`、
+  `packages/desktop/src/renderer/src/services/bookEditDecision.ts`、
+  `packages/desktop/src/renderer/src/components/bookEditDialog.vue`、
+  `packages/desktop/src/renderer/src/pages/app.vue`、book unit/E2E 与
+  `docs/BOOK_EDITING.md`。
+- **测试及结果**：
+  - Main/editor 定向单测：2 个文件、95 项通过。
+  - Desktop 全量单测：54 个文件、914 项通过。
+  - Reader E2E 最终连续 3 轮 15/15 通过；最终焦点实现后 mobile 独跑 1/1、
+    full Reader 5/5。
+  - 普通 `all-blocks-roundtrip` 5/5。`editor-input` 收窄焦点实现后首轮 8/8，
+    第二轮只复现既有 typing 截断 flake 7/8；此前隔离 Phase 7 基线也有同型截断。
+  - Typecheck、production build 通过；build 仅有既有 CodeMirror import 提示。
+  - 全量 lint：0 error、135 个既有 warning。
+  - 最终 scoped Prettier check 与 `git diff --check`：通过。
+- **关键决策**：Node 无 `renameat`，因此文档明确这是本地桌面 threat model；
+  LeafBook 保证 final component-wise validation 到 rename 之间没有 event-loop
+  await，不宣称抵御另一个 native process 持续抢占式换路径。commit 后不能返回
+  `edit-not-found`；无法继续授权时返回成功但 read-only。
+- **尚未解决的问题**：scoped filesystem watcher、新建/重命名章节、
+  `SUMMARY.md` 写入、附件、Save As 与非 UTF-8 转换仍不属于 Phase 7。
+- **Git commit**：未提交（按用户要求）。
+
+### Phase 7 final bounded-read and mobile-focus tail
+
+- Final synchronous target descriptors now reject `size > 8 MiB` before
+  `readFileSync`, both before rename and during committed-byte verification.
+- A same-inode critical-boundary growth test expands the target past 8 MiB and
+  proves no synchronous full read, no rename, no candidate commit, and preserved
+  original inode/prefix.
+- Removed the Phase 7 diff from `editorWithTabs/editor.vue`. Book-only mobile
+  focus now lives in `app.vue`: on reader→editor mode transition it uses the
+  existing instance-backed `editor-focus` command plus a visible Muya
+  `contenteditable`, for a fixed maximum of four rendered frames.
+- `BOOK_EDITING.md` now explicitly defers live/scoped external filesystem
+  watching; current safety is revision-before-save plus return-to-reader refresh.
+- Final validation for this tail: targeted unit 96/96; full unit 54 files and
+  915/915; typecheck and production build pass; lint reports 0 errors and 135
+  existing warnings; Reader E2E passes two complete runs (10/10), with an
+  additional mobile-only 1/1; `all-blocks-roundtrip` passes 5/5 and
+  `editor-input` passes 8/8. All 19 remaining changed paths pass Prettier,
+  `git diff --check` passes, and `editorWithTabs/editor.vue` has no diff.
+- Git commit：将随本次提交入库，最终 SHA 见 Git 历史（不推送）。

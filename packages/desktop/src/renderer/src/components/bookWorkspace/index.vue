@@ -113,6 +113,9 @@
           >
             Outline
           </button>
+          <button class="secondary" :disabled="!books.chapter" @click="books.editCurrentChapter">
+            Edit
+          </button>
           <button class="secondary" @click="books.refresh">Refresh</button>
         </div>
       </header>

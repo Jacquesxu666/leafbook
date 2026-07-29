@@ -42,6 +42,29 @@ const rejected = <T>(): BookReaderResult<T> => ({
   error: { code: 'invalid-request', message: 'This request did not come from an editor window.' }
 })
 
+const MAX_EDIT_BYTES = 8 * 1024 * 1024
+const boundedId = (value: unknown): value is string =>
+  typeof value === 'string' && value.length > 0 && value.length <= 128
+const boundedSaveRequest = (value: unknown): boolean => {
+  const request = value as {
+    editId?: unknown
+    revision?: unknown
+    markdown?: unknown
+    overwriteToken?: unknown
+  } | null
+  return Boolean(
+    request &&
+    boundedId(request.editId) &&
+    typeof request.revision === 'string' &&
+    request.revision.length === 64 &&
+    typeof request.markdown === 'string' &&
+    request.markdown.length <= MAX_EDIT_BYTES &&
+    !/\r(?!\n)/.test(request.markdown) &&
+    Buffer.byteLength(request.markdown, 'utf8') <= MAX_EDIT_BYTES &&
+    (request.overwriteToken === undefined || boundedId(request.overwriteToken))
+  )
+}
+
 export const registerBookHandlers = (): void => {
   ipcMain.handle('lb::books::list', (event) =>
     isTrustedEditorSender(event) ? getManager().listLibraries() : []
@@ -66,6 +89,26 @@ export const registerBookHandlers = (): void => {
   ipcMain.handle('lb::books::read-chapter', (event, sessionId, nodeId) =>
     isTrustedEditorSender(event)
       ? getManager().readChapter(sessionId, nodeId, event.sender.id)
+      : rejected()
+  )
+  ipcMain.handle('lb::books::begin-edit', (event, sessionId, nodeId) =>
+    isTrustedEditorSender(event) && boundedId(sessionId) && boundedId(nodeId)
+      ? getManager().beginEdit(sessionId, nodeId, event.sender.id)
+      : rejected()
+  )
+  ipcMain.handle('lb::books::save-edit', (event, request) =>
+    isTrustedEditorSender(event) && boundedSaveRequest(request)
+      ? getManager().saveEdit(request, event.sender.id)
+      : rejected()
+  )
+  ipcMain.handle('lb::books::reload-edit', (event, editId) =>
+    isTrustedEditorSender(event) && boundedId(editId)
+      ? getManager().reloadEdit(editId, event.sender.id)
+      : rejected()
+  )
+  ipcMain.handle('lb::books::close-edit', (event, editId) =>
+    isTrustedEditorSender(event) && boundedId(editId)
+      ? getManager().closeEdit(editId, event.sender.id)
       : rejected()
   )
   ipcMain.handle('lb::books::save-reading-position', (event, sessionId, nodeId, chapterProgress) =>

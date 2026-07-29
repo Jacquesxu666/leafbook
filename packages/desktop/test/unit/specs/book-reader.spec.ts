@@ -1,5 +1,6 @@
 /* eslint-disable @stylistic/space-before-function-paren */
 import fs from 'fs/promises'
+import fsSync from 'fs'
 import os from 'os'
 import path from 'path'
 import { randomUUID } from 'crypto'
@@ -21,6 +22,13 @@ import {
   waitForPaint
 } from '@/book/restoreReadingPosition'
 import { useBooksStore } from '@/store/books'
+import {
+  bookEditDecision,
+  disposeAllBookEditDecisions,
+  disposeBookEditDecisions,
+  requestBookEditDecision,
+  resolveBookEditDecision
+} from '@/services/bookEditDecision'
 
 const mocks = vi.hoisted(() => ({
   stores: new Map<string, Record<string, unknown>>(),
@@ -100,9 +108,91 @@ beforeEach(() => {
   mocks.ipcHandlers.clear()
 })
 afterEach(async () => {
+  disposeAllBookEditDecisions()
+  vi.restoreAllMocks()
   await Promise.all(
     temporaryDirectories.splice(0).map((root) => fs.rm(root, { recursive: true, force: true }))
   )
+})
+
+describe('book edit decision queue', () => {
+  it('serves decisions FIFO and ignores stale request owners and request ids', async () => {
+    let firstCurrent = true
+    const first = requestBookEditDecision(
+      'First',
+      'First message',
+      [
+        { id: 'cancel', label: 'Cancel' },
+        { id: 'save', label: 'Save' }
+      ],
+      'cancel',
+      {
+        tabId: 'tab-first',
+        operationGeneration: 1,
+        isCurrent: () => firstCurrent
+      }
+    )
+    const firstRequestId = bookEditDecision.requestId
+    const second = requestBookEditDecision(
+      'Second',
+      'Second message',
+      [
+        { id: 'cancel', label: 'Cancel' },
+        { id: 'discard', label: 'Discard' }
+      ],
+      'cancel',
+      {
+        tabId: 'tab-second',
+        operationGeneration: 3,
+        isCurrent: () => true
+      }
+    )
+    expect(bookEditDecision.title).toBe('First')
+    resolveBookEditDecision(firstRequestId + 100, 'save')
+    expect(bookEditDecision.title).toBe('First')
+    firstCurrent = false
+    resolveBookEditDecision(firstRequestId, 'save')
+    await expect(first).resolves.toBe('cancel')
+    expect(bookEditDecision.title).toBe('Second')
+    resolveBookEditDecision(bookEditDecision.requestId, 'discard')
+    await expect(second).resolves.toBe('discard')
+    expect(bookEditDecision.open).toBe(false)
+  })
+
+  it('disposes only the matching queued owner generation', async () => {
+    const active = requestBookEditDecision('Active', 'Active message', [
+      { id: 'cancel', label: 'Cancel' }
+    ])
+    const stale = requestBookEditDecision(
+      'Stale',
+      'Stale message',
+      [{ id: 'cancel', label: 'Cancel' }],
+      'cancel',
+      {
+        tabId: 'tab-owner',
+        operationGeneration: 4,
+        isCurrent: () => true
+      }
+    )
+    const next = requestBookEditDecision(
+      'Next',
+      'Next message',
+      [{ id: 'cancel', label: 'Cancel' }],
+      'cancel',
+      {
+        tabId: 'tab-owner',
+        operationGeneration: 5,
+        isCurrent: () => true
+      }
+    )
+    disposeBookEditDecisions('tab-owner', 4)
+    await expect(stale).resolves.toBe('cancel')
+    resolveBookEditDecision(bookEditDecision.requestId, 'cancel')
+    await active
+    expect(bookEditDecision.title).toBe('Next')
+    resolveBookEditDecision(bookEditDecision.requestId, 'cancel')
+    await next
+  })
 })
 
 describe('book IPC trust boundary', () => {
@@ -243,6 +333,710 @@ describe('BookSessionManager authorization boundary', () => {
     expect(await manager.readChapter(opened.value.sessionId, firstNode.nodeId)).toMatchObject({
       ok: false,
       error: { code: 'session-not-found' }
+    })
+  })
+
+  it('edits a model-owned chapter through an opaque lease and preserves BOM/CRLF', async () => {
+    const root = await makeBook({
+      'SUMMARY.md': '- [Start](README.md)\n',
+      'README.md': '\uFEFF# Start\r\nOriginal\r\n'
+    })
+    mocks.selectedPath = root
+    const manager = new BookSessionManager('/edit-user-data')
+    const opened = await manager.openPicker({ sender: { id: 41 } } as never)
+    expect(opened.ok).toBe(true)
+    if (!opened.ok || !opened.value.nodes[0]) return
+
+    const begun = await manager.beginEdit(opened.value.sessionId, opened.value.nodes[0].nodeId, 41)
+    expect(begun).toMatchObject({
+      ok: true,
+      value: {
+        sessionId: opened.value.sessionId,
+        nodeId: opened.value.nodes[0].nodeId,
+        markdown: '# Start\nOriginal\n',
+        format: { bom: true, lineEnding: 'crlf', mixedLineEndings: false }
+      }
+    })
+    expect(JSON.stringify(begun)).not.toContain(root)
+    if (!begun.ok) return
+
+    const saved = await manager.saveEdit(
+      {
+        editId: begun.value.editId,
+        revision: begun.value.revision,
+        markdown: '# Start\nChanged\n'
+      },
+      41
+    )
+    expect(saved).toMatchObject({
+      ok: true,
+      value: { readOnly: false, nodeId: opened.value.nodes[0].nodeId }
+    })
+    expect(await fs.readFile(path.join(root, 'README.md'))).toEqual(
+      Buffer.from('\uFEFF# Start\r\nChanged\r\n')
+    )
+  })
+
+  it('rejects external changes by default and consumes a one-shot overwrite token', async () => {
+    const root = await makeBook({
+      'SUMMARY.md': '- [Start](README.md)\n',
+      'README.md': '# Start\nOriginal\n'
+    })
+    mocks.selectedPath = root
+    const manager = new BookSessionManager('/edit-conflict-user-data')
+    const opened = await manager.openPicker({ sender: { id: 42 } } as never)
+    expect(opened.ok).toBe(true)
+    if (!opened.ok || !opened.value.nodes[0]) return
+    const begun = await manager.beginEdit(opened.value.sessionId, opened.value.nodes[0].nodeId, 42)
+    expect(begun.ok).toBe(true)
+    if (!begun.ok) return
+
+    await fs.writeFile(path.join(root, 'README.md'), '# Start\nExternal\n')
+    const conflict = await manager.saveEdit(
+      {
+        editId: begun.value.editId,
+        revision: begun.value.revision,
+        markdown: '# Start\nMine\n'
+      },
+      42
+    )
+    expect(conflict).toMatchObject({
+      ok: false,
+      error: { code: 'edit-conflict', overwriteToken: expect.any(String) }
+    })
+    if (conflict.ok || !conflict.error.overwriteToken) return
+    const overwritten = await manager.saveEdit(
+      {
+        editId: begun.value.editId,
+        revision: begun.value.revision,
+        markdown: '# Start\nMine\n',
+        overwriteToken: conflict.error.overwriteToken
+      },
+      42
+    )
+    expect(overwritten.ok).toBe(true)
+    expect(
+      await manager.saveEdit(
+        {
+          editId: begun.value.editId,
+          revision: begun.value.revision,
+          markdown: '# Start\nAgain\n',
+          overwriteToken: conflict.error.overwriteToken
+        },
+        42
+      )
+    ).toMatchObject({ ok: false })
+  })
+
+  it('requires mixed-EOL confirmation and closes leases with their owner', async () => {
+    const root = await makeBook({
+      'SUMMARY.md': '- [Start](README.md)\n',
+      'README.md': '# Start\r\nMixed\n'
+    })
+    mocks.selectedPath = root
+    const manager = new BookSessionManager('/edit-mixed-user-data')
+    const opened = await manager.openPicker({ sender: { id: 43 } } as never)
+    expect(opened.ok).toBe(true)
+    if (!opened.ok || !opened.value.nodes[0]) return
+    const begun = await manager.beginEdit(opened.value.sessionId, opened.value.nodes[0].nodeId, 43)
+    expect(begun.ok).toBe(true)
+    if (!begun.ok) return
+    expect(
+      await manager.saveEdit(
+        {
+          editId: begun.value.editId,
+          revision: begun.value.revision,
+          markdown: '# Start\nChanged\n'
+        },
+        43
+      )
+    ).toMatchObject({ ok: false, error: { code: 'edit-mixed-line-endings' } })
+    expect(manager.closeEdit(begun.value.editId, 44)).toMatchObject({
+      ok: false,
+      error: { code: 'edit-not-found' }
+    })
+    expect(manager.closeEdit(begun.value.editId, 43)).toEqual({ ok: true, value: true })
+  })
+
+  it('binds overwrite grants to the exact candidate and rejects concurrent mutation', async () => {
+    const root = await makeBook({
+      'SUMMARY.md': '- [Start](README.md)\n',
+      'README.md': '# Start\nOriginal\n'
+    })
+    mocks.selectedPath = root
+    const manager = new BookSessionManager('/edit-grant-user-data')
+    const opened = await manager.openPicker({ sender: { id: 45 } } as never)
+    if (!opened.ok || !opened.value.nodes[0]) return
+    const begun = await manager.beginEdit(opened.value.sessionId, opened.value.nodes[0].nodeId, 45)
+    if (!begun.ok) return
+
+    await fs.writeFile(path.join(root, 'README.md'), '# Start\nExternal\n')
+    const conflict = await manager.saveEdit(
+      {
+        editId: begun.value.editId,
+        revision: begun.value.revision,
+        markdown: '# Start\nMine\n'
+      },
+      45
+    )
+    if (conflict.ok || !conflict.error.overwriteToken) return
+    await expect(
+      manager.saveEdit(
+        {
+          editId: begun.value.editId,
+          revision: begun.value.revision,
+          markdown: '# Start\nDifferent candidate\n',
+          overwriteToken: conflict.error.overwriteToken
+        },
+        45
+      )
+    ).resolves.toMatchObject({ ok: false, error: { code: 'edit-conflict' } })
+
+    const retry = await manager.saveEdit(
+      {
+        editId: begun.value.editId,
+        revision: begun.value.revision,
+        markdown: '# Start\nMine\n'
+      },
+      45
+    )
+    if (retry.ok || !retry.error.overwriteToken) return
+    const request = {
+      editId: begun.value.editId,
+      revision: begun.value.revision,
+      markdown: '# Start\nMine\n',
+      overwriteToken: retry.error.overwriteToken
+    }
+    const [first, duplicate] = await Promise.all([
+      manager.saveEdit(request, 45),
+      manager.saveEdit(request, 45)
+    ])
+    expect(first.ok).toBe(true)
+    expect(duplicate).toEqual(first)
+  })
+
+  it('revokes edit generations with their session and detects replaced ancestors', async () => {
+    const root = await makeBook({
+      'SUMMARY.md': '- [Start](chapters/README.md)\n',
+      'chapters/README.md': '# Start\n'
+    })
+    mocks.selectedPath = root
+    const manager = new BookSessionManager('/edit-ancestry-user-data')
+    const opened = await manager.openPicker({ sender: { id: 46 } } as never)
+    if (!opened.ok || !opened.value.nodes[0]) return
+    const begun = await manager.beginEdit(opened.value.sessionId, opened.value.nodes[0].nodeId, 46)
+    if (!begun.ok) return
+
+    await fs.rename(path.join(root, 'chapters'), path.join(root, 'old-chapters'))
+    await fs.mkdir(path.join(root, 'chapters'))
+    await fs.writeFile(path.join(root, 'chapters/README.md'), '# Replacement\n')
+    expect(await manager.reloadEdit(begun.value.editId, 46)).toMatchObject({
+      ok: false,
+      error: { code: 'edit-read-only' }
+    })
+
+    const reopened = await manager.refresh(opened.value.sessionId, 46)
+    if (!reopened.ok || !reopened.value.nodes[0]) return
+    const second = await manager.beginEdit(
+      reopened.value.sessionId,
+      reopened.value.nodes[0].nodeId,
+      46
+    )
+    if (!second.ok) return
+    expect(manager.closeSession(reopened.value.sessionId, 46)).toEqual({ ok: true, value: true })
+    expect(await manager.reloadEdit(second.value.editId, 46)).toMatchObject({
+      ok: false,
+      error: { code: 'edit-not-found' }
+    })
+  })
+
+  it('rejects read-only and unbounded or lone-CR edit inputs', async () => {
+    const root = await makeBook({
+      'SUMMARY.md': '- [Start](README.md)\n',
+      'README.md': '# Start\n'
+    })
+    mocks.selectedPath = root
+    const manager = new BookSessionManager('/edit-input-user-data')
+    const opened = await manager.openPicker({ sender: { id: 47 } } as never)
+    if (!opened.ok || !opened.value.nodes[0]) return
+    const begun = await manager.beginEdit(opened.value.sessionId, opened.value.nodes[0].nodeId, 47)
+    if (!begun.ok) return
+    expect(
+      await manager.saveEdit(
+        {
+          editId: begun.value.editId,
+          revision: begun.value.revision,
+          markdown: '# lone\rreturn'
+        },
+        47
+      )
+    ).toMatchObject({ ok: false, error: { code: 'invalid-request' } })
+    expect(
+      await manager.saveEdit(
+        {
+          editId: begun.value.editId,
+          revision: begun.value.revision,
+          markdown: '💥'.repeat(3 * 1024 * 1024)
+        },
+        47
+      )
+    ).toMatchObject({ ok: false, error: { code: 'invalid-request' } })
+    manager.closeEdit(begun.value.editId, 47)
+    await fs.chmod(path.join(root, 'README.md'), 0o444)
+    expect(
+      await manager.beginEdit(opened.value.sessionId, opened.value.nodes[0].nodeId, 47)
+    ).toMatchObject({
+      ok: false,
+      error: { code: 'edit-read-only' }
+    })
+  })
+
+  it('reports a committed save as durability-uncertain when directory fsync fails', async () => {
+    const root = await makeBook({
+      'SUMMARY.md': '- [Start](README.md)\n',
+      'README.md': '# Start\n'
+    })
+    mocks.selectedPath = root
+    const manager = new BookSessionManager('/edit-fsync-user-data')
+    const opened = await manager.openPicker({ sender: { id: 48 } } as never)
+    if (!opened.ok || !opened.value.nodes[0]) return
+    const begun = await manager.beginEdit(opened.value.sessionId, opened.value.nodes[0].nodeId, 48)
+    if (!begun.ok) return
+
+    vi.spyOn(
+      manager as unknown as { syncBookEditDirectorySync: () => void },
+      'syncBookEditDirectorySync'
+    ).mockImplementationOnce(() => {
+      throw new Error('injected directory fsync failure')
+    })
+    const saved = await manager.saveEdit(
+      {
+        editId: begun.value.editId,
+        revision: begun.value.revision,
+        markdown: '# Committed\n'
+      },
+      48
+    )
+    expect(saved).toMatchObject({ ok: true, value: { durabilityUncertain: true } })
+    expect(await fs.readFile(path.join(root, 'README.md'), 'utf8')).toBe('# Committed\n')
+  })
+
+  it('keeps post-rename final-read failure in the committed uncertain state', async () => {
+    const root = await makeBook({
+      'SUMMARY.md': '- [Start](README.md)\n',
+      'README.md': '# Start\n'
+    })
+    mocks.selectedPath = root
+    const manager = new BookSessionManager('/edit-final-read-user-data')
+    const opened = await manager.openPicker({ sender: { id: 49 } } as never)
+    if (!opened.ok || !opened.value.nodes[0]) return
+    const begun = await manager.beginEdit(opened.value.sessionId, opened.value.nodes[0].nodeId, 49)
+    if (!begun.ok) return
+
+    const chapterPath = path.join(root, 'README.md')
+    vi.spyOn(
+      manager as unknown as { verifyCommittedBookEditSync: () => boolean },
+      'verifyCommittedBookEditSync'
+    ).mockReturnValueOnce(false)
+    const saved = await manager.saveEdit(
+      {
+        editId: begun.value.editId,
+        revision: begun.value.revision,
+        markdown: '# Committed despite verification failure\n'
+      },
+      49
+    )
+    expect(saved).toMatchObject({
+      ok: false,
+      error: { code: 'edit-commit-uncertain', committed: true }
+    })
+    expect(await manager.reloadEdit(begun.value.editId, 49)).toMatchObject({
+      ok: false,
+      error: { code: 'edit-not-found' }
+    })
+    expect(await fs.readFile(chapterPath, 'utf8')).toContain(
+      'Committed despite verification failure'
+    )
+  })
+
+  it('aborts and cleans a pre-commit temp when the edit is closed', async () => {
+    const root = await makeBook({
+      'SUMMARY.md': '- [Start](README.md)\n',
+      'README.md': '# Original\n'
+    })
+    const reached = deferredValue<void>()
+    const release = deferredValue<void>()
+    mocks.selectedPath = root
+    const manager = new BookSessionManager(
+      '/edit-close-precommit-user-data',
+      undefined,
+      undefined,
+      undefined,
+      {
+        afterEditTempSync: async () => {
+          reached.resolve()
+          await release.promise
+        }
+      }
+    )
+    const opened = await manager.openPicker({ sender: { id: 50 } } as never)
+    if (!opened.ok || !opened.value.nodes[0]) return
+    const begun = await manager.beginEdit(opened.value.sessionId, opened.value.nodes[0].nodeId, 50)
+    if (!begun.ok) return
+    const saving = manager.saveEdit(
+      {
+        editId: begun.value.editId,
+        revision: begun.value.revision,
+        markdown: '# Candidate\n'
+      },
+      50
+    )
+    await reached.promise
+    expect(manager.closeEdit(begun.value.editId, 50)).toEqual({ ok: true, value: true })
+    release.resolve()
+    await expect(saving).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'edit-write-failed' }
+    })
+    expect(await fs.readFile(path.join(root, 'README.md'), 'utf8')).toBe('# Original\n')
+    expect((await fs.readdir(root)).some((name) => name.startsWith('.leafbook-'))).toBe(false)
+  })
+
+  it('rejects a final target swap before the synchronous commit boundary', async () => {
+    const root = await makeBook({
+      'SUMMARY.md': '- [Start](README.md)\n',
+      'README.md': '# Original\n'
+    })
+    mocks.selectedPath = root
+    const chapterPath = path.join(root, 'README.md')
+    const movedPath = path.join(root, 'README-old.md')
+    const manager = new BookSessionManager(
+      '/edit-final-swap-user-data',
+      undefined,
+      undefined,
+      undefined,
+      {
+        beforeEditCommitCritical: async () => {
+          await fs.rename(chapterPath, movedPath)
+          await fs.writeFile(chapterPath, '# Replacement\n')
+        }
+      }
+    )
+    const opened = await manager.openPicker({ sender: { id: 51 } } as never)
+    if (!opened.ok || !opened.value.nodes[0]) return
+    const begun = await manager.beginEdit(opened.value.sessionId, opened.value.nodes[0].nodeId, 51)
+    if (!begun.ok) return
+    await expect(
+      manager.saveEdit(
+        {
+          editId: begun.value.editId,
+          revision: begun.value.revision,
+          markdown: '# Candidate\n'
+        },
+        51
+      )
+    ).resolves.toMatchObject({ ok: false, error: { code: 'edit-write-failed' } })
+    expect(await fs.readFile(chapterPath, 'utf8')).toBe('# Replacement\n')
+    expect(await fs.readFile(movedPath, 'utf8')).toBe('# Original\n')
+  })
+
+  it('rejects an oversized same-inode target before the final synchronous read', async () => {
+    const root = await makeBook({
+      'SUMMARY.md': '- [Start](README.md)\n',
+      'README.md': '# Original\n'
+    })
+    mocks.selectedPath = root
+    const chapterPath = path.join(root, 'README.md')
+    const before = await fs.stat(chapterPath, { bigint: true })
+    const syncRead = vi.spyOn(fsSync, 'readFileSync')
+    const syncRename = vi.spyOn(fsSync, 'renameSync')
+    const manager = new BookSessionManager(
+      '/edit-final-oversize-user-data',
+      undefined,
+      undefined,
+      undefined,
+      {
+        beforeEditCommitCritical: async () => {
+          await fs.appendFile(chapterPath, Buffer.alloc(8 * 1024 * 1024 + 1, 0x78))
+        }
+      }
+    )
+    const opened = await manager.openPicker({ sender: { id: 58 } } as never)
+    if (!opened.ok || !opened.value.nodes[0]) return
+    const begun = await manager.beginEdit(opened.value.sessionId, opened.value.nodes[0].nodeId, 58)
+    if (!begun.ok) return
+    await expect(
+      manager.saveEdit(
+        {
+          editId: begun.value.editId,
+          revision: begun.value.revision,
+          markdown: '# Candidate\n'
+        },
+        58
+      )
+    ).resolves.toMatchObject({ ok: false, error: { code: 'edit-write-failed' } })
+    const after = await fs.stat(chapterPath, { bigint: true })
+    expect({ dev: after.dev, ino: after.ino }).toEqual({ dev: before.dev, ino: before.ino })
+    expect(after.size).toBeGreaterThan(BigInt(8 * 1024 * 1024))
+    expect(syncRead).not.toHaveBeenCalled()
+    expect(syncRename).not.toHaveBeenCalled()
+    const descriptor = await fs.open(chapterPath, 'r')
+    try {
+      const prefix = Buffer.alloc(11)
+      await descriptor.read(prefix, 0, prefix.length, 0)
+      expect(prefix.toString()).toBe('# Original\n')
+    } finally {
+      await descriptor.close()
+    }
+  })
+
+  it('finishes the atomic commit before honoring a close from the critical hook', async () => {
+    const root = await makeBook({
+      'SUMMARY.md': '- [Start](README.md)\n',
+      'README.md': '# Original\n'
+    })
+    mocks.selectedPath = root
+    let editId = ''
+    const manager = new BookSessionManager(
+      '/edit-critical-close-user-data',
+      undefined,
+      undefined,
+      undefined,
+      {
+        editCommitCriticalStarted: () => {
+          expect(manager.closeEdit(editId, 52)).toEqual({ ok: true, value: true })
+        }
+      }
+    )
+    const opened = await manager.openPicker({ sender: { id: 52 } } as never)
+    if (!opened.ok || !opened.value.nodes[0]) return
+    const begun = await manager.beginEdit(opened.value.sessionId, opened.value.nodes[0].nodeId, 52)
+    if (!begun.ok) return
+    editId = begun.value.editId
+    const saved = await manager.saveEdit(
+      {
+        editId,
+        revision: begun.value.revision,
+        markdown: '# Candidate\n'
+      },
+      52
+    )
+    expect(saved).toMatchObject({ ok: true, value: { readOnly: true } })
+    expect(await fs.readFile(path.join(root, 'README.md'), 'utf8')).toBe('# Candidate\n')
+    expect(await manager.reloadEdit(editId, 52)).toMatchObject({
+      ok: false,
+      error: { code: 'edit-not-found' }
+    })
+  })
+
+  it('finishes the atomic commit before honoring critical session revocation', async () => {
+    const root = await makeBook({
+      'SUMMARY.md': '- [Start](README.md)\n',
+      'README.md': '# Original\n'
+    })
+    mocks.selectedPath = root
+    let sessionId = ''
+    const manager = new BookSessionManager(
+      '/edit-critical-session-close-user-data',
+      undefined,
+      undefined,
+      undefined,
+      {
+        editCommitCriticalStarted: () => {
+          expect(manager.closeSession(sessionId, 57)).toEqual({ ok: true, value: true })
+        }
+      }
+    )
+    const opened = await manager.openPicker({ sender: { id: 57 } } as never)
+    if (!opened.ok || !opened.value.nodes[0]) return
+    sessionId = opened.value.sessionId
+    const begun = await manager.beginEdit(sessionId, opened.value.nodes[0].nodeId, 57)
+    if (!begun.ok) return
+    const saved = await manager.saveEdit(
+      {
+        editId: begun.value.editId,
+        revision: begun.value.revision,
+        markdown: '# Candidate\n'
+      },
+      57
+    )
+    expect(saved).toMatchObject({ ok: true, value: { readOnly: true } })
+    expect(await fs.readFile(path.join(root, 'README.md'), 'utf8')).toBe('# Candidate\n')
+  })
+
+  it('lets public refresh revoke a pre-commit save without sharing its private refresh', async () => {
+    const root = await makeBook({
+      'SUMMARY.md': '- [Start](README.md)\n',
+      'README.md': '# Original\n'
+    })
+    const reached = deferredValue<void>()
+    const release = deferredValue<void>()
+    mocks.selectedPath = root
+    const manager = new BookSessionManager(
+      '/edit-public-refresh-user-data',
+      undefined,
+      undefined,
+      undefined,
+      {
+        afterEditTempSync: async () => {
+          reached.resolve()
+          await release.promise
+        }
+      }
+    )
+    const opened = await manager.openPicker({ sender: { id: 53 } } as never)
+    if (!opened.ok || !opened.value.nodes[0]) return
+    const begun = await manager.beginEdit(opened.value.sessionId, opened.value.nodes[0].nodeId, 53)
+    if (!begun.ok) return
+    const saving = manager.saveEdit(
+      {
+        editId: begun.value.editId,
+        revision: begun.value.revision,
+        markdown: '# Candidate\n'
+      },
+      53
+    )
+    await reached.promise
+    const refreshing = manager.refresh(opened.value.sessionId, 53)
+    release.resolve()
+    await expect(refreshing).resolves.toMatchObject({ ok: true })
+    await expect(saving).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'edit-write-failed' }
+    })
+    expect(await fs.readFile(path.join(root, 'README.md'), 'utf8')).toBe('# Original\n')
+  })
+
+  it('lets a public refresh started after commit observe bytes and revoke the edit', async () => {
+    const root = await makeBook({
+      'SUMMARY.md': '- [Start](README.md)\n',
+      'README.md': '# Original\n'
+    })
+    mocks.selectedPath = root
+    let refresh: Promise<BookReaderResult<BookSessionDto>> | null = null
+    let sessionId = ''
+    const manager = new BookSessionManager(
+      '/edit-postcommit-refresh-user-data',
+      undefined,
+      undefined,
+      undefined,
+      {
+        editCommitCriticalStarted: () => {
+          queueMicrotask(() => {
+            refresh = manager.refresh(sessionId, 54)
+          })
+        }
+      }
+    )
+    const opened = await manager.openPicker({ sender: { id: 54 } } as never)
+    if (!opened.ok || !opened.value.nodes[0]) return
+    sessionId = opened.value.sessionId
+    const begun = await manager.beginEdit(sessionId, opened.value.nodes[0].nodeId, 54)
+    if (!begun.ok) return
+    const saved = await manager.saveEdit(
+      {
+        editId: begun.value.editId,
+        revision: begun.value.revision,
+        markdown: '# Candidate\n'
+      },
+      54
+    )
+    expect(saved).toMatchObject({ ok: true, value: { readOnly: true } })
+    await vi.waitFor(() => expect(refresh).not.toBeNull())
+    const refreshOperation = refresh as Promise<BookReaderResult<BookSessionDto>> | null
+    if (!refreshOperation) return
+    const refreshed = await refreshOperation
+    expect(refreshed).toMatchObject({ ok: true })
+    if (!refreshed.ok || !refreshed.value.nodes[0]) return
+    await expect(
+      manager.readChapter(refreshed.value.sessionId, refreshed.value.nodes[0].nodeId, 54)
+    ).resolves.toMatchObject({ ok: true, value: { markdown: '# Candidate\n' } })
+    await expect(manager.reloadEdit(begun.value.editId, 54)).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'edit-not-found' }
+    })
+  })
+
+  it('rejects a root swap at the final synchronous commit check', async () => {
+    const root = await makeBook({
+      'SUMMARY.md': '- [Start](README.md)\n',
+      'README.md': '# Original\n'
+    })
+    const movedRoot = `${root}-authorized`
+    temporaryDirectories.push(movedRoot)
+    mocks.selectedPath = root
+    const manager = new BookSessionManager(
+      '/edit-final-root-swap-user-data',
+      undefined,
+      undefined,
+      undefined,
+      {
+        beforeEditCommitCritical: async () => {
+          await fs.rename(root, movedRoot)
+          await fs.mkdir(root)
+          await fs.writeFile(path.join(root, 'README.md'), '# Replacement\n')
+        }
+      }
+    )
+    const opened = await manager.openPicker({ sender: { id: 55 } } as never)
+    if (!opened.ok || !opened.value.nodes[0]) return
+    const begun = await manager.beginEdit(opened.value.sessionId, opened.value.nodes[0].nodeId, 55)
+    if (!begun.ok) return
+    await expect(
+      manager.saveEdit(
+        {
+          editId: begun.value.editId,
+          revision: begun.value.revision,
+          markdown: '# Candidate\n'
+        },
+        55
+      )
+    ).resolves.toMatchObject({ ok: false, error: { code: 'edit-write-failed' } })
+    expect(await fs.readFile(path.join(root, 'README.md'), 'utf8')).toBe('# Replacement\n')
+    expect(await fs.readFile(path.join(movedRoot, 'README.md'), 'utf8')).toBe('# Original\n')
+  })
+
+  it('does not issue or mutate a lease after a begin/reload final-read swap', async () => {
+    const root = await makeBook({
+      'SUMMARY.md': '- [Start](README.md)\n',
+      'README.md': '# Original\n'
+    })
+    mocks.selectedPath = root
+    const chapterPath = path.join(root, 'README.md')
+    let operationToSwap: 'begin' | 'reload' | null = 'begin'
+    const manager = new BookSessionManager(
+      '/edit-final-read-swap-user-data',
+      undefined,
+      undefined,
+      undefined,
+      {
+        afterEditRead: async (operation) => {
+          if (operation !== operationToSwap) return
+          operationToSwap = null
+          const prior = `${chapterPath}-${operation}`
+          await fs.rename(chapterPath, prior)
+          await fs.writeFile(chapterPath, `# ${operation} replacement\n`)
+        }
+      }
+    )
+    const opened = await manager.openPicker({ sender: { id: 56 } } as never)
+    if (!opened.ok || !opened.value.nodes[0]) return
+    await expect(
+      manager.beginEdit(opened.value.sessionId, opened.value.nodes[0].nodeId, 56)
+    ).resolves.toMatchObject({ ok: false })
+
+    const refreshed = await manager.refresh(opened.value.sessionId, 56)
+    if (!refreshed.ok || !refreshed.value.nodes[0]) return
+    const begun = await manager.beginEdit(
+      refreshed.value.sessionId,
+      refreshed.value.nodes[0].nodeId,
+      56
+    )
+    if (!begun.ok) return
+    operationToSwap = 'reload'
+    await expect(manager.reloadEdit(begun.value.editId, 56)).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'edit-read-only' }
     })
   })
 

@@ -1,7 +1,8 @@
 /* eslint-disable @stylistic/indent, @stylistic/space-before-function-paren */
 import path from 'path'
 import fs from 'fs/promises'
-import { randomUUID } from 'crypto'
+import fsSync, { constants as fsConstants } from 'fs'
+import { createHash, randomUUID } from 'crypto'
 import {
   BrowserWindow,
   dialog,
@@ -21,6 +22,10 @@ import {
 import type { BookNavigationNode } from 'common/book/model'
 import type {
   BookChapterDto,
+  BookEditDto,
+  BookEditFormatDto,
+  BookEditSaveDto,
+  BookEditSaveRequestDto,
   BookLinkNavigationDto,
   BookReadingProgressDto,
   BookReaderNodeDto,
@@ -48,6 +53,7 @@ const SEARCH_YIELD_BYTES = 256 * 1024
 const MAX_ACTIVE_SEARCH_OWNERS = 8
 const SEARCH_INDEX_RESERVATION_BYTES = MAX_SEARCH_INDEX_BYTES
 const SEARCH_ROOT_CHECKPOINT_INTERVAL = 8
+const MAX_EDIT_BYTES = 8 * 1024 * 1024
 
 interface PersistedChapterPosition {
   targetKey: string
@@ -90,6 +96,7 @@ interface BookSession {
   rootPath: string
   rootIdentity: RootIdentity
   ownerId: number
+  generation: number
   dto: BookSessionDto
   targets: Map<string, SessionTarget>
   chapterNodeByPath: Map<string, string>
@@ -140,10 +147,72 @@ interface RootIdentity {
   ino: bigint
 }
 
+interface FileIdentity {
+  dev: bigint
+  ino: bigint
+  mode: number
+}
+
+interface PathComponentIdentity extends FileIdentity {
+  path: string
+}
+
+interface OverwriteGrant {
+  token: string
+  ownerId: number
+  leaseGeneration: number
+  rootIdentity: RootIdentity
+  targetIdentity: FileIdentity
+  baseRevision: string
+  externalRevision: string
+  candidateRevision: string
+}
+
+interface BookEditLease {
+  editId: string
+  ownerId: number
+  sessionId: string
+  session: BookSession
+  sessionGeneration: number
+  libraryId: string
+  nodeId: string
+  stableKey: string
+  title: string
+  rootPath: string
+  rootIdentity: RootIdentity
+  targetPath: string
+  parentPath: string
+  parentIdentity: FileIdentity
+  ancestry: PathComponentIdentity[]
+  targetIdentity: FileIdentity
+  revision: string
+  format: BookEditFormatDto
+  generation: number
+  controller: AbortController
+  operation: Promise<BookReaderResult<BookEditDto | BookEditSaveDto>> | null
+  operationKey: string | null
+  operationGeneration: number
+  overwriteGrant: OverwriteGrant | null
+  criticalCommit: boolean
+  revokeAfterCommit: boolean
+}
+
+export interface BookSessionManagerTestHooks {
+  afterEditRead?: (operation: 'begin' | 'reload') => void | Promise<void>
+  afterEditTempSync?: () => void | Promise<void>
+  beforeEditCommitCritical?: () => void | Promise<void>
+  editCommitCriticalStarted?: () => void
+}
+
 const error = <T>(
   code: Parameters<typeof structuredError>[0],
-  message: string
-): BookReaderResult<T> => ({ ok: false, error: structuredError(code, message) })
+  message: string,
+  overwriteToken?: string,
+  committed?: boolean
+): BookReaderResult<T> => ({
+  ok: false,
+  error: structuredError(code, message, overwriteToken, committed)
+})
 
 const structuredError = (
   code:
@@ -159,15 +228,85 @@ const structuredError = (
     | 'link-not-found'
     | 'search-cancelled'
     | 'search-busy'
-    | 'search-unavailable',
-  message: string
-) => ({ code, message })
+    | 'search-unavailable'
+    | 'edit-not-found'
+    | 'edit-read-only'
+    | 'edit-conflict'
+    | 'edit-encoding'
+    | 'edit-too-large'
+    | 'edit-mixed-line-endings'
+    | 'edit-commit-uncertain'
+    | 'edit-write-failed',
+  message: string,
+  overwriteToken?: string,
+  committed?: boolean
+) => ({
+  code,
+  message,
+  ...(overwriteToken ? { overwriteToken } : {}),
+  ...(committed === undefined ? {} : { committed })
+})
 
 const validOpaqueId = (value: unknown): value is string =>
   typeof value === 'string' &&
   value.length >= 16 &&
   value.length <= MAX_ID_LENGTH &&
   /^[a-zA-Z0-9-]+$/.test(value)
+
+const hashBytes = (value: Uint8Array): string => createHash('sha256').update(value).digest('hex')
+
+const sameFileIdentity = (left: FileIdentity, right: FileIdentity): boolean =>
+  left.dev === right.dev && left.ino === right.ino
+
+const sameRootIdentity = (left: RootIdentity, right: RootIdentity): boolean =>
+  left.realPath === right.realPath && left.dev === right.dev && left.ino === right.ino
+
+const fileIdentity = async (
+  targetPath: string,
+  requireDirectory = false
+): Promise<FileIdentity | null> => {
+  try {
+    const stat = await fs.lstat(targetPath, { bigint: true })
+    if (stat.isSymbolicLink() || (requireDirectory ? !stat.isDirectory() : !stat.isFile())) {
+      return null
+    }
+    return { dev: stat.dev, ino: stat.ino, mode: Number(stat.mode) }
+  } catch {
+    return null
+  }
+}
+
+const decodeBookEdit = (
+  bytes: Buffer
+): { markdown: string; revision: string; format: BookEditFormatDto } | null => {
+  try {
+    const bom = bytes.length >= 3 && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf
+    const body = bom ? bytes.subarray(3) : bytes
+    const decoded = new TextDecoder('utf-8', { fatal: true }).decode(body)
+    const crlf = decoded.match(/\r\n/g)?.length ?? 0
+    const bareLf = decoded.match(/(?<!\r)\n/g)?.length ?? 0
+    if (/\r(?!\n)/.test(decoded)) return null
+    const lineEnding = crlf >= bareLf ? 'crlf' : 'lf'
+    return {
+      markdown: decoded.replace(/\r\n/g, '\n'),
+      revision: hashBytes(bytes),
+      format: { bom, lineEnding, mixedLineEndings: crlf > 0 && bareLf > 0 }
+    }
+  } catch {
+    return null
+  }
+}
+
+const encodeBookEdit = (markdown: string, format: BookEditFormatDto): Buffer => {
+  const normalized = markdown.replace(/\r\n/g, '\n')
+  const body = format.lineEnding === 'crlf' ? normalized.replace(/\n/g, '\r\n') : normalized
+  return Buffer.from(`${format.bom ? '\uFEFF' : ''}${body}`, 'utf8')
+}
+
+const safeMarkdownInput = (markdown: string): boolean =>
+  markdown.length <= MAX_EDIT_BYTES &&
+  !/\r(?!\n)/.test(markdown) &&
+  Buffer.byteLength(markdown, 'utf8') <= MAX_EDIT_BYTES
 
 const yieldToEventLoop = (): Promise<void> =>
   new Promise((resolve) => {
@@ -348,6 +487,7 @@ export class BookSessionManager {
   private readonly searchIndexes = new Map<BookSession, SearchIndex>()
   private readonly searchBuilds = new Map<BookSession, SearchBuild>()
   private readonly activeSearches = new Map<number, ActiveSearch>()
+  private readonly editLeases = new Map<string, BookEditLease>()
   private searchCacheBytes = 0
   private searchBuildReservationBytes = 0
 
@@ -355,7 +495,8 @@ export class BookSessionManager {
     userDataPath: string,
     private readonly loadBook: typeof loadBookFromDirectory = loadBookFromDirectory,
     private readonly readBookChapter: typeof safelyReadBookChapter = safelyReadBookChapter,
-    private readonly openExternal: typeof shell.openExternal = shell.openExternal
+    private readonly openExternal: typeof shell.openExternal = shell.openExternal,
+    private readonly testHooks: BookSessionManagerTestHooks = {}
   ) {
     this.store = new Store<BookshelfSchema>({
       name: 'bookshelf',
@@ -438,7 +579,9 @@ export class BookSessionManager {
       current.ino === session.rootIdentity.ino
     if (!valid) {
       if (invalidate) {
+        session.generation += 1
         this.revokeSessionSearch(session)
+        this.revokeSessionEdits(sessionId)
         this.sessions.delete(sessionId)
       }
       return 'invalid'
@@ -463,9 +606,14 @@ export class BookSessionManager {
     this.ownerGenerations.set(ownerId, this.ownerGeneration(ownerId) + 1)
     for (const [sessionId, session] of this.sessions) {
       if (session.ownerId === ownerId) {
+        session.generation += 1
         this.revokeSessionSearch(session)
+        this.revokeSessionEdits(sessionId)
         this.sessions.delete(sessionId)
       }
+    }
+    for (const lease of this.editLeases.values()) {
+      if (lease.ownerId === ownerId) this.revokeEditLease(lease)
     }
   }
 
@@ -764,6 +912,7 @@ export class BookSessionManager {
       rootPath: rootIdentity.realPath,
       rootIdentity,
       ownerId,
+      generation: previous?.generation ?? 1,
       dto,
       targets,
       chapterNodeByPath,
@@ -780,7 +929,9 @@ export class BookSessionManager {
     while (owned.length > MAX_SESSIONS) {
       const oldest = owned.shift()
       if (!oldest) break
+      oldest[1].generation += 1
       this.revokeSessionSearch(oldest[1])
+      this.revokeSessionEdits(oldest[0])
       this.sessions.delete(oldest[0])
     }
     return session.dto
@@ -791,7 +942,8 @@ export class BookSessionManager {
     ownerId: number = 0
   ): Promise<BookReaderResult<BookSessionDto>> {
     if (!validOpaqueId(sessionId)) return error('invalid-request', 'Invalid session identifier.')
-    if (!this.ownedSession(sessionId, ownerId)) {
+    const initial = this.ownedSession(sessionId, ownerId)
+    if (!initial) {
       return error('session-not-found', 'This book session has expired.')
     }
     const ownerGeneration = this.ownerGeneration(ownerId)
@@ -807,7 +959,13 @@ export class BookSessionManager {
       }
       return result
     }
-    const operation = this.refreshSession(sessionId, ownerId)
+    // A public refresh is an explicit revocation boundary. It must never share
+    // the save-owned refresh capability below: starting it invalidates every
+    // edit lease before any scan await can race a pending save.
+    initial.generation += 1
+    const sessionGeneration = initial.generation
+    this.revokeSessionEdits(sessionId)
+    const operation = this.refreshSession(sessionId, ownerId, initial, sessionGeneration)
     this.refreshes.set(sessionId, operation)
     try {
       const result = await operation
@@ -826,10 +984,16 @@ export class BookSessionManager {
 
   private async refreshSession(
     sessionId: string,
-    ownerId: number
+    ownerId: number,
+    session: BookSession,
+    sessionGeneration: number
   ): Promise<BookReaderResult<BookSessionDto>> {
-    const session = this.ownedSession(sessionId, ownerId)
-    if (!session) return error('session-not-found', 'This book session has expired.')
+    if (
+      this.ownedSession(sessionId, ownerId) !== session ||
+      session.generation !== sessionGeneration
+    ) {
+      return error('session-not-found', 'This book session has expired.')
+    }
     const initialRoot = await this.validateSessionRoot(sessionId, session)
     if (initialRoot === 'revoked') {
       return error('session-not-found', 'This book session has expired.')
@@ -839,7 +1003,10 @@ export class BookSessionManager {
     }
     this.revokeSessionSearch(session)
     const result = await this.loadBook(session.rootPath)
-    if (this.ownedSession(sessionId, ownerId) !== session) {
+    if (
+      this.ownedSession(sessionId, ownerId) !== session ||
+      session.generation !== sessionGeneration
+    ) {
       return error('session-not-found', 'This book session has expired.')
     }
     const refreshedRoot = await this.validateSessionRoot(sessionId, session)
@@ -852,7 +1019,10 @@ export class BookSessionManager {
     if (result.diagnostics.some((item) => item.code === 'scan-root-error')) {
       return error('book-unavailable', 'LeafBook could not safely refresh this book.')
     }
-    if (this.ownedSession(sessionId, ownerId) !== session) {
+    if (
+      this.ownedSession(sessionId, ownerId) !== session ||
+      session.generation !== sessionGeneration
+    ) {
       return error('session-not-found', 'This book session has expired.')
     }
     const replacement = this.createSession(
@@ -863,6 +1033,7 @@ export class BookSessionManager {
       session,
       sessionId
     )
+    replacement.generation = sessionGeneration
     this.revokeSessionSearch(session)
     this.sessions.set(sessionId, replacement)
     return {
@@ -877,7 +1048,9 @@ export class BookSessionManager {
     if (!session) {
       return error('session-not-found', 'This book session has expired.')
     }
+    session.generation += 1
     this.revokeSessionSearch(session)
+    this.revokeSessionEdits(sessionId)
     this.sessions.delete(sessionId)
     return { ok: true, value: true }
   }
@@ -1335,12 +1508,798 @@ export class BookSessionManager {
       this.writeLibraries(libraries.filter((item) => item.libraryId !== libraryId))
       for (const [sessionId, session] of this.sessions) {
         if (session.libraryId === libraryId) {
+          session.generation += 1
           this.revokeSessionSearch(session)
+          this.revokeSessionEdits(sessionId)
           this.sessions.delete(sessionId)
         }
       }
       return { ok: true, value: true }
     })
+  }
+
+  private editLease(editId: unknown, ownerId: number): BookEditLease | null {
+    if (!validOpaqueId(editId)) return null
+    const lease = this.editLeases.get(editId)
+    return lease?.ownerId === ownerId ? lease : null
+  }
+
+  private leaseIsCurrent(
+    lease: BookEditLease,
+    generation = lease.generation,
+    operationGeneration?: number
+  ): boolean {
+    return (
+      this.editLeases.get(lease.editId) === lease &&
+      lease.generation === generation &&
+      lease.sessionGeneration === lease.session.generation &&
+      this.sessions.get(lease.sessionId) === lease.session &&
+      (operationGeneration === undefined || lease.operationGeneration === operationGeneration) &&
+      !lease.controller.signal.aborted
+    )
+  }
+
+  private revokeEditLease(lease: BookEditLease): void {
+    if (lease.criticalCommit) {
+      lease.revokeAfterCommit = true
+      return
+    }
+    this.finalizeEditLeaseRevocation(lease)
+  }
+
+  private finalizeEditLeaseRevocation(lease: BookEditLease): void {
+    lease.generation += 1
+    lease.operationGeneration += 1
+    lease.controller.abort()
+    lease.overwriteGrant = null
+    this.editLeases.delete(lease.editId)
+  }
+
+  private revokeSessionEdits(sessionId: string): void {
+    for (const lease of this.editLeases.values()) {
+      if (lease.sessionId === sessionId) this.revokeEditLease(lease)
+    }
+  }
+
+  private async pathAncestry(
+    rootPath: string,
+    parentPath: string
+  ): Promise<PathComponentIdentity[] | null> {
+    const relative = path.relative(rootPath, parentPath)
+    if (relative.startsWith('..') || path.isAbsolute(relative)) return null
+    const componentPaths = [rootPath]
+    let current = rootPath
+    for (const component of relative.split(path.sep).filter(Boolean)) {
+      current = path.join(current, component)
+      componentPaths.push(current)
+    }
+    const ancestry: PathComponentIdentity[] = []
+    for (const componentPath of componentPaths) {
+      const identity = await fileIdentity(componentPath, true)
+      if (!identity) return null
+      ancestry.push({ path: componentPath, ...identity })
+    }
+    return ancestry
+  }
+
+  private async validateLeasePath(
+    lease: Pick<
+      BookEditLease,
+      | 'rootPath'
+      | 'rootIdentity'
+      | 'ancestry'
+      | 'parentPath'
+      | 'parentIdentity'
+      | 'targetPath'
+      | 'targetIdentity'
+    >,
+    requireWritable: boolean
+  ): Promise<boolean> {
+    const root = await this.identifyRoot(lease.rootPath)
+    if (!root || !sameRootIdentity(root, lease.rootIdentity)) return false
+    for (const expected of lease.ancestry) {
+      const current = await fileIdentity(expected.path, true)
+      if (!current || !sameFileIdentity(current, expected)) return false
+    }
+    const parent = await fileIdentity(lease.parentPath, true)
+    const target = await fileIdentity(lease.targetPath)
+    if (
+      !parent ||
+      !target ||
+      !sameFileIdentity(parent, lease.parentIdentity) ||
+      !sameFileIdentity(target, lease.targetIdentity)
+    ) {
+      return false
+    }
+    if (requireWritable) {
+      if ((parent.mode & 0o222) === 0 || (target.mode & 0o222) === 0) return false
+      try {
+        await Promise.all([
+          fs.access(lease.parentPath, fsConstants.W_OK),
+          fs.access(lease.targetPath, fsConstants.W_OK)
+        ])
+      } catch {
+        return false
+      }
+    }
+    return true
+  }
+
+  private async readLeaseBytes(
+    lease: Pick<BookEditLease, 'targetPath' | 'targetIdentity'>
+  ): Promise<Buffer | null> {
+    let handle: Awaited<ReturnType<typeof fs.open>> | null = null
+    try {
+      handle = await fs.open(lease.targetPath, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0))
+      const stat = await handle.stat({ bigint: true })
+      if (
+        !stat.isFile() ||
+        stat.size > BigInt(MAX_EDIT_BYTES) ||
+        stat.dev !== lease.targetIdentity.dev ||
+        stat.ino !== lease.targetIdentity.ino
+      ) {
+        return null
+      }
+      const bytes = await handle.readFile()
+      if (bytes.byteLength > MAX_EDIT_BYTES) return null
+      const finalStat = await handle.stat({ bigint: true })
+      if (
+        finalStat.dev !== stat.dev ||
+        finalStat.ino !== stat.ino ||
+        finalStat.size !== stat.size
+      ) {
+        return null
+      }
+      return bytes
+    } catch {
+      return null
+    } finally {
+      await handle?.close().catch(() => undefined)
+    }
+  }
+
+  async beginEdit(
+    sessionId: unknown,
+    nodeId: unknown,
+    ownerId: number = 0
+  ): Promise<BookReaderResult<BookEditDto>> {
+    if (!validOpaqueId(sessionId) || !validOpaqueId(nodeId)) {
+      return error('invalid-request', 'Invalid book edit request.')
+    }
+    const session = this.ownedSession(sessionId, ownerId)
+    if (!session) return error('session-not-found', 'This book session has expired.')
+    if ((await this.validateSessionRoot(sessionId, session, false)) !== 'valid') {
+      return error('book-unavailable', 'This book folder changed and cannot be edited.')
+    }
+    if (this.ownedSession(sessionId, ownerId) !== session) {
+      return error('session-not-found', 'This book session has expired.')
+    }
+    const target = session.targets.get(nodeId)
+    if (!target || target.kind !== 'chapter') {
+      return error('node-not-readable', 'Only a current local chapter can be edited.')
+    }
+    const targetPath = path.join(session.rootPath, ...target.path.split('/'))
+    const parentPath = path.dirname(targetPath)
+    const parentIdentity = await fileIdentity(parentPath, true)
+    if (this.ownedSession(sessionId, ownerId) !== session) {
+      return error('session-not-found', 'This book session has expired.')
+    }
+    const targetIdentity = await fileIdentity(targetPath)
+    if (this.ownedSession(sessionId, ownerId) !== session) {
+      return error('session-not-found', 'This book session has expired.')
+    }
+    const ancestry = await this.pathAncestry(session.rootIdentity.realPath, parentPath)
+    if (!parentIdentity || !targetIdentity || !ancestry) {
+      return error('edit-read-only', 'This chapter is no longer a stable regular file.')
+    }
+    const leaseSeed = {
+      rootPath: session.rootPath,
+      rootIdentity: session.rootIdentity,
+      ancestry,
+      parentPath,
+      parentIdentity,
+      targetPath,
+      targetIdentity
+    }
+    if (!(await this.validateLeasePath(leaseSeed, true))) {
+      return error('edit-read-only', 'This chapter or one of its parent folders is read-only.')
+    }
+    if (this.ownedSession(sessionId, ownerId) !== session) {
+      return error('session-not-found', 'This book session has expired.')
+    }
+    const bytes = await this.readLeaseBytes(leaseSeed)
+    if (!bytes) return error('edit-too-large', 'This chapter cannot be safely opened for editing.')
+    const decoded = decodeBookEdit(bytes)
+    if (!decoded) {
+      return error('edit-encoding', 'Book editing supports strict UTF-8 Markdown only.')
+    }
+    await this.testHooks.afterEditRead?.('begin')
+    const finallyValid = await this.validateLeasePath(leaseSeed, true)
+    if (
+      !finallyValid ||
+      this.ownedSession(sessionId, ownerId) !== session ||
+      session.targets.get(nodeId) !== target
+    ) {
+      return error('session-not-found', 'This book session has expired.')
+    }
+    const editId = randomUUID()
+    const lease: BookEditLease = {
+      editId,
+      ownerId,
+      sessionId,
+      session,
+      sessionGeneration: session.generation,
+      libraryId: session.libraryId,
+      nodeId,
+      stableKey: target.stableKey,
+      title: target.title,
+      rootPath: session.rootPath,
+      rootIdentity: session.rootIdentity,
+      targetPath,
+      parentPath,
+      parentIdentity,
+      ancestry,
+      targetIdentity,
+      revision: decoded.revision,
+      format: decoded.format,
+      generation: 1,
+      controller: new AbortController(),
+      operation: null,
+      operationKey: null,
+      operationGeneration: 0,
+      overwriteGrant: null,
+      criticalCommit: false,
+      revokeAfterCommit: false
+    }
+    this.editLeases.set(editId, lease)
+    return {
+      ok: true,
+      value: {
+        editId,
+        sessionId,
+        nodeId,
+        title: target.title,
+        markdown: decoded.markdown,
+        revision: decoded.revision,
+        format: decoded.format
+      }
+    }
+  }
+
+  async reloadEdit(editId: unknown, ownerId: number = 0): Promise<BookReaderResult<BookEditDto>> {
+    const lease = this.editLease(editId, ownerId)
+    if (!lease) return error('edit-not-found', 'This book edit is no longer available.')
+    if (lease.operation) {
+      if (lease.operationKey === 'reload') {
+        return lease.operation as Promise<BookReaderResult<BookEditDto>>
+      }
+      return error('edit-conflict', 'Another operation is already using this edit.')
+    }
+    const generation = lease.generation
+    const operationGeneration = ++lease.operationGeneration
+    const operation = this.reloadEditLease(lease, generation, operationGeneration)
+    lease.operation = operation
+    lease.operationKey = 'reload'
+    try {
+      return await operation
+    } finally {
+      if (
+        this.leaseIsCurrent(lease, generation, operationGeneration) &&
+        lease.operation === operation
+      ) {
+        lease.operation = null
+        lease.operationKey = null
+      }
+    }
+  }
+
+  private async reloadEditLease(
+    lease: BookEditLease,
+    generation: number,
+    operationGeneration: number
+  ): Promise<BookReaderResult<BookEditDto>> {
+    if (
+      !(await this.validateLeasePath(lease, false)) ||
+      !this.leaseIsCurrent(lease, generation, operationGeneration)
+    ) {
+      if (this.leaseIsCurrent(lease, generation, operationGeneration)) this.revokeEditLease(lease)
+      return error('edit-read-only', 'The chapter or one of its parent folders changed.')
+    }
+    const identity = await fileIdentity(lease.targetPath)
+    if (
+      !this.leaseIsCurrent(lease, generation, operationGeneration) ||
+      !identity ||
+      !sameFileIdentity(identity, lease.targetIdentity)
+    ) {
+      if (this.leaseIsCurrent(lease, generation, operationGeneration)) this.revokeEditLease(lease)
+      return error('edit-read-only', 'The chapter was replaced or removed.')
+    }
+    const bytes = await this.readLeaseBytes(lease)
+    if (!this.leaseIsCurrent(lease, generation, operationGeneration)) {
+      return error('edit-not-found', 'This book edit is no longer available.')
+    }
+    const decoded = bytes ? decodeBookEdit(bytes) : null
+    if (!decoded) return error('edit-encoding', 'The chapter is not valid bounded UTF-8.')
+    await this.testHooks.afterEditRead?.('reload')
+    if (!this.leaseIsCurrent(lease, generation, operationGeneration)) {
+      return error('edit-not-found', 'This book edit is no longer available.')
+    }
+    const finalPathValid = await this.validateLeasePath(lease, false)
+    if (!finalPathValid || !this.leaseIsCurrent(lease, generation, operationGeneration)) {
+      if (this.leaseIsCurrent(lease, generation, operationGeneration)) this.revokeEditLease(lease)
+      return error('edit-read-only', 'The chapter changed while it was being reloaded.')
+    }
+    lease.revision = decoded.revision
+    lease.format = decoded.format
+    lease.overwriteGrant = null
+    return {
+      ok: true,
+      value: {
+        editId: lease.editId,
+        sessionId: lease.sessionId,
+        nodeId: lease.nodeId,
+        title: lease.title,
+        markdown: decoded.markdown,
+        revision: decoded.revision,
+        format: decoded.format
+      }
+    }
+  }
+
+  closeEdit(editId: unknown, ownerId: number = 0): BookReaderResult<true> {
+    const lease = this.editLease(editId, ownerId)
+    if (!lease) return error('edit-not-found', 'This book edit is no longer available.')
+    this.revokeEditLease(lease)
+    return { ok: true, value: true }
+  }
+
+  private async writeLeaseBytes(
+    lease: BookEditLease,
+    bytes: Buffer,
+    expectedRevision: string,
+    generation: number,
+    operationGeneration: number
+  ): Promise<{
+    identity: FileIdentity
+    durabilityUncertain: boolean
+    verified: boolean
+    committed: boolean
+  } | null> {
+    const initiallyValid = await this.validateLeasePath(lease, true)
+    if (!initiallyValid || !this.leaseIsCurrent(lease, generation, operationGeneration)) {
+      return null
+    }
+    const tempPath = path.join(lease.parentPath, `.leafbook-${randomUUID()}.tmp`)
+    let temp: Awaited<ReturnType<typeof fs.open>> | null = null
+    let committed = false
+    try {
+      temp = await fs.open(
+        tempPath,
+        fsConstants.O_WRONLY |
+          fsConstants.O_CREAT |
+          fsConstants.O_EXCL |
+          (fsConstants.O_NOFOLLOW ?? 0),
+        lease.targetIdentity.mode & 0o777
+      )
+      if (!this.leaseIsCurrent(lease, generation, operationGeneration)) return null
+      await temp.writeFile(bytes)
+      if (!this.leaseIsCurrent(lease, generation, operationGeneration)) return null
+      await temp.chmod(lease.targetIdentity.mode & 0o777)
+      if (!this.leaseIsCurrent(lease, generation, operationGeneration)) return null
+      await temp.sync()
+      if (!this.leaseIsCurrent(lease, generation, operationGeneration)) return null
+      const committedIdentity = await temp.stat({ bigint: true })
+      if (
+        !committedIdentity.isFile() ||
+        !this.leaseIsCurrent(lease, generation, operationGeneration)
+      ) {
+        return null
+      }
+      await temp.close()
+      temp = null
+      if (!this.leaseIsCurrent(lease, generation, operationGeneration)) return null
+      await this.testHooks.afterEditTempSync?.()
+      if (!this.leaseIsCurrent(lease, generation, operationGeneration)) return null
+
+      const pathStillValid = await this.validateLeasePath(lease, true)
+      if (!pathStillValid || !this.leaseIsCurrent(lease, generation, operationGeneration)) {
+        return null
+      }
+      const current = await this.readLeaseBytes(lease)
+      if (
+        !current ||
+        hashBytes(current) !== expectedRevision ||
+        !this.leaseIsCurrent(lease, generation, operationGeneration)
+      ) {
+        return null
+      }
+      await this.testHooks.beforeEditCommitCritical?.()
+      if (!this.leaseIsCurrent(lease, generation, operationGeneration)) {
+        return null
+      }
+
+      // Node does not expose renameat(2). Keep the final authority check and
+      // rename in one synchronous event-loop turn so close/refresh/revoke cannot
+      // interleave the validate→commit boundary. Component-wise lstat checks
+      // reject local symlink/root/target swaps immediately before renameSync.
+      if (!this.validateLeasePathSync(lease, expectedRevision, generation, operationGeneration)) {
+        return null
+      }
+      lease.criticalCommit = true
+      this.testHooks.editCommitCriticalStarted?.()
+      fsSync.renameSync(tempPath, lease.targetPath)
+      committed = true
+
+      let durabilityUncertain = false
+      try {
+        const directory = fsSync.openSync(lease.parentPath, fsConstants.O_RDONLY)
+        try {
+          this.syncBookEditDirectorySync(directory)
+        } finally {
+          fsSync.closeSync(directory)
+        }
+      } catch {
+        durabilityUncertain = true
+      }
+      const committedFileIdentity = {
+        dev: committedIdentity.dev,
+        ino: committedIdentity.ino,
+        mode: Number(committedIdentity.mode)
+      }
+      const verified = this.verifyCommittedBookEditSync(
+        lease.targetPath,
+        committedFileIdentity,
+        bytes
+      )
+      if (!verified) {
+        durabilityUncertain = true
+      }
+      return {
+        identity: committedFileIdentity,
+        durabilityUncertain,
+        verified,
+        committed: true
+      }
+    } catch {
+      if (committed) {
+        return {
+          identity: lease.targetIdentity,
+          durabilityUncertain: true,
+          verified: false,
+          committed: true
+        }
+      }
+      return null
+    } finally {
+      lease.criticalCommit = false
+      if (lease.revokeAfterCommit) this.finalizeEditLeaseRevocation(lease)
+      await temp?.close().catch(() => undefined)
+      await fs.unlink(tempPath).catch(() => undefined)
+    }
+  }
+
+  private validateLeasePathSync(
+    lease: BookEditLease,
+    expectedRevision: string,
+    generation: number,
+    operationGeneration: number
+  ): boolean {
+    try {
+      if (!this.leaseIsCurrent(lease, generation, operationGeneration)) return false
+      const rootRealPath = fsSync.realpathSync(lease.rootPath)
+      if (rootRealPath !== lease.rootIdentity.realPath) return false
+      for (const expected of lease.ancestry) {
+        const current = fsSync.lstatSync(expected.path, { bigint: true })
+        if (
+          current.isSymbolicLink() ||
+          !current.isDirectory() ||
+          current.dev !== expected.dev ||
+          current.ino !== expected.ino ||
+          Number(current.mode) !== expected.mode
+        ) {
+          return false
+        }
+      }
+      const parent = fsSync.lstatSync(lease.parentPath, { bigint: true })
+      const target = fsSync.lstatSync(lease.targetPath, { bigint: true })
+      if (
+        !parent.isDirectory() ||
+        target.isSymbolicLink() ||
+        !target.isFile() ||
+        parent.dev !== lease.parentIdentity.dev ||
+        parent.ino !== lease.parentIdentity.ino ||
+        Number(parent.mode) !== lease.parentIdentity.mode ||
+        target.dev !== lease.targetIdentity.dev ||
+        target.ino !== lease.targetIdentity.ino ||
+        Number(target.mode) !== lease.targetIdentity.mode
+      ) {
+        return false
+      }
+      fsSync.accessSync(lease.parentPath, fsConstants.W_OK)
+      fsSync.accessSync(lease.targetPath, fsConstants.W_OK)
+      const descriptor = fsSync.openSync(
+        lease.targetPath,
+        fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0)
+      )
+      try {
+        const opened = fsSync.fstatSync(descriptor, { bigint: true })
+        if (
+          !opened.isFile() ||
+          opened.size > BigInt(MAX_EDIT_BYTES) ||
+          opened.dev !== lease.targetIdentity.dev ||
+          opened.ino !== lease.targetIdentity.ino ||
+          Number(opened.mode) !== lease.targetIdentity.mode
+        ) {
+          return false
+        }
+        return hashBytes(fsSync.readFileSync(descriptor)) === expectedRevision
+      } finally {
+        fsSync.closeSync(descriptor)
+      }
+    } catch {
+      return false
+    }
+  }
+
+  private syncBookEditDirectorySync(directory: number): void {
+    fsSync.fsyncSync(directory)
+  }
+
+  private verifyCommittedBookEditSync(
+    targetPath: string,
+    targetIdentity: FileIdentity,
+    expected: Buffer
+  ): boolean {
+    let descriptor: number | null = null
+    try {
+      descriptor = fsSync.openSync(targetPath, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0))
+      const stat = fsSync.fstatSync(descriptor, { bigint: true })
+      if (
+        !stat.isFile() ||
+        stat.size > BigInt(MAX_EDIT_BYTES) ||
+        stat.dev !== targetIdentity.dev ||
+        stat.ino !== targetIdentity.ino
+      ) {
+        return false
+      }
+      return hashBytes(fsSync.readFileSync(descriptor)) === hashBytes(expected)
+    } catch {
+      return false
+    } finally {
+      if (descriptor !== null) fsSync.closeSync(descriptor)
+    }
+  }
+
+  private async refreshAfterSave(
+    lease: BookEditLease,
+    generation: number,
+    operationGeneration: number
+  ): Promise<{ session: BookSessionDto; nodeId: string } | null> {
+    const session = lease.session
+    const sessionGeneration = lease.sessionGeneration
+    if (!this.leaseIsCurrent(lease, generation, operationGeneration)) return null
+    const result = await this.loadBook(session.rootPath)
+    if (
+      !this.leaseIsCurrent(lease, generation, operationGeneration) ||
+      this.sessions.get(lease.sessionId) !== session ||
+      session.generation !== sessionGeneration
+    ) {
+      return null
+    }
+    const rootStatus = await this.validateSessionRoot(lease.sessionId, session)
+    if (
+      rootStatus !== 'valid' ||
+      !this.leaseIsCurrent(lease, generation, operationGeneration) ||
+      result.diagnostics.some((item) => item.code === 'scan-root-error')
+    ) {
+      return null
+    }
+    const replacement = this.createSession(
+      session.libraryId,
+      session.rootIdentity,
+      session.ownerId,
+      result,
+      session,
+      lease.sessionId
+    )
+    replacement.generation = sessionGeneration + 1
+    const reboundNodeId = replacement.opaqueNodeIds.get(lease.stableKey)
+    if (
+      !reboundNodeId ||
+      !this.leaseIsCurrent(lease, generation, operationGeneration) ||
+      this.sessions.get(lease.sessionId) !== session ||
+      session.generation !== sessionGeneration
+    ) {
+      return null
+    }
+
+    // Consume only this save operation's private scan. Other leases are tied
+    // to the replaced session object and are revoked; the saving lease is
+    // rebound atomically with the replacement.
+    session.generation = replacement.generation
+    for (const candidate of [...this.editLeases.values()]) {
+      if (candidate.sessionId === lease.sessionId && candidate !== lease) {
+        this.revokeEditLease(candidate)
+      }
+    }
+    this.revokeSessionSearch(session)
+    this.sessions.set(lease.sessionId, replacement)
+    lease.session = replacement
+    lease.sessionGeneration = replacement.generation
+    lease.nodeId = reboundNodeId
+    lease.rootIdentity = replacement.rootIdentity
+    return { session: replacement.dto, nodeId: reboundNodeId }
+  }
+
+  async saveEdit(
+    request: unknown,
+    ownerId: number = 0
+  ): Promise<BookReaderResult<BookEditSaveDto>> {
+    const candidate = request as Partial<BookEditSaveRequestDto> | null
+    if (
+      !candidate ||
+      !validOpaqueId(candidate.editId) ||
+      typeof candidate.revision !== 'string' ||
+      !/^[a-f0-9]{64}$/.test(candidate.revision) ||
+      typeof candidate.markdown !== 'string' ||
+      !safeMarkdownInput(candidate.markdown) ||
+      (candidate.overwriteToken !== undefined && !validOpaqueId(candidate.overwriteToken))
+    ) {
+      return error('invalid-request', 'Invalid book edit save request.')
+    }
+    const lease = this.editLease(candidate.editId, ownerId)
+    if (!lease) return error('edit-not-found', 'This book edit is no longer available.')
+    const operationKey = hashBytes(
+      Buffer.from(
+        JSON.stringify({
+          revision: candidate.revision,
+          markdown: candidate.markdown,
+          overwriteToken: candidate.overwriteToken ?? null,
+          confirmMixedLineEndings: candidate.confirmMixedLineEndings === true
+        })
+      )
+    )
+    if (lease.operation) {
+      if (lease.operationKey === operationKey) {
+        return lease.operation as Promise<BookReaderResult<BookEditSaveDto>>
+      }
+      return error('edit-conflict', 'Another operation is already using this edit.')
+    }
+    const generation = lease.generation
+    const operationGeneration = ++lease.operationGeneration
+    const operation = this.saveEditLease(
+      candidate as BookEditSaveRequestDto,
+      lease,
+      generation,
+      operationGeneration
+    )
+    lease.operation = operation
+    lease.operationKey = operationKey
+    try {
+      return await operation
+    } finally {
+      if (
+        this.leaseIsCurrent(lease, generation, operationGeneration) &&
+        lease.operation === operation
+      ) {
+        lease.operation = null
+        lease.operationKey = null
+      }
+    }
+  }
+
+  private async saveEditLease(
+    candidate: BookEditSaveRequestDto,
+    lease: BookEditLease,
+    generation: number,
+    operationGeneration: number
+  ): Promise<BookReaderResult<BookEditSaveDto>> {
+    if (candidate.revision !== lease.revision) {
+      return error('edit-conflict', 'This edit revision is stale.')
+    }
+    if (lease.format.mixedLineEndings && candidate.confirmMixedLineEndings !== true) {
+      return error(
+        'edit-mixed-line-endings',
+        'This file mixes line endings. Confirm normalization before saving.'
+      )
+    }
+    const bytes = encodeBookEdit(candidate.markdown, lease.format)
+    if (bytes.byteLength > MAX_EDIT_BYTES) {
+      return error('edit-too-large', 'The edited chapter exceeds the safe editing limit.')
+    }
+    const current = await this.readLeaseBytes(lease)
+    if (!this.leaseIsCurrent(lease, generation, operationGeneration)) {
+      return error('edit-not-found', 'This book edit is no longer available.')
+    }
+    if (!current) {
+      this.revokeEditLease(lease)
+      return error('edit-read-only', 'The chapter was replaced, removed, or became unreadable.')
+    }
+    const currentRevision = hashBytes(current)
+    const candidateRevision = hashBytes(bytes)
+    let expectedRevision = lease.revision
+    if (currentRevision !== lease.revision) {
+      const grant = lease.overwriteGrant
+      const validOverwrite =
+        typeof candidate.overwriteToken === 'string' &&
+        grant !== null &&
+        candidate.overwriteToken === grant.token &&
+        grant.ownerId === lease.ownerId &&
+        grant.leaseGeneration === generation &&
+        sameRootIdentity(grant.rootIdentity, lease.rootIdentity) &&
+        sameFileIdentity(grant.targetIdentity, lease.targetIdentity) &&
+        grant.baseRevision === lease.revision &&
+        grant.externalRevision === currentRevision &&
+        grant.candidateRevision === candidateRevision
+      if (!validOverwrite) {
+        const token = randomUUID()
+        lease.overwriteGrant = {
+          token,
+          ownerId: lease.ownerId,
+          leaseGeneration: generation,
+          rootIdentity: { ...lease.rootIdentity },
+          targetIdentity: { ...lease.targetIdentity },
+          baseRevision: lease.revision,
+          externalRevision: currentRevision,
+          candidateRevision
+        }
+        return error(
+          'edit-conflict',
+          'The chapter changed outside LeafBook. Reload it or explicitly overwrite it.',
+          token
+        )
+      }
+      expectedRevision = currentRevision
+      // Consume before the first write await. Concurrent replays cannot pass
+      // because the lease itself is single-flight and the grant is now gone.
+      lease.overwriteGrant = null
+    }
+    const write = await this.writeLeaseBytes(
+      lease,
+      bytes,
+      expectedRevision,
+      generation,
+      operationGeneration
+    )
+    if (!write) {
+      return error('edit-write-failed', 'The chapter changed while LeafBook was saving it.')
+    }
+    if (!write.verified) {
+      this.revokeEditLease(lease)
+      return error(
+        'edit-commit-uncertain',
+        'The new content may be visible, but LeafBook could not verify the committed chapter. Reopen the book before editing again.',
+        undefined,
+        true
+      )
+    }
+    lease.targetIdentity = write.identity
+    lease.revision = candidateRevision
+    lease.format = { ...lease.format, mixedLineEndings: false }
+
+    let refreshed: BookSessionDto | null = null
+    let reboundNodeId: string | null = null
+    if (this.leaseIsCurrent(lease, generation, operationGeneration)) {
+      const refresh = await this.refreshAfterSave(lease, generation, operationGeneration)
+      if (refresh) {
+        refreshed = refresh.session
+        reboundNodeId = refresh.nodeId
+      }
+    }
+    const stillEditable = this.leaseIsCurrent(lease, generation, operationGeneration)
+    return {
+      ok: true,
+      value: {
+        editId: lease.editId,
+        revision: lease.revision,
+        markdown: candidate.markdown,
+        format: lease.format,
+        session: refreshed,
+        nodeId: reboundNodeId,
+        readOnly: !stillEditable || !refreshed || !reboundNodeId,
+        durabilityUncertain: write.durabilityUncertain
+      }
+    }
   }
 
   async readChapter(

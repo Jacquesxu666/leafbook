@@ -31,11 +31,19 @@
       <export-setting-dialog />
       <rename />
       <import-modal />
+      <button
+        v-if="booksStore.mode === 'editor' && booksStore.session"
+        class="back-to-book"
+        @click="booksStore.returnToBook"
+      >
+        Back to Book
+      </button>
     </div>
     <div v-if="booksStore.mode !== 'editor'" class="book-titlebar-host">
       <title-bar :project="null" :active="windowActive" :platform="platform" :is-saved="true" />
     </div>
     <book-workspace v-if="booksStore.mode !== 'editor'" />
+    <book-edit-dialog />
   </div>
 </template>
 
@@ -65,6 +73,7 @@ import { useAutoUpdatesStore } from '@/store/autoUpdates'
 import { useNotificationStore } from '@/store/notification'
 import { useBooksStore } from '@/store/books'
 import BookWorkspace from '@/components/bookWorkspace/index.vue'
+import BookEditDialog from '@/components/bookEditDialog.vue'
 
 const mainStore = useMainStore()
 const editorStore = useEditorStore()
@@ -125,6 +134,40 @@ watch(zoom, (zoomValue) => {
   bus.emit('mt::window-zoom', zoomValue)
 })
 
+const focusBookEditorSurface = (attempt: number): void => {
+  // Reuse the editor's existing instance-backed focus command to restore its
+  // selection, then give DOM focus to the visible Muya contenteditable.
+  bus.emit('editor-focus')
+  const editor = document.querySelector<HTMLElement>('.editor-component')
+  const surface = [
+    ...(editor?.querySelectorAll<HTMLElement>('[contenteditable="true"]') ?? [])
+  ].find((element) => element.getClientRects().length > 0)
+  if (surface) {
+    surface.focus({ preventScroll: true })
+    const selection = window.getSelection()
+    if (selection && !surface.contains(selection.anchorNode)) {
+      const range = document.createRange()
+      range.selectNodeContents(surface)
+      range.collapse(true)
+      selection.removeAllRanges()
+      selection.addRange(range)
+    }
+  }
+  if (attempt < 3) {
+    requestAnimationFrame(() => focusBookEditorSurface(attempt + 1))
+  }
+}
+
+watch(
+  () => booksStore.mode,
+  async (mode, previousMode) => {
+    if (mode !== 'editor' || previousMode === 'editor') return
+    await nextTick()
+    if (editorStore.currentFile?.tabKind !== 'book') return
+    requestAnimationFrame(() => focusBookEditorSurface(0))
+  }
+)
+
 const setupDragDropHandler = (): void => {
   window.addEventListener(
     'dragover',
@@ -162,6 +205,13 @@ const setupDragDropHandler = (): void => {
   )
 }
 onMounted(async () => {
+  bus.on('lb::open-book-edit', (payload) => {
+    editorStore.OPEN_BOOK_EDIT(payload as import('@shared/types/bookReader').BookEditDto)
+  })
+  bus.on('lb::prepare-return-to-book', (payload) => {
+    const resolve = payload as (value: boolean) => void
+    editorStore.PREPARE_RETURN_TO_BOOK().then(resolve, () => resolve(false))
+  })
   if (window.marktext?.initialState) {
     preferencesStore.SET_USER_PREFERENCE(window.marktext.initialState)
   }
@@ -227,7 +277,11 @@ onMounted(async () => {
     addStyles(style)
   })
 })
-onBeforeUnmount(() => removeOpenBookListener?.())
+onBeforeUnmount(() => {
+  removeOpenBookListener?.()
+  bus.off('lb::open-book-edit')
+  bus.off('lb::prepare-return-to-book')
+})
 </script>
 
 <style scoped>
@@ -248,6 +302,17 @@ onBeforeUnmount(() => removeOpenBookListener?.())
   inset: 0 0 auto;
   z-index: 30;
   height: var(--titleBarHeight);
+}
+.back-to-book {
+  position: fixed;
+  z-index: 40;
+  top: calc(var(--titleBarHeight) + 10px);
+  right: 18px;
+  border: 0;
+  border-radius: 8px;
+  padding: 8px 12px;
+  color: var(--buttonPrimaryFontColor);
+  background: var(--buttonPrimaryBgColor);
 }
 .editor-container .hide {
   z-index: -1;

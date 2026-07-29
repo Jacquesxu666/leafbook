@@ -14,6 +14,9 @@ import type { MenuTemplate, MenuPopupPosition } from '@shared/types/menu'
 import type { SerializedStat } from '@shared/types/files'
 import type {
   BookChapterDto,
+  BookEditDto,
+  BookEditSaveDto,
+  BookEditSaveRequestDto,
   BookLinkNavigationDto,
   BookReadingProgressDto,
   BookReaderResult,
@@ -113,6 +116,10 @@ declare global {
       refresh(sessionId: string): Promise<BookReaderResult<BookSessionDto>>
       closeSession(sessionId: string): Promise<BookReaderResult<true>>
       readChapter(sessionId: string, nodeId: string): Promise<BookReaderResult<BookChapterDto>>
+      beginEdit(sessionId: string, nodeId: string): Promise<BookReaderResult<BookEditDto>>
+      saveEdit(request: BookEditSaveRequestDto): Promise<BookReaderResult<BookEditSaveDto>>
+      reloadEdit(editId: string): Promise<BookReaderResult<BookEditDto>>
+      closeEdit(editId: string): Promise<BookReaderResult<true>>
       saveReadingPosition(
         sessionId: string,
         nodeId: string,

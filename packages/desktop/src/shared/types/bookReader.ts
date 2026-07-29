@@ -14,10 +14,20 @@ export type BookReaderErrorCode =
   | 'search-cancelled'
   | 'search-busy'
   | 'search-unavailable'
+  | 'edit-not-found'
+  | 'edit-read-only'
+  | 'edit-conflict'
+  | 'edit-encoding'
+  | 'edit-too-large'
+  | 'edit-mixed-line-endings'
+  | 'edit-commit-uncertain'
+  | 'edit-write-failed'
 
 export interface BookReaderError {
   code: BookReaderErrorCode
   message: string
+  overwriteToken?: string
+  committed?: boolean
 }
 
 export type BookReaderResult<T> = { ok: true; value: T } | { ok: false; error: BookReaderError }
@@ -67,6 +77,41 @@ export interface BookChapterDto {
   fragment: string | null
   readingPosition: number
   hasReadingPosition: boolean
+}
+
+export interface BookEditFormatDto {
+  bom: boolean
+  lineEnding: 'lf' | 'crlf'
+  mixedLineEndings: boolean
+}
+
+export interface BookEditDto {
+  editId: string
+  sessionId: string
+  nodeId: string
+  title: string
+  markdown: string
+  revision: string
+  format: BookEditFormatDto
+}
+
+export interface BookEditSaveRequestDto {
+  editId: string
+  revision: string
+  markdown: string
+  confirmMixedLineEndings?: boolean
+  overwriteToken?: string
+}
+
+export interface BookEditSaveDto {
+  editId: string
+  revision: string
+  markdown: string
+  format: BookEditFormatDto
+  session: BookSessionDto | null
+  nodeId: string | null
+  readOnly: boolean
+  durabilityUncertain: boolean
 }
 
 export interface BookLinkNavigationDto {

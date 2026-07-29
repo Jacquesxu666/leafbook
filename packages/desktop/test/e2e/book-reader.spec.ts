@@ -3,7 +3,16 @@ import { test, expect } from '@playwright/test'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { clickMenuById, expectNoRendererErrors, launchElectron, waitForEditor } from './helpers'
+import {
+  clickMenuById,
+  expectNoRendererErrors,
+  getMarkdownContent,
+  launchElectron,
+  sendIpcToRenderer,
+  setSourceMarkdown,
+  typeIntoEditor,
+  waitForEditor
+} from './helpers'
 
 test('open book, navigate chapters, return to bookshelf, and preserve editor flow', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'leafbook-e2e-book-'))
@@ -126,6 +135,139 @@ test('Escape closes the mobile contents drawer from a focused tree button', asyn
     await expect(page.locator('#book-contents')).toHaveCount(0)
     await expect(contents).toHaveAttribute('aria-expanded', 'false')
     await expect(contents).toBeFocused()
+    await page.getByRole('button', { name: 'Edit', exact: true }).click()
+    await waitForEditor(page)
+    await expect(page.getByRole('button', { name: 'Back to Book' })).toBeVisible()
+    await expect(page.locator('.editor-component')).toBeVisible()
+    await expect
+      .poll(() =>
+        page.evaluate(() => {
+          const editor = document.querySelector('.editor-component')
+          return Boolean(
+            editor && document.activeElement && editor.contains(document.activeElement)
+          )
+        })
+      )
+      .toBe(true)
+    await page.getByRole('button', { name: 'Back to Book' }).click()
+    await expect(page.locator('.book-content')).toHaveAttribute('data-reading-ready', 'true')
+    await expectNoRendererErrors(app)
+  } finally {
+    await app.close()
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
+test('edits the current chapter, resolves conflicts, and returns with reading progress', async () => {
+  test.setTimeout(60_000)
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'leafbook-e2e-edit-book-'))
+  const filler = Array.from(
+    { length: 90 },
+    (_, index) => `## Section ${index + 1}\n\nOriginal paragraph ${index + 1}.`
+  ).join('\n\n')
+  const chapterPath = path.join(root, 'README.md')
+  await fs.writeFile(path.join(root, 'SUMMARY.md'), '# Summary\n\n- [Editable](README.md)\n')
+  await fs.writeFile(chapterPath, `# Editable\n\n${filler}\n`)
+
+  const { app, page } = await launchElectron([], { suppressErrorDialog: true })
+  try {
+    await app.evaluate(({ BrowserWindow }) => {
+      BrowserWindow.getAllWindows()[0]?.setContentSize(900, 600)
+    })
+    await app.evaluate(({ dialog }, selectedRoot) => {
+      dialog.showOpenDialog = async () =>
+        ({
+          canceled: false,
+          filePaths: [selectedRoot],
+          bookmarks: []
+        }) as Electron.OpenDialogReturnValue
+    }, root)
+    await clickMenuById(app, 'leafbookOpenBook')
+    const readingSurface = page.locator('.book-content')
+    await expect(readingSurface).toHaveAttribute('data-reading-ready', 'true')
+    await readingSurface.evaluate((element) => {
+      element.scrollTop = (element.scrollHeight - element.clientHeight) * 0.58
+      element.dispatchEvent(new Event('scroll'))
+    })
+    await page.getByRole('button', { name: 'Edit', exact: true }).click()
+    await waitForEditor(page)
+    await setSourceMarkdown(
+      page,
+      app,
+      `# Edited heading\n\nSaved from LeafBook editor.\n\n${filler}\n`
+    )
+    await typeIntoEditor(page, ' Muya-token')
+    await sendIpcToRenderer(app, 'mt::editor-ask-file-save')
+    await expect
+      .poll(() => fs.readFile(chapterPath, 'utf8'))
+      .toContain('Saved from LeafBook editor.')
+
+    await page.getByRole('button', { name: 'Back to Book' }).click()
+    await expect(readingSurface).toHaveAttribute('data-reading-ready', 'true')
+    await expect(page.locator('.leafbook-markdown h1')).toHaveText('Edited heading')
+    await expect(page.locator('.leafbook-markdown')).toContainText('Muya-token')
+    await expect
+      .poll(() =>
+        readingSurface.evaluate((element) => {
+          const scrollable = element.scrollHeight - element.clientHeight
+          return scrollable > 0 ? element.scrollTop / scrollable : 0
+        })
+      )
+      .toBeGreaterThan(0.45)
+
+    await page.getByRole('button', { name: 'Edit', exact: true }).click()
+    await setSourceMarkdown(page, app, '# Mine\n\nCancel must keep external bytes.\n')
+    await fs.writeFile(chapterPath, '# External\n\nExternal version stays.\n')
+    const backToBook = page.getByRole('button', { name: 'Back to Book' })
+    await backToBook.focus()
+    await sendIpcToRenderer(app, 'mt::editor-ask-file-save')
+    const conflictDialog = page.getByRole('dialog', { name: 'Chapter changed on disk' })
+    await expect(conflictDialog).toBeVisible()
+    await expect(conflictDialog.getByRole('button', { name: 'Cancel' })).toBeFocused()
+    await expect(conflictDialog.getByRole('button')).toHaveCount(3)
+    await page.keyboard.press('Shift+Tab')
+    await expect(conflictDialog.getByRole('button', { name: 'Overwrite' })).toBeFocused()
+    await page.keyboard.press('Tab')
+    await expect(conflictDialog.getByRole('button', { name: 'Cancel' })).toBeFocused()
+    await backToBook.evaluate((element: HTMLElement) => element.focus())
+    await expect(backToBook).toBeFocused()
+    await page.keyboard.press('Escape')
+    await expect(conflictDialog).toBeHidden()
+    await expect(backToBook).toBeFocused()
+    await expect.poll(() => fs.readFile(chapterPath, 'utf8')).toContain('External version stays.')
+
+    await sendIpcToRenderer(app, 'mt::editor-ask-file-save')
+    await conflictDialog.getByRole('button', { name: 'Reload' }).click()
+    await expect.poll(() => getMarkdownContent(page, app)).toContain('External version stays.')
+
+    await setSourceMarkdown(page, app, '# Overwritten\n\nExplicit overwrite wins.\n')
+    await fs.writeFile(chapterPath, '# External again\n\nSecond conflict.\n')
+    await sendIpcToRenderer(app, 'mt::editor-ask-file-save')
+    await conflictDialog.getByRole('button', { name: 'Overwrite' }).click()
+    await expect.poll(() => fs.readFile(chapterPath, 'utf8')).toContain('Explicit overwrite wins.')
+
+    await setSourceMarkdown(page, app, '# Dirty\n\nBack guard must not lose this silently.\n')
+    await backToBook.click()
+    const dirtyDialog = page.getByRole('dialog', { name: 'Unsaved chapter changes' })
+    await expect(dirtyDialog).toBeVisible()
+    await dirtyDialog.getByRole('button', { name: 'Cancel' }).click()
+    await expect(page.locator('.editor-component')).toBeVisible()
+    await backToBook.click()
+    await dirtyDialog.getByRole('button', { name: 'Discard' }).click()
+    await expect(readingSurface).toHaveAttribute('data-reading-ready', 'true')
+    await expect(page.locator('.leafbook-markdown')).toContainText('Explicit overwrite wins.')
+
+    await page.getByRole('button', { name: 'Edit', exact: true }).click()
+    await waitForEditor(page)
+    await setSourceMarkdown(page, app, '# Window dirty\n\nWindow close guard.\n')
+    await typeIntoEditor(page, ' window-dirty-token')
+    await sendIpcToRenderer(app, 'mt::ask-for-close')
+    await expect(dirtyDialog).toBeVisible()
+    await dirtyDialog.getByRole('button', { name: 'Cancel' }).click()
+    await expect(page.locator('.editor-component')).toBeVisible()
+    await backToBook.click()
+    await dirtyDialog.getByRole('button', { name: 'Discard' }).click()
+    await expect(readingSurface).toHaveAttribute('data-reading-ready', 'true')
     await expectNoRendererErrors(app)
   } finally {
     await app.close()
