@@ -1,1 +1,1 @@
-export { loadBookFromDirectory } from './filesystem'
+export { loadBookFromDirectory, safelyReadBookChapter } from './filesystem'

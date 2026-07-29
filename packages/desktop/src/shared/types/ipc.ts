@@ -32,12 +32,36 @@ import type {
 } from './files'
 import type { BufferedState as BufferedStateType } from './bufferedState'
 import type { MenuTemplate, MenuPopupPosition } from './menu'
+import type {
+  BookChapterDto,
+  BookLinkNavigationDto,
+  BookReaderResult,
+  BookshelfEntryDto,
+  BookSessionDto
+} from './bookReader'
 
 // =================================================================
 // Invoke channels (renderer → main, returns Promise<T>)
 // =================================================================
 
 export interface IpcInvokeChannels {
+  'lb::books::list': { args: []; ret: BookshelfEntryDto[] }
+  'lb::books::open-picker': { args: []; ret: BookReaderResult<BookSessionDto> }
+  'lb::books::open-library': {
+    args: [libraryId: string]
+    ret: BookReaderResult<BookSessionDto>
+  }
+  'lb::books::remove': { args: [libraryId: string]; ret: BookReaderResult<true> }
+  'lb::books::refresh': { args: [sessionId: string]; ret: BookReaderResult<BookSessionDto> }
+  'lb::books::close-session': { args: [sessionId: string]; ret: BookReaderResult<true> }
+  'lb::books::read-chapter': {
+    args: [sessionId: string, nodeId: string]
+    ret: BookReaderResult<BookChapterDto>
+  }
+  'lb::books::follow-link': {
+    args: [sessionId: string, nodeId: string, href: string]
+    ret: BookReaderResult<BookLinkNavigationDto | null>
+  }
   'mt::ask-for-image-path': { args: []; ret: string[] }
   'mt::boot-info-async': { args: []; ret: BootInfo }
   'mt::clipboard::guess-file-path': { args: []; ret: string | null }
@@ -130,7 +154,9 @@ export interface IpcSendChannels {
   'mt::open-file-by-window-id': [windowId: number, filePath: string, options?: unknown]
   'mt::open-keybindings-config': []
   'mt::open-setting-window': []
-  'mt::rename': [payload: { id: string; pathname: string; newPathname: string; currentFile?: unknown }]
+  'mt::rename': [
+    payload: { id: string; pathname: string; newPathname: string; currentFile?: unknown }
+  ]
   'mt::request-keybindings': []
   'mt::set-editor-format-menus-enabled': [windowId: number, enabled: boolean]
   'mt::response-export': [
@@ -215,6 +241,7 @@ export interface IpcSyncChannels {
 // =================================================================
 
 export interface IpcMainEventChannels {
+  'lb::books::open-requested': []
   'language-changed': [language: string]
   'mt::UPDATE_AVAILABLE': [info?: unknown]
   'mt::UPDATE_DOWNLOADED': [info?: unknown]

@@ -418,6 +418,60 @@ const safelyReadFile = async (
   }
 }
 
+export interface SafeBookChapterReadResult {
+  content: string
+}
+
+/**
+ * Read one model-authorized chapter through the same descriptor, containment,
+ * symlink and bounded-read checks used by the scanner.
+ *
+ * Authorization (session + node mapping) belongs to BookSessionManager. This
+ * function is deliberately not an arbitrary renderer-facing path API.
+ */
+export const safelyReadBookChapter = async (
+  rootPath: string,
+  relativePath: string,
+  byteLimit: number = DEFAULTS.maxFileBytes
+): Promise<SafeBookChapterReadResult | null> => {
+  if (
+    typeof rootPath !== 'string' ||
+    !path.isAbsolute(rootPath) ||
+    typeof relativePath !== 'string' ||
+    !relativePath ||
+    relativePath.includes('\0') ||
+    path.isAbsolute(relativePath) ||
+    !isMarkdownBookPath(relativePath)
+  ) {
+    return null
+  }
+  const normalized = relativePath.replaceAll('\\', '/')
+  if (
+    normalized.split('/').some((segment) => segment === '..' || segment === '') ||
+    normalized.length > 4_096
+  ) {
+    return null
+  }
+  try {
+    const realRoot = await fs.realpath(rootPath)
+    if (!(await fs.stat(realRoot)).isDirectory()) return null
+    const absolutePath = path.join(realRoot, ...normalized.split('/'))
+    if (!isWithinRoot(realRoot, absolutePath)) return null
+    const diagnostics = new ScanDiagnostics(4)
+    const result = await safelyReadFile(
+      absolutePath,
+      normalized,
+      realRoot,
+      finiteLimit(byteLimit, DEFAULTS.maxFileBytes, 1, 64 * 1024 * 1024),
+      diagnostics,
+      {}
+    )
+    return result ? { content: result.content } : null
+  } catch {
+    return null
+  }
+}
+
 /**
  * Main-process filesystem boundary.
  *

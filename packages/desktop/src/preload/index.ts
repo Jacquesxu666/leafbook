@@ -226,6 +226,19 @@ const fontsAPI = {
   list: () => invoke('mt::fonts::list')
 }
 
+const booksAPI = {
+  list: () => invoke('lb::books::list'),
+  openPicker: () => invoke('lb::books::open-picker'),
+  openLibrary: (libraryId: string) => invoke('lb::books::open-library', libraryId),
+  remove: (libraryId: string) => invoke('lb::books::remove', libraryId),
+  refresh: (sessionId: string) => invoke('lb::books::refresh', sessionId),
+  closeSession: (sessionId: string) => invoke('lb::books::close-session', sessionId),
+  readChapter: (sessionId: string, nodeId: string) =>
+    invoke('lb::books::read-chapter', sessionId, nodeId),
+  followLink: (sessionId: string, nodeId: string, href: string) =>
+    invoke('lb::books::follow-link', sessionId, nodeId, href)
+}
+
 const electronAPI = {
   ipcRenderer: ipcWrapper,
   shell: shellAPI,
@@ -242,7 +255,8 @@ const electronAPI = {
   },
   paths: bootInfo?.paths || {},
   isUpdatable: !!bootInfo?.isUpdatable,
-  windowControl: windowControlAPI
+  windowControl: windowControlAPI,
+  books: booksAPI
 }
 
 // Expose a Node-`path`-compatible API to the renderer. `pathe` is a

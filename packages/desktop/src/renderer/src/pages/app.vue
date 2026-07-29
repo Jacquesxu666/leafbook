@@ -1,8 +1,9 @@
+<!-- eslint-disable vue/max-attributes-per-line -->
 <template>
   <div class="editor-container">
-    <side-bar v-if="init" />
+    <side-bar v-if="init" v-show="booksStore.mode === 'editor'" />
 
-    <div class="editor-middle">
+    <div v-show="booksStore.mode === 'editor'" class="editor-middle">
       <title-bar
         :project="projectTree"
         :pathname="pathname"
@@ -13,10 +14,7 @@
         :is-saved="isSaved"
       />
 
-      <div
-        v-if="!init"
-        class="editor-placeholder"
-      />
+      <div v-if="!init" class="editor-placeholder" />
       <recent v-if="!hasCurrentFile && init" />
       <editor-with-tabs
         v-if="hasCurrentFile && init"
@@ -34,11 +32,15 @@
       <rename />
       <import-modal />
     </div>
+    <div v-if="booksStore.mode !== 'editor'" class="book-titlebar-host">
+      <title-bar :project="null" :active="windowActive" :platform="platform" :is-saved="true" />
+    </div>
+    <book-workspace v-if="booksStore.mode !== 'editor'" />
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, watch, nextTick, onMounted, ref } from 'vue'
+import { computed, watch, nextTick, onMounted, onBeforeUnmount, ref } from 'vue'
 import { useMainStore } from '@/store'
 import { storeToRefs } from 'pinia'
 import { addStyles, addThemeStyle, addCustomStyle, type AddStylesOptions } from '@/util/theme'
@@ -61,6 +63,8 @@ import { useCommandCenterStore } from '@/store/commandCenter'
 import { useProjectStore } from '@/store/project'
 import { useAutoUpdatesStore } from '@/store/autoUpdates'
 import { useNotificationStore } from '@/store/notification'
+import { useBooksStore } from '@/store/books'
+import BookWorkspace from '@/components/bookWorkspace/index.vue'
 
 const mainStore = useMainStore()
 const editorStore = useEditorStore()
@@ -71,6 +75,8 @@ const listenForMainStore = useListenForMainStore()
 const autoUpdateStore = useAutoUpdatesStore()
 const commandCenterStore = useCommandCenterStore()
 const notificationStore = useNotificationStore()
+const booksStore = useBooksStore()
+let removeOpenBookListener: (() => void) | null = null
 
 const timer = ref<ReturnType<typeof setTimeout> | null>(null)
 
@@ -200,6 +206,11 @@ onMounted(async () => {
   // module: notification
   notificationStore.listenForNotification()
 
+  removeOpenBookListener = window.electron.ipcRenderer.on('lb::books::open-requested', async () => {
+    await booksStore.showBookshelf()
+    await booksStore.openPicker()
+  })
+
   setupDragDropHandler()
 
   nextTick(() => {
@@ -216,6 +227,7 @@ onMounted(async () => {
     addStyles(style)
   })
 })
+onBeforeUnmount(() => removeOpenBookListener?.())
 </script>
 
 <style scoped>
@@ -230,6 +242,12 @@ onMounted(async () => {
   left: 0;
   right: 0;
   bottom: 0;
+}
+.book-titlebar-host {
+  position: fixed;
+  inset: 0 0 auto;
+  z-index: 30;
+  height: var(--titleBarHeight);
 }
 .editor-container .hide {
   z-index: -1;

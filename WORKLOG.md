@@ -573,6 +573,179 @@
   - LeafBook 自有网站、公开下载、签名/公证和自动更新渠道尚未建立。
 - Git commit：将随本次提交入库，最终 SHA 见 Git 历史（不推送）。
 
+## 2026-07-28 — Phase 4 第二轮刷新一致性与阅读器语义返修
+
+- 用户目标：收紧书籍刷新并发、稳定节点身份、迟到异步响应、响应式面板和阅读器
+  键盘/目录可访问性；不增加功能或依赖，不提交、不推送。
+- 实际完成：
+  - 主进程刷新改为同一 `sessionId` 的离线构建与原子替换；刷新失败保留旧
+    session，仅 root identity 致命变化会使其失效；同 session 并发刷新合并，
+    close/remove 期间完成的刷新不会复活 session。
+  - opaque node ID 改按 Phase 3 领域 `node.id` / occurrence 稳定复用；完全重复
+    path + fragment 的节点仍拥有唯一 target，group 与 landing ID 同样可跨刷新
+    保持稳定。
+  - renderer 将 `openNode` 串行在进行中的 refresh 之后，并继续用 generation、
+    session 和 mode 快照拒绝迟到结果；remove 后的异步 list 完成时再次复核状态。
+  - 701–980px 隐藏不可见 outline 对应的 toggle；无 landing 的 group 标题只
+    提供 disclosure 行为和 `aria-expanded`，不会触发章节打开。
+  - 全局 Left/Right 翻章只接受无 modifier 且来源非链接、按钮、表单控件或
+    editable content 的事件。
+  - 只读 Markdown 渲染为重复 heading ID 生成确定性唯一后缀，outline 与正文
+    一一对应并可精确跳转。
+  - 更新 Phase 4 阅读器契约与测试覆盖说明。
+- 修改或创建的文件：
+  - `docs/BOOK_READER.md`
+  - `packages/desktop/src/main/book/sessionManager.ts`
+  - `packages/desktop/src/renderer/src/book/renderMarkdown.ts`
+  - `packages/desktop/src/renderer/src/components/bookWorkspace/index.vue`
+  - `packages/desktop/src/renderer/src/components/bookWorkspace/BookTreeNode.vue`
+  - `packages/desktop/src/renderer/src/store/books.ts`
+  - `packages/desktop/test/unit/specs/book-reader.spec.ts`
+  - `WORKLOG.md`
+- 测试及结果：
+  - Phase 4 定向单元测试：20 项通过。
+  - desktop 全量单元测试：53 个测试文件、827 项通过。
+  - `pnpm --filter leafbook typecheck`：通过。
+  - `pnpm lint`：通过，0 errors；保留 135 条上游既有 warnings。
+  - `pnpm build`：Electron main、preload、renderer production build 通过；
+    仅有既有 CodeMirror 动静态导入提示。
+  - `pnpm test:e2e`：LeafBook `book-reader.spec.ts` 通过；全套 215 项通过、
+    4 项跳过，另有 1 项既有 `editor-input.spec.ts` 键盘输入时序失败（预期
+    `typed-token`，仅输入到 `typed-toke`）。单文件复跑仍在不同位置提前停止，
+    与本轮 reader/session 改动无调用路径重叠。
+  - 本轮文件 Prettier check：通过。
+  - `git diff --check`：通过。
+- 关键决策：
+  - refresh 不再创建新授权能力；成功只替换同一个 session 的内部快照，因此
+    renderer 迟到响应无需关闭未知新 session，也不会泄漏授权。
+  - DTO 仍只暴露随机 opaque ID；领域稳定 ID 仅作为主进程复用映射的内部 key。
+  - 中等宽度不提供 overlay outline，本阶段选择同步隐藏 toggle，保持界面能力
+    与 ARIA 状态一致。
+- 尚未解决的问题：无本轮返修阻塞；搜索、进度、本地资源传输等仍不属于 Phase 4。
+- Git commit：无（按要求未提交、未推送）。
+
+## 2026-07-28 — Phase 4 书架与沉浸阅读工作区
+
+- 用户目标：在 Phase 3 领域层之上实现书架、书籍目录和沉浸只读阅读；
+  不扩展到全文搜索、阅读进度、编辑器桥接或发布，不提交、不推送。
+- 实际完成：
+  - 新建 main-owned `BookSessionManager`，使用随机 opaque
+    library/session/node ID；绝对书根和 node→relative chapter 映射仅保留在
+    main，renderer 不能提交任意章节路径。
+  - 章节读取复用 Phase 3 descriptor、realpath containment、identity、
+    symlink 和 byte-limit 边界；refresh/close/remove 会失效旧会话并返回稳定
+    structured errors，会话数量有界。
+  - 使用 main-process `electron-store` 持久化书架，运行时校验、根目录去重、
+    最多 50 本；renderer DTO 不含绝对路径。移除仅删除书架记录和会话，绝不
+    删除原文件夹。
+  - 增加 typed invoke IPC 和窄 preload `window.electron.books` API；picker、
+    reopen、remove、refresh、close、read、follow-link 全部经过 runtime
+    validation。
+  - 新增 File → Open Book 菜单、编辑器空态入口与 Book Workspace；实现书架、
+    可折叠多级目录、group/root landing、当前节点高亮、上一章/下一章、返回
+    书架、刷新、诊断摘要、当前文档 outline、响应式侧栏及暗色变量兼容。
+  - 普通编辑器在 reader overlay 下继续挂载，退出书籍模式后原编辑流程可用。
+  - 使用 Muya 同步 `renderToStaticHTML` 后执行 HTML-only DOMPurify；图表
+    fence 只保留 inert code，不执行 Mermaid/PlantUML/Vega；禁 SVG/MathML、
+    active HTML/事件/资源属性，移除原生 href，本地图片变为安全占位。内部链接
+    只能跳到当前模型已知章节；外链在 main 打开前按 Phase 3 allowlist 再验证。
+  - 增加语义 nav/main/aside、aria-current/expanded/label、原生按钮键盘行为、
+    focus-visible、方向键翻章及 loading/empty/error 状态。
+- 修改或创建的文件：
+  - `docs/BOOK_READER.md`
+  - `packages/desktop/src/shared/types/bookReader.ts`
+  - `packages/desktop/src/shared/types/ipc.ts`
+  - `packages/desktop/src/main/book/filesystem.ts`
+  - `packages/desktop/src/main/book/sessionManager.ts`
+  - `packages/desktop/src/main/ipc/books.ts`
+  - `packages/desktop/src/main/menu/templates/file.ts`
+  - `packages/desktop/src/preload/index.ts`
+  - `packages/desktop/src/renderer/src/book/*`
+  - `packages/desktop/src/renderer/src/store/books.ts`
+  - `packages/desktop/src/renderer/src/components/bookWorkspace/*`
+  - `packages/desktop/src/renderer/src/components/recent/index.vue`
+  - `packages/desktop/src/renderer/src/pages/app.vue`
+  - `packages/desktop/test/unit/specs/book-reader.spec.ts`
+  - `packages/desktop/test/e2e/book-reader.spec.ts`
+  - `WORKLOG.md`
+- 测试及结果：
+  - Phase 4 定向单元测试：5 项全部通过。
+  - Electron vertical slice：1 项通过；覆盖打开书→目录→章节→下一章→
+    书架→普通编辑器，且无 renderer error。
+  - `pnpm --filter leafbook typecheck`：通过。
+  - `pnpm --filter leafbook build`：main、preload、renderer production build
+    通过；仅有既有 CodeMirror 动静态导入提示。
+  - desktop 全量单元测试：53 个测试文件、812 项全部通过。
+  - desktop 全量 E2E：216 项通过、4 项既有 skip、0 项失败。
+  - `pnpm lint`：通过，0 errors；新增 warning 已清零，保留 135 条既有
+    warnings。
+  - Prettier check 与 `git diff --check`：通过。
+  - 真实 Electron GUI smoke 截图已检查；发现并修复递归目录按钮未继承父
+    scoped reset 导致的原生边框，三栏布局、当前章节、outline 与翻章状态正常。
+- 关键决策：
+  - Phase 4 不建立任意 path 或 `file://` bridge；本地资源先显示占位，后续
+    必须设计 session-scoped resource transport 才可加载。
+  - 书籍 UI 是现有 editor shell 上的模式层，不替换 Muya 编辑器或修改
+    Markdown 数据结构，降低与上游同步风险。
+  - serialized external URL 不代表授权；main 必须根据当前 session node 或
+    当前章节 link 重新解析后才能调用 Electron shell。
+- 尚未解决的问题：
+  - 本地图片/附件、Mermaid/KaTeX 专用只读增强、全文搜索、阅读进度、批注、
+    编辑器桥接和发布均留待后续 phase。
+- Git commit：无（按要求未提交、未推送）。
+
+## 2026-07-28 — Phase 4 安全、并发与窗口完整性返修
+
+- 用户目标：修复 Phase 4 审查发现的活动图表渲染、根目录替换、跨窗口会话、
+  书架并发写、renderer 异步竞态、frameless 窗口控制和无障碍问题；不扩展
+  Phase 5，不提交、不推送。
+- 实际完成：
+  - 阅读渲染切换到 Muya 静态 API；DOMPurify 固定 HTML-only profile，禁止
+    SVG/MathML、样式、表单、媒体和嵌入内容，并在序列化前再次移除所有资源
+    属性及非 anchor href；anchor 仅保留 main 复核用 `data-book-href`。
+  - main 会话钉住 canonical realpath 与 bigint dev/ino，在 read/refresh/
+    follow 前后复核；同路径 rename/replace/symlink 会稳定失效且不返回替代
+    根内容。
+  - 会话绑定创建它的 `webContents.id`，跨窗口操作失败，renderer destroyed
+    自动清理；容量改为 per-owner，避免一个窗口淘汰另一个窗口。
+  - 书架 open/remove 的 read-modify-write 进入串行 mutation queue，避免并发
+    丢更新；refresh 复用仍存在章节的 opaque node ID，并去除 README 已在目录
+    时重复的 Book home。
+  - Pinia IPC action 统一 try/catch/finally、pending 计数和 generation token；
+    旧 picker/library/chapter/refresh/mode 响应不再覆盖新状态。章节渲染 watch
+    使用 cleanup token 与 session/node snapshot。
+  - 书籍模式复用既有 TitleBar，保留 Windows/Linux frameless controls 与
+    macOS 顶部 inset；补充 delegated link Enter/Space、书封 label、面板
+    expanded/controls、移动端选择后收起及 Escape 关闭并恢复焦点。
+- 修改或创建的文件：
+  - `docs/BOOK_READER.md`
+  - `packages/desktop/src/main/book/sessionManager.ts`
+  - `packages/desktop/src/main/ipc/books.ts`
+  - `packages/desktop/src/renderer/src/book/renderMarkdown.ts`
+  - `packages/desktop/src/renderer/src/store/books.ts`
+  - `packages/desktop/src/renderer/src/components/bookWorkspace/index.vue`
+  - `packages/desktop/src/renderer/src/pages/app.vue`
+  - `packages/desktop/test/unit/specs/book-reader.spec.ts`
+  - `WORKLOG.md`
+- 测试及结果：
+  - Phase 4 定向单元测试：14 项通过。
+  - desktop 全量单元测试：53 个测试文件、821 项通过。
+  - desktop 全量 E2E：216 项通过、4 项既有 skip、0 项失败。
+  - desktop Typecheck 与 production build：通过；build 仅有既有
+    CodeMirror 动静态导入提示。
+  - 全量 lint：通过，0 error、135 条既有 warning；返修文件没有新增 warning。
+  - Prettier 写入和 `git diff --check`：通过。
+  - targeted Electron GUI smoke 通过；截图复核三栏阅读、共享 titlebar 顶部
+    inset、当前章节/outline、disabled Next 和上下章布局正常。
+- 关键决策：
+  - 书籍阅读器不复用会执行 diagram 的异步 HTML renderer；本地资源继续只显示
+    占位，不新增 `file://` 或任意路径 bridge。
+  - renderer 声称的 owner 不可信；owner 只从主进程 IPC event sender 推导。
+  - refresh 只在目标仍属于新模型时保留当前节点，否则回到 entry。
+- 尚未解决的问题：无 Phase 4 阻塞；本地资源加载、搜索、进度等继续留待后续
+  phase。
+- Git commit：无（按要求未提交、未推送）。
+
 ## 2026-07-28 — Phase 3 书籍领域模型与 GitBook 导航解析
 
 - 用户目标：在 LeafBook 品牌基础提交上继续 Phase 3，只实现可供后续 UI
@@ -784,4 +957,90 @@
     UI 做明确状态展示。
 - 尚未解决的问题：
   - UI、IPC、书架状态、阅读页面和受控外链打开仍属于 Phase 4。
+- Git commit：将随本次提交入库，最终 SHA 见 Git 历史（不推送）。
+
+## 2026-07-28 — Phase 4 最终授权撤销与链接路径安全收口
+
+- 用户目标：修复本地链接绝对路径 fallback 与 session 异步撤销竞态，确保
+  renderer cleanup 后未完成的打开、读取、刷新或外链操作不能恢复授权或产生
+  shell side effect；不提交、不推送。
+- 实际完成：
+  - `localHrefTarget` 在任何相对 fallback 前解码 path，并拒绝 `/`、反斜杠/
+    UNC、Windows drive 等绝对或根路径；编码后的根路径不能经 normalize 降级
+    成相对路径。
+  - session root 校验改为区分 `valid`、`invalid` 和 `revoked`，每次异步
+    filesystem/shell 边界后都比较 owner 与原 session 对象身份。
+  - deferred chapter read 遇到 close、remove 或 cleanup 时统一丢弃迟到结果并
+    返回 `session-not-found`。
+  - external link 在 `shell.openExternal` 前再次验证原 session，完成或失败后
+    也复核；cleanup 在 root validation 期间发生时不会触发 shell。
+  - picker/open lifecycle 引入 owner generation；dialog、root identity、scan
+    和 shelf mutation queue 每次 await 后复核，cleanup 先完成时既不写书架也
+    不注册 session。
+  - 补充 refresh single-flight、绝对路径和完整撤销竞态回归测试，并更新阅读器
+    安全契约。
+- 修改或创建的文件：
+  - `docs/BOOK_READER.md`
+  - `packages/desktop/src/main/book/sessionManager.ts`
+  - `packages/desktop/test/unit/specs/book-reader.spec.ts`
+  - `WORKLOG.md`
+- 测试及结果：
+  - Phase 4 定向单元测试：26 项通过。
+  - `pnpm --filter leafbook typecheck`：通过。
+  - desktop 全量单元测试：53 个测试文件、833 项通过。
+  - `pnpm lint`：通过，0 errors；保留 135 条上游既有 warnings。
+  - `pnpm build`：Electron main、preload、renderer production build 通过；
+    仅有既有 CodeMirror 动静态导入提示。
+  - LeafBook reader E2E：1 项通过。
+  - 本轮文件 Prettier check：通过。
+  - `git diff --check`：通过。
+- 关键决策：
+  - session 撤销以对象身份而非仅 opaque ID 判断，避免同 ID 原子 refresh 或
+    迟到操作混淆旧、新授权快照。
+  - owner generation 单调递增且不复用；同一 Electron owner ID 后续新 open
+    可使用新 generation，旧异步链永久失效。
+  - 外链协议 allowlist 与 session lifecycle 是两道独立门禁，两者都必须在
+    side effect 前保持有效。
+- 尚未解决的问题：无本轮授权安全 blocker。
+- Git commit：无（按要求未提交、未推送）。
+
+## 2026-07-28 — Phase 4 最终 P2：移动目录 Escape 与绝对链接空白绕过
+
+- 用户目标：修复移动端目录焦点位于交互元素时 Escape 无法关闭，以及本地链接
+  decoded path 可借前导空白绕过绝对路径预检的问题；增加真实 Electron 回归，
+  不修改 `ownerGenerations`，不提交、不推送。
+- 实际完成：
+  - 将 reader 全局键盘处理中的 Escape/目录关闭逻辑移到交互元素 early-return
+    之前；交互元素现在只短路左右章节导航。目录关闭后等待 DOM 更新并将焦点
+    返回 `Contents` 按钮。
+  - 新增 650×800 真实 Electron E2E，显式关闭再打开移动目录、聚焦
+    `.tree-label` 按钮并按 Escape，验证目录移除、`aria-expanded=false` 且焦点
+    回到目录开关。
+  - `localHrefTarget` 在 URL decode 后按 `resolveBookTarget` 一致的 `trim()`
+    语义规范化 path，再进行 POSIX root、反斜杠/UNC 和 Windows drive 绝对路径
+    检查；document-relative fallback 复用同一规范化 decoded path。
+  - 扩展安全回归，覆盖前导和尾随 ASCII whitespace、编码斜杠、drive 与 UNC
+    绝对路径。
+- 修改或创建的文件：
+  - `packages/desktop/src/renderer/src/components/bookWorkspace/index.vue`
+  - `packages/desktop/src/main/book/sessionManager.ts`
+  - `packages/desktop/test/unit/specs/book-reader.spec.ts`
+  - `packages/desktop/test/e2e/book-reader.spec.ts`
+  - `WORKLOG.md`
+- 测试及结果：
+  - Phase 4 定向单元测试：26 项通过。
+  - `pnpm typecheck`：通过。
+  - `pnpm lint`：通过，0 errors；保留 135 条上游既有 warnings。
+  - `pnpm build`：Electron main、preload、renderer production build 通过；
+    仅有既有 CodeMirror 动静态导入提示。
+  - LeafBook reader E2E：2 项通过，含新增移动目录焦点回归。
+  - 本轮四个代码/测试文件 Prettier check：通过。
+  - `git diff --check`：通过。
+- 关键决策：
+  - Escape 是 drawer 级关闭操作，不应被 drawer 内部按钮、链接或表单控件吞掉；
+    左右方向键仍不会在交互元素上触发章节导航。
+  - 绝对路径判定和 fallback 必须共享 resolver 的 whitespace 规范化语义，避免
+    预检与最终解析看到不同 path。
+- 尚未解决的问题：
+  - `ownerGenerations` 的 P3 审查项按范围要求暂不修改。
 - Git commit：将随本次提交入库，最终 SHA 见 Git 历史（不推送）。

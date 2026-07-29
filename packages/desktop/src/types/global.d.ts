@@ -12,6 +12,13 @@ import type {
 } from '@shared/types/ipc'
 import type { MenuTemplate, MenuPopupPosition } from '@shared/types/menu'
 import type { SerializedStat } from '@shared/types/files'
+import type {
+  BookChapterDto,
+  BookLinkNavigationDto,
+  BookReaderResult,
+  BookshelfEntryDto,
+  BookSessionDto
+} from '@shared/types/bookReader'
 
 declare global {
   // ---- Build-time defines (electron-vite `define`) ----
@@ -94,6 +101,20 @@ declare global {
     paths: Partial<BootInfo['paths']>
     isUpdatable: boolean
     windowControl: ElectronWindowControlAPI
+    books: {
+      list(): Promise<BookshelfEntryDto[]>
+      openPicker(): Promise<BookReaderResult<BookSessionDto>>
+      openLibrary(libraryId: string): Promise<BookReaderResult<BookSessionDto>>
+      remove(libraryId: string): Promise<BookReaderResult<true>>
+      refresh(sessionId: string): Promise<BookReaderResult<BookSessionDto>>
+      closeSession(sessionId: string): Promise<BookReaderResult<true>>
+      readChapter(sessionId: string, nodeId: string): Promise<BookReaderResult<BookChapterDto>>
+      followLink(
+        sessionId: string,
+        nodeId: string,
+        href: string
+      ): Promise<BookReaderResult<BookLinkNavigationDto | null>>
+    }
   }
 
   interface FileUtilsAPI {
