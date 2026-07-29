@@ -1318,3 +1318,288 @@
   - editor-input typing 的既有基线 flake 仍留给独立编辑器测试稳定性任务。
   - 全书搜索、编辑桥、批注、本地资源、发布/同步/协作仍属于后续阶段。
 - Git commit：将随本次提交入库，最终 SHA 见 Git 历史（不推送）。
+
+## 2026-07-29 — Phase 6：Reader 全书搜索
+
+- 用户目标：为 LeafBook Reader 增加完整、可取消、不会突破 Phase 3/4
+  授权边界的全书 Markdown 搜索，并提供可访问的桌面与移动端交互。
+- 实际完成：
+  - 新增纯搜索内核：NFKC/case-fold、1–8 token/256 字符 literal AND、
+    filename/title/alias/heading/body/code/frontmatter tag 有界提取、稳定排名、
+    每文档最多三段纯文本摘要及原文 UTF-16 高亮映射。
+  - main 只从当前 session 可读顺序生成唯一 Markdown 源，并继续通过
+    `safelyReadBookChapter` 读取；孤儿、外链、缺失和模型外路径不进入索引，
+    DTO 不返回根路径或相对路径。
+  - 实现 lazy session snapshot、32 MiB 单索引、64 MiB 全局 LRU、bounded
+    yield/progress、partial/omitted 状态、共享 build waiter，以及 query/session/
+    owner/root/refresh 生命周期取消。单个 waiter 取消不破坏其他或新查询，最后
+    waiter 取消会终止 build。
+  - 增加 typed search/cancel/progress IPC、最小 preload bridge 和 renderer
+    global types；进度只发回发起的可信 editor webContents。
+  - Pinia 增加 200 ms debounce、generation/stale response 防护、先启动新查询
+    再取消旧查询，以及 refresh/离开/切书取消。结果跳转先 flush Phase 5 阅读
+    位置，再用 opaque node 与显式 heading fragment 打开章节。
+  - 新增无 `v-html` 的响应式搜索面板：Search 与 `/` 打开，Up/Down/Enter
+    选择，Escape 只关闭搜索并把焦点归还 Search；包含 `aria-busy`、live 结果
+    状态、listbox/option 语义和 partial index 提示。
+  - 更新 Reader 架构、边界、生命周期、UI 和测试说明。
+- 修改或创建的文件：
+  - `docs/BOOK_READER.md`
+  - `packages/desktop/src/common/book/search.ts`
+  - `packages/desktop/src/main/book/sessionManager.ts`
+  - `packages/desktop/src/main/ipc/books.ts`
+  - `packages/desktop/src/preload/index.ts`
+  - `packages/desktop/src/shared/types/bookReader.ts`
+  - `packages/desktop/src/shared/types/ipc.ts`
+  - `packages/desktop/src/types/global.d.ts`
+  - `packages/desktop/src/renderer/src/store/books.ts`
+  - `packages/desktop/src/renderer/src/components/bookWorkspace/index.vue`
+  - `packages/desktop/src/renderer/src/components/bookWorkspace/BookSearchPanel.vue`
+  - `packages/desktop/test/unit/specs/book-search.spec.ts`
+  - `packages/desktop/test/unit/specs/book-reader.spec.ts`
+  - `packages/desktop/test/e2e/book-reader.spec.ts`
+  - `WORKLOG.md`
+- 测试及结果：
+  - 搜索算法/manager/store 定向测试：2 个文件、57 项全部通过。
+  - desktop 全量单元测试单独执行：54 个文件、864 项全部通过。
+  - desktop typecheck：通过。
+  - 全量 lint：0 error、135 个既有 warning；Phase 6 文件定向 ESLint：
+    0 error、0 warning。
+  - desktop production build：通过；仅保留既有 CodeMirror 动静态 import
+    提示。
+  - Reader Electron E2E 完整 spec：4/4 通过；搜索切片覆盖移动端 `/` 打开、
+    code 命中与 heading 跳转、Refresh 后新内容可搜，以及 Escape 焦点恢复。
+  - 两次把全量单测与 build/E2E 并行时，PDF spec 出现 5 秒加载超时及 mock
+    初始化连带失败；单独按标准全量命令重跑 864/864 通过，未修改 PDF 路径。
+- 关键决策：
+  - 搜索索引是 session 内存快照，不建立磁盘索引或 watcher；文件变化通过
+    Refresh 创建新 session 模型并重建。
+  - 索引身份使用实际 `BookSession` 对象而不是公开 ID，因此 refresh 同 ID
+    replacement、close、owner cleanup 和根替换都能精确撤销旧工作。
+  - Unicode 规范化匹配保留规范化到原始 UTF-16 的映射，renderer 只按范围
+    创建文本/`mark` 节点，不把摘要解释成 HTML。
+- 尚未解决的问题：
+  - PDF 单测在与高负载门禁并行时仍可能触发既有 5 秒资源时序 flake；标准
+    单独全量运行通过。
+  - 编辑桥、批注、本地资源、发布/同步/协作仍属于后续阶段。
+- Git commit：无（按要求未提交、未推送）。
+
+## 2026-07-29 — Phase 6 评审加固：搜索资源边界与竞态
+
+- 用户目标：根据评审意见收紧全书搜索的并发、内存、取消和可信 IPC
+  边界，并补齐移动端、partial index、目录层级与 stale response 回归覆盖。
+- 实际完成：
+  - main 搜索改为每 owner 仅保留最新请求、最多 8 个活跃 owner；全局只允许
+    1 个索引 build，竞争请求稳定返回 `search-busy`，不创建无界等待队列。
+  - 在 build 前预留 32 MiB 并联动 LRU 驱逐，保证 cache 与 reservation
+    合计不超过 64 MiB；单索引仍限制为 32 MiB。
+  - 文档提取限制为前 256 KiB、20,000 行、8,000 个单元、每单元 4,096
+    字符、128 个 alias/tag 和每文档 4 MiB 估算内存；所有截断都会标记
+    `partial`。
+  - 提取和匹配增加可取消的异步 checkpoint；每个 checkpoint 复核
+    AbortSignal、精确 session 对象及真实根目录 dev/ino 身份。匹配过程只保留
+    top 3，不积累无界候选数组。
+  - 修复共享 build 的 latest-wins 注册顺序、refresh/close/revoke 清理，以及
+    分组 landing page 的父级 breadcrumbs。
+  - 所有 book IPC（包括 `lb::books::list`）统一校验可信 editor sender。
+  - renderer 在 debounce 前立即递增 generation、清空旧结果和 Enter 目标并
+    取消活动请求，避免旧响应在新请求定时器启动前重新出现。
+  - 搜索面板区分“遗漏文档”和“仅内容被截断”的 partial 提示，并固定移动端
+    全屏布局、42 px 输入框和至少 68 px 结果触控目标。
+- 修改或创建的文件：
+  - `docs/BOOK_READER.md`
+  - `packages/desktop/src/common/book/search.ts`
+  - `packages/desktop/src/main/book/sessionManager.ts`
+  - `packages/desktop/src/main/ipc/books.ts`
+  - `packages/desktop/src/renderer/src/store/books.ts`
+  - `packages/desktop/src/renderer/src/components/bookWorkspace/BookSearchPanel.vue`
+  - `packages/desktop/test/unit/specs/book-search.spec.ts`
+  - `packages/desktop/test/unit/specs/book-reader.spec.ts`
+  - `packages/desktop/test/e2e/book-reader.spec.ts`
+  - `WORKLOG.md`
+- 测试及结果：
+  - 搜索算法/manager/store 定向测试：2 个文件、65 项全部通过。
+  - desktop 全量单元测试：54 个文件、872 项全部通过。首次并行运行时 PDF
+    基线测试出现加载超时及连带 mock 失败，单独按标准命令立即重跑通过。
+  - desktop typecheck：通过。
+  - 全量 lint：0 error、135 个既有 warning。
+  - desktop production build：通过；仅保留既有 CodeMirror 动静态 import
+    提示。
+  - Reader Electron E2E：4/4 通过；覆盖 650 px 移动布局、键盘跳转、
+    partial 且 omitted=0 的提示、Refresh 后旧结果失效和 Escape 焦点恢复。
+  - 所有变更文件 Prettier check：通过。
+- 关键决策：
+  - build 等待队列上限选择为 0：已有 build 被共享复用；不同 session 的竞争
+    build 立即以稳定 `search-busy` 失败，从结构上避免排队内存和取消泄漏。
+  - 以 reservation 而非构建后的实际索引大小约束峰值，使构建期间也遵守
+    64 MiB 全局预算。
+  - 保留同步搜索 API 供纯算法测试，生产 main 路径只使用带 checkpoint 的
+    异步构建与匹配 API。
+- 尚未解决的问题：
+  - PDF 单测在高负载并行门禁下仍可能触发既有 5 秒时序 flake；标准单独全量
+    运行通过。
+  - 编辑桥、批注、本地资源、发布/同步/协作仍属于后续阶段。
+- Git commit：无（按要求未提交、未推送）。
+
+## 2026-07-29 — Phase 6 第二轮加固：精确 NFKC 预算与真实异步搜索
+
+- 用户目标：修复兼容字符高倍率展开造成的文档预算反例，把索引提取改为真实
+  可取消的异步工作，隔离共享进度回调和 renderer 销毁竞态，并收紧移动端搜索
+  结果及关闭按钮样式；不提交、不推送。
+- 实际完成：
+  - 将 NFKC 单元处理改为两遍精确核算：第一遍逐 code point 计算实际
+    normalized UTF-16 长度、identity-map 状态及字符串/映射成本，只保留预算
+    内前缀；第二遍才分配并填充 `starts`/`ends`。文档 `estimatedBytes` 不会超过
+    `maxBytes`，截断会标记 `partial`，保留内容仍能映射回原文 UTF-16 范围。
+  - `createBookSearchDocumentAsync` 不再预跑 checkpoint 后调用同步构建，而是
+    在实际 frontmatter、tag、line、fence、unit、normalization preflight 和
+    mapping 循环内，每 64 units 或约 64 KiB await checkpoint 并复核取消；
+    async matching 也收紧为每 64 units checkpoint。
+  - shared build 的 progress callback 改为逐 waiter 隔离；抛错 callback 会被
+    禁用，不再 reject 其他 waiter 共用的 build。matching progress 同样为
+    advisory，IPC send 捕获 webContents 在检查后销毁的 TOCTOU。
+  - 移动搜索结果改为顶端排列、自动行至少 68 px、单项至多 160 px且摘要最多
+    三行；Close 显式设置 `appearance: none`、1 px border、radius、background
+    和 color。
+- 修改或创建的文件：
+  - `docs/BOOK_READER.md`
+  - `packages/desktop/src/common/book/search.ts`
+  - `packages/desktop/src/main/book/sessionManager.ts`
+  - `packages/desktop/src/main/ipc/books.ts`
+  - `packages/desktop/src/renderer/src/components/bookWorkspace/BookSearchPanel.vue`
+  - `packages/desktop/test/unit/specs/book-search.spec.ts`
+  - `packages/desktop/test/unit/specs/book-reader.spec.ts`
+  - `packages/desktop/test/e2e/book-reader.spec.ts`
+  - `WORKLOG.md`
+- 测试及结果：
+  - 搜索算法/manager/store 定向测试：2 个文件、69 项全部通过。
+  - desktop 全量单元测试：54 个文件、876 项全部通过。
+  - desktop typecheck：通过。
+  - 全量 lint：0 error、135 个既有 warning；本轮文件定向 ESLint：
+    0 error、0 warning。
+  - desktop production build：通过；仅保留既有 CodeMirror 动静态 import
+    提示。
+  - Reader Electron E2E：4/4 通过；新增断言验证 650 px 视口下单结果高度
+    68–160 px、Close native appearance 清除、1 px border 与非零 radius，
+    并保留整页截图字节检查。
+  - 测试曾发现空白 Markdown 行被新 helper 误标为 `partial`，修正空单元语义
+    后相同定向用例及所有全量门禁通过。
+- 关键决策：
+  - 不为 NFKC 使用经验展开系数；预算以每个候选前缀的真实规范化长度和是否
+    需要 UTF-16 映射数组为准，成本跳变时保留最后一个确实可容纳的前缀。
+  - 同步 helper 仅保留给小型纯算法调用；生产 main 继续只调用真实分块的
+    async API。
+  - progress 是非关键通知通道，callback/send 失败不得改变搜索结果或共享
+    索引缓存的生命周期。
+- 尚未解决的问题：
+  - 编辑桥、批注、本地资源、发布/同步/协作仍属于后续阶段。
+- Git commit：无（按要求未提交、未推送）。
+
+## 2026-07-29 — Phase 6 最终 Unicode 返修与 checkpoint I/O 优化
+
+- 用户目标：修复 NFD 跨码点组合搜索，保证 query/index 使用同一 normalization
+  primitive 和完整 UTF-16 cluster 高亮；减少长文档 checkpoint 的 root
+  `realpath`/`stat` 次数，同时继续拒绝周期或最终检查发现的根替换。
+- 实际完成：
+  - 新增同步/异步共用的 grapheme-cluster 分段与 normalization primitive：
+    优先 `Intl.Segmenter`，确定性 fallback 覆盖 combining mark、variation
+    selector、emoji modifier、ZWJ、区域旗帜配对及 Hangul Jamo composition。
+  - query 与 title、filename、alias、tag、heading、body、code 均按同一 cluster
+    NFKC/case-fold 规则处理；NFC 与 NFD 可双向匹配。规范化 cluster 的每个输出
+    UTF-16 unit 都映射到原 cluster 完整起止，因此 `e\u0301` 高亮包含 combining
+    mark，Hangul/emoji 不会切 surrogate 或 ZWJ 序列。
+  - 精确预算改为按实际 normalized cluster 长度核算，只有整个 cluster 可容纳
+    才进入预算内前缀；预算通过后才 materialize 映射数组。U+FDFA/ﬃ 既有边界
+    保持，sync 与 async 对同一输入生成完全一致的文档预算与索引。
+  - main checkpoint 拆为轻量内存检查与周期 root I/O：每次 yield 后检查 exact
+    session、controller 和 owner generation；每 8 次 checkpoint（byte-driven
+    工作约 512 KiB）、每个 document 结束及搜索最终返回前复核 root identity。
+  - Reader E2E 使用 NFC `Café`/`Résumé` 输入查找 NFD heading/body，验证完整
+    NFD mark、键盘激活及 heading 顶部跳转，同时保留 fenced code、refresh、
+    partial、移动端几何和焦点覆盖。
+- 修改或创建的文件：
+  - `docs/BOOK_READER.md`
+  - `packages/desktop/src/common/book/search.ts`
+  - `packages/desktop/src/main/book/sessionManager.ts`
+  - `packages/desktop/test/unit/specs/book-search.spec.ts`
+  - `packages/desktop/test/unit/specs/book-reader.spec.ts`
+  - `packages/desktop/test/e2e/book-reader.spec.ts`
+  - `WORKLOG.md`
+- 测试及结果：
+  - 搜索算法/manager/store 定向测试：2 个文件、74 项全部通过。
+  - desktop 全量单元测试：54 个文件、881 项全部通过。首次运行时 PDF 基线
+    再次出现一个 5 秒加载超时及一个连带 mock 初始化失败；未修改 PDF 路径，
+    立即按相同标准全量命令重跑即 881/881 通过。
+  - desktop typecheck：通过。
+  - 全量 lint：0 error、135 个既有 warning；本轮文件定向 ESLint：
+    0 error、0 warning。
+  - desktop production build：通过；仅保留既有 CodeMirror 动静态 import
+    提示。
+  - Reader Electron E2E：4/4 通过，包含真实 NFC query → NFD heading/body
+    搜索和跳转。
+- 关键决策：
+  - cluster 是 normalization、预算和高亮映射的最小单位；不会为了填满预算而
+    截断 cluster。
+  - 高频 checkpoint 只做可取消的内存身份检查；root identity I/O 分层执行，
+    4,000 行完整 build/match 的测试上限为 32 次，而不是每次 yield 都调用。
+  - 周期检查发现 identity 变化会拒绝 build，matching 后、最终返回前发生的
+    identity 变化也会返回 `book-unavailable`，因此 I/O 降频不放宽授权边界。
+- 尚未解决的问题：
+  - 编辑桥、批注、本地资源、发布/同步/协作仍属于后续阶段。
+- Git commit：无（按要求未提交、未推送）。
+
+## 2026-07-29 — Phase 6 最终 case-fold 与 fallback segmentation 返修
+
+- 用户目标：让 query、同步索引和异步索引共用 locale-independent Unicode
+  case-fold 语义，覆盖 Greek sigma、sharp s 和默认非 Turkic dotted/dotless I；
+  同时提供不修改全局即可强制测试的 segmentation fallback，并保留此前全部
+  Unicode、预算、异步、root cadence、洪泛和 UI 边界。
+- 实际完成：
+  - cluster normalization 在 NFKC 后使用 ECMAScript locale-independent
+    lowercase，并补充默认非 Turkic 搜索所需的 `ς → σ` 与 `ß/ẞ → ss`。
+    `Σ/σ/ς` 和 `Straße/STRASSE` 可互搜，`İ` 与 `i\u0307` 一致，dotless `ı`
+    仍与 `i` 区分。
+  - fold 扩展继续发生在两遍精确预算的 preflight 中；`ss` 的 normalized
+    长度和 mapping 数组成本计入预算，原 `ß`/`ẞ` cluster 的高亮覆盖完整原文。
+    U+FDFA、ﬃ、NFC/NFD 的 sync/async 一致性不变。
+  - 暴露只用于测试的纯 segmentation 入口，可显式传 `null` 强制 fallback，
+    无需替换全局 `Intl.Segmenter`。fallback 增加 CRLF/control、Prepend、
+    SpacingMark/combining、常见 Indic virama、Hangul、ZWJ、emoji modifier、
+    variation selector 和 RI pair 的安全近似。
+  - 文档明确现代 Electron 原生 `Intl.Segmenter` 是正式 grapheme 路径；
+    fallback 是 surrogate-safe 的确定性近似，不宣称完整实现 UAX #29。
+  - Reader E2E 以正常小写 final-sigma `ος` 搜索 uppercase `ΟΣ` heading/body，
+    验证两项结果、完整 uppercase 高亮、Down/Up 键盘选择和 heading 跳转；
+    NFC→NFD、code、refresh、partial 和移动 UI 覆盖继续保留。
+- 修改或创建的文件：
+  - `docs/BOOK_READER.md`
+  - `packages/desktop/src/common/book/search.ts`
+  - `packages/desktop/test/unit/specs/book-search.spec.ts`
+  - `packages/desktop/test/e2e/book-reader.spec.ts`
+  - `WORKLOG.md`
+- 测试及结果：
+  - 搜索算法/manager/store 定向测试：2 个文件、78 项全部通过。
+  - desktop 全量单元测试：54 个文件、885 项全部通过。
+  - desktop typecheck：通过。
+  - 全量 lint：0 error、135 个既有 warning；本轮文件定向 ESLint：
+    0 error、0 warning。
+  - desktop production build：通过；仅保留既有 CodeMirror 动静态 import
+    提示。
+  - Reader Electron E2E：4/4 通过，包含 lowercase `ος` → uppercase `ΟΣ`
+    heading/body 搜索、高亮和跳转。
+  - 新增单测首次发现 Turkish 对照 fixture 的默认标题 `Introduction` 含 `i`；
+    改为中性 metadata 后确认 `ı`/`i` 保持区分。Greek E2E 首次因正确新增第二
+    个 body 结果而与旧单结果焦点断言不符，更新为 Down/Up 两结果断言后通过。
+- 关键决策：
+  - 仓库没有可复用的版本化 CaseFolding 数据，也不新增依赖；实现和文档只声明
+    ECMAScript lower 加本轮必要 default-fold 差异，不夸大为完整
+    `CaseFolding.txt`。
+  - segmentation fallback 通过函数参数强制，避免修改 `Intl.Segmenter` 全局而
+    污染并行测试。
+  - case-fold 多字符扩展仍以原 grapheme cluster 作为预算和 UTF-16 mapping
+    单位。
+- 尚未解决的问题：
+  - 若未来需要完整、版本锁定的所有 Unicode Default Case Folding 差异，应在
+    独立变更中引入并审计生成数据；本轮未增加依赖或 lockfile。
+  - 编辑桥、批注、本地资源、发布/同步/协作仍属于后续阶段。
+- Git commit：将随本次提交入库，最终 SHA 见 Git 历史（不推送）。

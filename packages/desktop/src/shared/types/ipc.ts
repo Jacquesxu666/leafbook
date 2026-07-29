@@ -37,6 +37,9 @@ import type {
   BookLinkNavigationDto,
   BookReadingProgressDto,
   BookReaderResult,
+  BookSearchProgressDto,
+  BookSearchRequestDto,
+  BookSearchResponseDto,
   BookshelfEntryDto,
   BookSessionDto
 } from './bookReader'
@@ -66,6 +69,14 @@ export interface IpcInvokeChannels {
   'lb::books::follow-link': {
     args: [sessionId: string, nodeId: string, href: string]
     ret: BookReaderResult<BookLinkNavigationDto | null>
+  }
+  'lb::books::search': {
+    args: [sessionId: string, request: BookSearchRequestDto]
+    ret: BookReaderResult<BookSearchResponseDto>
+  }
+  'lb::books::cancel-search': {
+    args: [sessionId: string, searchId: string]
+    ret: BookReaderResult<true>
   }
   'mt::ask-for-image-path': { args: []; ret: string[] }
   'mt::boot-info-async': { args: []; ret: BootInfo }
@@ -247,6 +258,7 @@ export interface IpcSyncChannels {
 
 export interface IpcMainEventChannels {
   'lb::books::open-requested': []
+  'lb::books::search-progress': [progress: BookSearchProgressDto]
   'language-changed': [language: string]
   'mt::UPDATE_AVAILABLE': [info?: unknown]
   'mt::UPDATE_DOWNLOADED': [info?: unknown]

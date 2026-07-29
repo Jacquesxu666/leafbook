@@ -1,3 +1,4 @@
+/* eslint-disable @stylistic/indent */
 import { app, BrowserWindow, ipcMain, type IpcMainInvokeEvent } from 'electron'
 import { BookSessionManager } from '../book/sessionManager'
 import type { BookReaderResult } from '@shared/types/bookReader'
@@ -9,7 +10,7 @@ const getManager = (): BookSessionManager => {
 }
 
 const observedOwners = new Set<number>()
-const isTrustedEditorSender = (event: IpcMainInvokeEvent): boolean => {
+export const isTrustedEditorSender = (event: IpcMainInvokeEvent): boolean => {
   const window = BrowserWindow.fromWebContents(event.sender)
   if (!window || window.isDestroyed() || event.sender.isDestroyed()) return false
   // EditorWindow assigns this main-only marker before loading its renderer.
@@ -42,7 +43,9 @@ const rejected = <T>(): BookReaderResult<T> => ({
 })
 
 export const registerBookHandlers = (): void => {
-  ipcMain.handle('lb::books::list', () => getManager().listLibraries())
+  ipcMain.handle('lb::books::list', (event) =>
+    isTrustedEditorSender(event) ? getManager().listLibraries() : []
+  )
   ipcMain.handle('lb::books::open-picker', (event) =>
     isTrustedEditorSender(event) ? getManager().openPicker(event) : rejected()
   )
@@ -73,6 +76,24 @@ export const registerBookHandlers = (): void => {
   ipcMain.handle('lb::books::follow-link', (event, sessionId, nodeId, href) =>
     isTrustedEditorSender(event)
       ? getManager().followLink(sessionId, nodeId, href, event.sender.id)
+      : rejected()
+  )
+  ipcMain.handle('lb::books::search', (event, sessionId, request) =>
+    isTrustedEditorSender(event)
+      ? getManager().search(sessionId, request, event.sender.id, (progress) => {
+          try {
+            if (!event.sender.isDestroyed()) {
+              event.sender.send('lb::books::search-progress', progress)
+            }
+          } catch {
+            // The sender can be destroyed between the check and send.
+          }
+        })
+      : rejected()
+  )
+  ipcMain.handle('lb::books::cancel-search', (event, sessionId, searchId) =>
+    isTrustedEditorSender(event)
+      ? getManager().cancelSearch(sessionId, searchId, event.sender.id)
       : rejected()
   )
 }

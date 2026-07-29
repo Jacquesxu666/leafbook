@@ -17,6 +17,9 @@ import type {
   BookLinkNavigationDto,
   BookReadingProgressDto,
   BookReaderResult,
+  BookSearchProgressDto,
+  BookSearchRequestDto,
+  BookSearchResponseDto,
   BookshelfEntryDto,
   BookSessionDto
 } from '@shared/types/bookReader'
@@ -120,6 +123,12 @@ declare global {
         nodeId: string,
         href: string
       ): Promise<BookReaderResult<BookLinkNavigationDto | null>>
+      search(
+        sessionId: string,
+        request: BookSearchRequestDto
+      ): Promise<BookReaderResult<BookSearchResponseDto>>
+      cancelSearch(sessionId: string, searchId: string): Promise<BookReaderResult<true>>
+      onSearchProgress(handler: (progress: BookSearchProgressDto) => void): () => void
     }
   }
 

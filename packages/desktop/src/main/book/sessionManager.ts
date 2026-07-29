@@ -12,6 +12,12 @@ import {
 import Store from 'electron-store'
 import { loadBookFromDirectory, safelyReadBookChapter } from './filesystem'
 import { resolveBookTarget } from 'common/book/path'
+import {
+  createBookSearchDocumentAsync,
+  matchBookSearchDocumentAsync,
+  parseBookSearchQuery,
+  type BookSearchDocument
+} from 'common/book/search'
 import type { BookNavigationNode } from 'common/book/model'
 import type {
   BookChapterDto,
@@ -19,6 +25,10 @@ import type {
   BookReadingProgressDto,
   BookReaderNodeDto,
   BookReaderResult,
+  BookSearchIndexStatusDto,
+  BookSearchProgressDto,
+  BookSearchRequestDto,
+  BookSearchResponseDto,
   BookshelfEntryDto,
   BookSessionDto
 } from '@shared/types/bookReader'
@@ -31,6 +41,13 @@ const MAX_READING_POSITIONS = 500
 const MAX_STABLE_KEY_LENGTH = 16_384
 const MAX_CHAPTER_TITLE_LENGTH = 512
 const READING_PROGRESS_EPSILON = 0.001
+const MAX_SEARCH_INDEX_BYTES = 32 * 1024 * 1024
+const MAX_SEARCH_CACHE_BYTES = 64 * 1024 * 1024
+const SEARCH_YIELD_DOCUMENTS = 32
+const SEARCH_YIELD_BYTES = 256 * 1024
+const MAX_ACTIVE_SEARCH_OWNERS = 8
+const SEARCH_INDEX_RESERVATION_BYTES = MAX_SEARCH_INDEX_BYTES
+const SEARCH_ROOT_CHECKPOINT_INTERVAL = 8
 
 interface PersistedChapterPosition {
   targetKey: string
@@ -78,6 +95,43 @@ interface BookSession {
   chapterNodeByPath: Map<string, string>
   opaqueNodeIds: Map<string, string>
   readableNodeIds: string[]
+  searchSources: SearchSource[]
+}
+
+interface SearchSource {
+  nodeId: string
+  path: string
+  title: string
+  breadcrumbs: string[]
+  aliases: string[]
+  aliasesTruncated: boolean
+  filename: string
+  order: number
+}
+
+interface SearchIndex {
+  documents: BookSearchDocument[]
+  status: BookSearchIndexStatusDto
+  estimatedBytes: number
+}
+
+interface SearchBuild {
+  controller: AbortController
+  ownerGeneration: number
+  checkpointCount: number
+  waiters: Map<string, (progress: BookSearchProgressDto) => void>
+  promise: Promise<SearchIndex>
+}
+
+class SearchBusyError extends Error {
+  override name = 'SearchBusyError'
+}
+
+interface ActiveSearch {
+  searchId: string
+  session: BookSession
+  controller: AbortController
+  ownerGeneration: number
 }
 
 interface RootIdentity {
@@ -102,7 +156,10 @@ const structuredError = (
     | 'node-not-readable'
     | 'chapter-read-failed'
     | 'unsafe-link'
-    | 'link-not-found',
+    | 'link-not-found'
+    | 'search-cancelled'
+    | 'search-busy'
+    | 'search-unavailable',
   message: string
 ) => ({ code, message })
 
@@ -111,6 +168,11 @@ const validOpaqueId = (value: unknown): value is string =>
   value.length >= 16 &&
   value.length <= MAX_ID_LENGTH &&
   /^[a-zA-Z0-9-]+$/.test(value)
+
+const yieldToEventLoop = (): Promise<void> =>
+  new Promise((resolve) => {
+    setImmediate(resolve)
+  })
 
 const validTimestamp = (value: unknown): value is string =>
   typeof value === 'string' && value.length <= 64 && !Number.isNaN(Date.parse(value))
@@ -283,6 +345,11 @@ export class BookSessionManager {
   private shelfMutation = Promise.resolve()
   private readonly refreshes = new Map<string, Promise<BookReaderResult<BookSessionDto>>>()
   private readonly ownerGenerations = new Map<number, number>()
+  private readonly searchIndexes = new Map<BookSession, SearchIndex>()
+  private readonly searchBuilds = new Map<BookSession, SearchBuild>()
+  private readonly activeSearches = new Map<number, ActiveSearch>()
+  private searchCacheBytes = 0
+  private searchBuildReservationBytes = 0
 
   constructor(
     userDataPath: string,
@@ -370,7 +437,10 @@ export class BookSessionManager {
       current.dev === session.rootIdentity.dev &&
       current.ino === session.rootIdentity.ino
     if (!valid) {
-      if (invalidate) this.sessions.delete(sessionId)
+      if (invalidate) {
+        this.revokeSessionSearch(session)
+        this.sessions.delete(sessionId)
+      }
       return 'invalid'
     }
     return 'valid'
@@ -392,7 +462,10 @@ export class BookSessionManager {
   cleanupOwner(ownerId: number): void {
     this.ownerGenerations.set(ownerId, this.ownerGeneration(ownerId) + 1)
     for (const [sessionId, session] of this.sessions) {
-      if (session.ownerId === ownerId) this.sessions.delete(sessionId)
+      if (session.ownerId === ownerId) {
+        this.revokeSessionSearch(session)
+        this.sessions.delete(sessionId)
+      }
     }
   }
 
@@ -573,8 +646,10 @@ export class BookSessionManager {
       if (!chapterNodeByPath.has(landingPath)) chapterNodeByPath.set(landingPath, nodeId)
       return nodeId
     }
-    const mapNode = (node: BookNavigationNode): BookReaderNodeDto => {
-      const children = node.children.map(mapNode)
+    const breadcrumbsByNodeId = new Map<string, string[]>()
+    const mapNode = (node: BookNavigationNode, parents: string[] = []): BookReaderNodeDto => {
+      const breadcrumbs = [...parents, node.title]
+      const children = node.children.map((child) => mapNode(child, breadcrumbs))
       const stableKey = `navigation:${node.id}`
       const target: SessionTarget | null =
         node.type === 'chapter'
@@ -589,25 +664,27 @@ export class BookSessionManager {
             ? { kind: 'external', url: node.url, title: node.title, stableKey }
             : null
       const nodeId = allocateNodeId(stableKey)
+      breadcrumbsByNodeId.set(nodeId, breadcrumbs)
       if (node.type === 'chapter') {
         targets.set(nodeId, target as Extract<SessionTarget, { kind: 'chapter' }>)
         if (!chapterNodeByPath.has(node.path)) chapterNodeByPath.set(node.path, nodeId)
       } else if (node.type === 'external') {
         targets.set(nodeId, target as Extract<SessionTarget, { kind: 'external' }>)
       }
+      const groupLandingNodeId =
+        node.type === 'group'
+          ? addLanding(node.landingPath, node.title, `group-landing:${node.id}`)
+          : undefined
+      if (groupLandingNodeId) breadcrumbsByNodeId.set(groupLandingNodeId, breadcrumbs)
       return {
         nodeId,
         type: node.type,
         title: node.title,
         children,
-        ...(node.type === 'group'
-          ? {
-              landingNodeId: addLanding(node.landingPath, node.title, `group-landing:${node.id}`)
-            }
-          : {})
+        ...(groupLandingNodeId ? { landingNodeId: groupLandingNodeId } : {})
       }
     }
-    const nodes = result.book.navigation.nodes.map(mapNode)
+    const nodes = result.book.navigation.nodes.map((node) => mapNode(node))
     const landingAlreadyInContents = result.book.navigation.landingPath
       ? chapterNodeByPath.has(result.book.navigation.landingPath)
       : false
@@ -627,6 +704,39 @@ export class BookSessionManager {
     }
     nodes.forEach(appendReadable)
     if (landingNodeId && !landingAlreadyInContents) readableNodeIds.unshift(landingNodeId)
+    if (landingNodeId && !breadcrumbsByNodeId.has(landingNodeId)) {
+      breadcrumbsByNodeId.set(landingNodeId, [result.book.metadata.title])
+    }
+    const sourcesByPath = new Map<string, SearchSource>()
+    const aliasesByPath = new Map<string, Set<string>>()
+    readableNodeIds.forEach((nodeId) => {
+      const target = targets.get(nodeId)
+      if (!target || target.kind !== 'chapter') return
+      const existing = sourcesByPath.get(target.path)
+      if (existing) {
+        const aliases = aliasesByPath.get(target.path)
+        if (target.title !== existing.title && aliases && !aliases.has(target.title)) {
+          if (existing.aliases.length >= 128) existing.aliasesTruncated = true
+          else {
+            aliases.add(target.title)
+            existing.aliases.push(target.title)
+          }
+        }
+        return
+      }
+      sourcesByPath.set(target.path, {
+        nodeId,
+        path: target.path,
+        title: target.title,
+        breadcrumbs: breadcrumbsByNodeId.get(nodeId) ?? [target.title],
+        aliases: [],
+        aliasesTruncated: false,
+        filename: path.posix.basename(target.path),
+        order: sourcesByPath.size
+      })
+      aliasesByPath.set(target.path, new Set([target.title]))
+    })
+    const searchSources = [...sourcesByPath.values()]
     const reading = this.readLibraries().find((item) => item.libraryId === libraryId)?.reading
     const savedNodeId = reading ? opaqueNodeIds.get(reading.lastTargetKey) : undefined
     const savedIndex = savedNodeId ? readableNodeIds.indexOf(savedNodeId) : -1
@@ -658,7 +768,8 @@ export class BookSessionManager {
       targets,
       chapterNodeByPath,
       opaqueNodeIds,
-      readableNodeIds
+      readableNodeIds,
+      searchSources
     }
   }
 
@@ -669,6 +780,7 @@ export class BookSessionManager {
     while (owned.length > MAX_SESSIONS) {
       const oldest = owned.shift()
       if (!oldest) break
+      this.revokeSessionSearch(oldest[1])
       this.sessions.delete(oldest[0])
     }
     return session.dto
@@ -725,6 +837,7 @@ export class BookSessionManager {
     if (initialRoot === 'invalid') {
       return error('book-unavailable', 'This book folder changed and the session was invalidated.')
     }
+    this.revokeSessionSearch(session)
     const result = await this.loadBook(session.rootPath)
     if (this.ownedSession(sessionId, ownerId) !== session) {
       return error('session-not-found', 'This book session has expired.')
@@ -750,6 +863,7 @@ export class BookSessionManager {
       session,
       sessionId
     )
+    this.revokeSessionSearch(session)
     this.sessions.set(sessionId, replacement)
     return {
       ok: true,
@@ -759,10 +873,456 @@ export class BookSessionManager {
 
   closeSession(sessionId: unknown, ownerId: number = 0): BookReaderResult<true> {
     if (!validOpaqueId(sessionId)) return error('invalid-request', 'Invalid session identifier.')
-    if (!this.ownedSession(sessionId, ownerId) || !this.sessions.delete(sessionId)) {
+    const session = this.ownedSession(sessionId, ownerId)
+    if (!session) {
       return error('session-not-found', 'This book session has expired.')
     }
+    this.revokeSessionSearch(session)
+    this.sessions.delete(sessionId)
     return { ok: true, value: true }
+  }
+
+  private revokeSessionSearch(session: BookSession): void {
+    const build = this.searchBuilds.get(session)
+    if (build) {
+      build.controller.abort()
+      this.searchBuilds.delete(session)
+    }
+    const cached = this.searchIndexes.get(session)
+    if (cached) {
+      this.searchCacheBytes = Math.max(0, this.searchCacheBytes - cached.estimatedBytes)
+      this.searchIndexes.delete(session)
+    }
+    for (const [key, active] of this.activeSearches) {
+      if (active.session === session) {
+        active.controller.abort()
+        this.activeSearches.delete(key)
+      }
+    }
+  }
+
+  private evictSearchCacheFor(requiredBytes: number): void {
+    while (
+      this.searchCacheBytes + this.searchBuildReservationBytes + requiredBytes >
+      MAX_SEARCH_CACHE_BYTES
+    ) {
+      const oldest = this.searchIndexes.entries().next().value as
+        | [BookSession, SearchIndex]
+        | undefined
+      if (!oldest) break
+      this.searchIndexes.delete(oldest[0])
+      this.searchCacheBytes -= oldest[1].estimatedBytes
+    }
+  }
+
+  private cacheSearchIndex(session: BookSession, index: SearchIndex): void {
+    if (![...this.sessions.values()].includes(session)) return
+    const previous = this.searchIndexes.get(session)
+    if (previous) this.searchCacheBytes -= previous.estimatedBytes
+    this.searchIndexes.delete(session)
+    this.evictSearchCacheFor(index.estimatedBytes)
+    this.searchIndexes.set(session, index)
+    this.searchCacheBytes += index.estimatedBytes
+  }
+
+  private touchSearchIndex(session: BookSession): SearchIndex | null {
+    const cached = this.searchIndexes.get(session)
+    if (!cached) return null
+    this.searchIndexes.delete(session)
+    this.searchIndexes.set(session, cached)
+    return cached
+  }
+
+  private assertSearchCurrent(
+    session: BookSession,
+    controller: AbortController,
+    ownerGeneration: number,
+    kind: 'build' | 'query'
+  ): void {
+    const exactOperation =
+      kind === 'build'
+        ? this.searchBuilds.get(session)?.controller === controller
+        : this.activeSearches.get(session.ownerId)?.controller === controller
+    if (
+      controller.signal.aborted ||
+      this.sessions.get(session.dto.sessionId) !== session ||
+      !this.ownerIsCurrent(session.ownerId, ownerGeneration) ||
+      !exactOperation
+    ) {
+      throw new DOMException('Search cancelled', 'AbortError')
+    }
+  }
+
+  private async verifySearchRoot(
+    session: BookSession,
+    controller: AbortController,
+    ownerGeneration: number,
+    kind: 'build' | 'query'
+  ): Promise<void> {
+    this.assertSearchCurrent(session, controller, ownerGeneration, kind)
+    const root = await this.identifyRoot(session.rootPath)
+    this.assertSearchCurrent(session, controller, ownerGeneration, kind)
+    if (
+      !root ||
+      root.realPath !== session.rootIdentity.realPath ||
+      root.dev !== session.rootIdentity.dev ||
+      root.ino !== session.rootIdentity.ino
+    ) {
+      throw new Error('The authorized book root changed during search.')
+    }
+  }
+
+  private async searchCheckpoint(
+    session: BookSession,
+    controller: AbortController,
+    ownerGeneration: number,
+    kind: 'build' | 'query',
+    state: { checkpointCount: number }
+  ): Promise<void> {
+    await yieldToEventLoop()
+    this.assertSearchCurrent(session, controller, ownerGeneration, kind)
+    state.checkpointCount += 1
+    if (state.checkpointCount % SEARCH_ROOT_CHECKPOINT_INTERVAL === 0) {
+      await this.verifySearchRoot(session, controller, ownerGeneration, kind)
+    }
+  }
+
+  private reportBuildProgress(build: SearchBuild, completed: number, total: number): void {
+    for (const [searchId, progress] of build.waiters) {
+      try {
+        progress({ searchId, phase: 'indexing', completed, total })
+      } catch {
+        // A renderer callback is advisory. Disable a broken waiter callback
+        // without rejecting the index build shared by other searches.
+        build.waiters.delete(searchId)
+      }
+    }
+  }
+
+  private async buildSearchIndex(session: BookSession, build: SearchBuild): Promise<SearchIndex> {
+    const documents: BookSearchDocument[] = []
+    let estimatedBytes = 0
+    let omittedDocuments = 0
+    let partial = false
+    let yieldedBytes = 0
+    for (let index = 0; index < session.searchSources.length; index += 1) {
+      if (build.controller.signal.aborted) throw new DOMException('Search cancelled', 'AbortError')
+      const source = session.searchSources[index]
+      if (!source) continue
+      const chapter = await this.readBookChapter(session.rootPath, source.path)
+      if (build.controller.signal.aborted) throw new DOMException('Search cancelled', 'AbortError')
+      if (!chapter) {
+        omittedDocuments += 1
+      } else {
+        const remainingBytes = MAX_SEARCH_INDEX_BYTES - estimatedBytes
+        if (remainingBytes < 1_024) {
+          omittedDocuments += session.searchSources.length - index
+          partial = true
+          break
+        }
+        const document = await createBookSearchDocumentAsync(
+          { ...source, markdown: chapter.content },
+          {
+            maxBytes: remainingBytes,
+            signal: build.controller.signal,
+            checkpoint: () =>
+              this.searchCheckpoint(
+                session,
+                build.controller,
+                build.ownerGeneration,
+                'build',
+                build
+              )
+          }
+        )
+        if (estimatedBytes + document.estimatedBytes > MAX_SEARCH_INDEX_BYTES) {
+          omittedDocuments += session.searchSources.length - index
+          partial = true
+          this.reportBuildProgress(
+            build,
+            session.searchSources.length,
+            session.searchSources.length
+          )
+          break
+        }
+        documents.push(document)
+        estimatedBytes += document.estimatedBytes
+        yieldedBytes += document.estimatedBytes
+        partial = partial || document.partial
+      }
+      await this.verifySearchRoot(session, build.controller, build.ownerGeneration, 'build')
+      if (
+        index === 0 ||
+        (index + 1) % SEARCH_YIELD_DOCUMENTS === 0 ||
+        index + 1 === session.searchSources.length
+      ) {
+        this.reportBuildProgress(build, index + 1, session.searchSources.length)
+      }
+      if ((index + 1) % SEARCH_YIELD_DOCUMENTS === 0 || yieldedBytes >= SEARCH_YIELD_BYTES) {
+        yieldedBytes = 0
+        await yieldToEventLoop()
+      }
+    }
+    return {
+      documents,
+      estimatedBytes,
+      status: {
+        eligibleDocuments: session.searchSources.length,
+        indexedDocuments: documents.length,
+        omittedDocuments,
+        partial: partial || omittedDocuments > 0
+      }
+    }
+  }
+
+  private async acquireSearchIndex(
+    session: BookSession,
+    waiterId: string,
+    signal: AbortSignal,
+    onProgress: (progress: BookSearchProgressDto) => void
+  ): Promise<SearchIndex> {
+    const cached = this.touchSearchIndex(session)
+    if (cached) return cached
+    let build = this.searchBuilds.get(session)
+    if (!build || build.controller.signal.aborted) {
+      if (this.searchBuilds.size >= 1 || this.searchBuildReservationBytes > 0) {
+        throw new SearchBusyError('Another book index is currently being built.')
+      }
+      this.evictSearchCacheFor(SEARCH_INDEX_RESERVATION_BYTES)
+      if (
+        this.searchCacheBytes + this.searchBuildReservationBytes + SEARCH_INDEX_RESERVATION_BYTES >
+        MAX_SEARCH_CACHE_BYTES
+      ) {
+        throw new SearchBusyError('There is not enough bounded search memory available.')
+      }
+      this.searchBuildReservationBytes = SEARCH_INDEX_RESERVATION_BYTES
+      const next: SearchBuild = {
+        controller: new AbortController(),
+        ownerGeneration: this.ownerGeneration(session.ownerId),
+        checkpointCount: 0,
+        waiters: new Map(),
+        promise: Promise.resolve(null as never)
+      }
+      next.promise = this.buildSearchIndex(session, next)
+        .then((index) => {
+          this.searchBuildReservationBytes = 0
+          if (!next.controller.signal.aborted) this.cacheSearchIndex(session, index)
+          return index
+        })
+        .finally(() => {
+          this.searchBuildReservationBytes = 0
+          if (this.searchBuilds.get(session) === next) this.searchBuilds.delete(session)
+        })
+      // A cancelled last waiter is expected to reject this shared operation.
+      next.promise.catch(() => undefined)
+      this.searchBuilds.set(session, next)
+      build = next
+    }
+    build.waiters.set(waiterId, onProgress)
+    const detach = (): void => {
+      build?.waiters.delete(waiterId)
+      const pendingSearch = [...this.activeSearches.values()].some(
+        (active) => active.session === session && !active.controller.signal.aborted
+      )
+      if (
+        build &&
+        !build.waiters.size &&
+        !pendingSearch &&
+        this.searchBuilds.get(session) === build
+      ) {
+        build.controller.abort()
+      }
+    }
+    if (signal.aborted) {
+      detach()
+      throw new DOMException('Search cancelled', 'AbortError')
+    }
+    return new Promise<SearchIndex>((resolve, reject) => {
+      const abort = (): void => {
+        detach()
+        reject(new DOMException('Search cancelled', 'AbortError'))
+      }
+      signal.addEventListener('abort', abort, { once: true })
+      build?.promise.then(resolve, reject).finally(() => {
+        signal.removeEventListener('abort', abort)
+        detach()
+      })
+    })
+  }
+
+  async search(
+    sessionId: unknown,
+    request: unknown,
+    ownerId: number = 0,
+    onProgress: (progress: BookSearchProgressDto) => void = () => undefined
+  ): Promise<BookReaderResult<BookSearchResponseDto>> {
+    const candidate = request as Partial<BookSearchRequestDto> | null
+    const parsed =
+      candidate && typeof candidate.query === 'string'
+        ? parseBookSearchQuery(candidate.query)
+        : null
+    const limit =
+      candidate?.limit === undefined
+        ? 50
+        : typeof candidate.limit === 'number' &&
+            Number.isInteger(candidate.limit) &&
+            candidate.limit >= 1 &&
+            candidate.limit <= 100
+          ? candidate.limit
+          : null
+    if (
+      !validOpaqueId(sessionId) ||
+      !candidate ||
+      !validOpaqueId(candidate.searchId) ||
+      !parsed ||
+      limit === null
+    ) {
+      return error('invalid-request', 'Invalid book search request.')
+    }
+    const session = this.ownedSession(sessionId, ownerId)
+    if (!session) return error('session-not-found', 'This book session has expired.')
+    const priorSearch = this.activeSearches.get(ownerId)
+    if (!priorSearch && this.activeSearches.size >= MAX_ACTIVE_SEARCH_OWNERS) {
+      return error('search-busy', 'LeafBook is already serving the maximum number of searches.')
+    }
+    const controller = new AbortController()
+    const searchOwnerGeneration = this.ownerGeneration(ownerId)
+    this.activeSearches.set(ownerId, {
+      searchId: candidate.searchId,
+      session,
+      controller,
+      ownerGeneration: searchOwnerGeneration
+    })
+    priorSearch?.controller.abort()
+    try {
+      const initialRoot = await this.validateSessionRoot(sessionId, session)
+      if (initialRoot === 'revoked') {
+        return error('session-not-found', 'This book session has expired.')
+      }
+      if (initialRoot === 'invalid') {
+        return error(
+          'book-unavailable',
+          'This book folder changed and the session was invalidated.'
+        )
+      }
+      const index = await this.acquireSearchIndex(
+        session,
+        candidate.searchId,
+        controller.signal,
+        onProgress
+      )
+      const matches = []
+      const queryCheckpoint = { checkpointCount: 0 }
+      for (let position = 0; position < index.documents.length; position += 1) {
+        if (controller.signal.aborted) throw new DOMException('Search cancelled', 'AbortError')
+        const document = index.documents[position]
+        if (document) {
+          const match = await matchBookSearchDocumentAsync(document, parsed, {
+            signal: controller.signal,
+            checkpoint: () =>
+              this.searchCheckpoint(
+                session,
+                controller,
+                searchOwnerGeneration,
+                'query',
+                queryCheckpoint
+              )
+          })
+          if (match) matches.push(match)
+        }
+        await this.verifySearchRoot(session, controller, searchOwnerGeneration, 'query')
+        if (
+          position === 0 ||
+          (position + 1) % SEARCH_YIELD_DOCUMENTS === 0 ||
+          position + 1 === index.documents.length
+        ) {
+          try {
+            onProgress({
+              searchId: candidate.searchId,
+              phase: 'matching',
+              completed: position + 1,
+              total: index.documents.length
+            })
+          } catch {
+            // Progress delivery is advisory and must not fail a completed search.
+          }
+        }
+        if ((position + 1) % SEARCH_YIELD_DOCUMENTS === 0) await yieldToEventLoop()
+      }
+      matches.sort(
+        (left, right) =>
+          right.score - left.score ||
+          left.order - right.order ||
+          left.firstOffset - right.firstOffset ||
+          left.result.nodeId.localeCompare(right.result.nodeId)
+      )
+      const finalRoot = await this.validateSessionRoot(sessionId, session)
+      if (finalRoot === 'revoked') {
+        return error('session-not-found', 'This book session has expired.')
+      }
+      if (finalRoot === 'invalid') {
+        return error(
+          'book-unavailable',
+          'This book folder changed and the session was invalidated.'
+        )
+      }
+      return {
+        ok: true,
+        value: {
+          searchId: candidate.searchId,
+          query: parsed.raw,
+          results: matches.slice(0, limit).map((match) => match.result),
+          totalResults: matches.length,
+          truncated: matches.length > limit,
+          index: index.status
+        }
+      }
+    } catch (searchError) {
+      if (
+        controller.signal.aborted ||
+        (searchError instanceof DOMException && searchError.name === 'AbortError')
+      ) {
+        return error('search-cancelled', 'The book search was cancelled.')
+      }
+      if (searchError instanceof SearchBusyError) {
+        return error('search-busy', 'LeafBook is busy building another bounded book index.')
+      }
+      return error('search-unavailable', 'LeafBook could not build the book search index.')
+    } finally {
+      if (this.activeSearches.get(ownerId)?.controller === controller) {
+        this.activeSearches.delete(ownerId)
+      }
+    }
+  }
+
+  cancelSearch(sessionId: unknown, searchId: unknown, ownerId: number = 0): BookReaderResult<true> {
+    if (!validOpaqueId(sessionId) || !validOpaqueId(searchId)) {
+      return error('invalid-request', 'Invalid book search cancellation request.')
+    }
+    const session = this.ownedSession(sessionId, ownerId)
+    if (!session) return error('session-not-found', 'This book session has expired.')
+    const active = this.activeSearches.get(ownerId)
+    if (active?.session === session && active.searchId === searchId) active.controller.abort()
+    return { ok: true, value: true }
+  }
+
+  searchDebugStateForTests(): {
+    activeOwners: number
+    builds: number
+    waiters: number
+    cacheBytes: number
+    reservationBytes: number
+  } {
+    return {
+      activeOwners: this.activeSearches.size,
+      builds: this.searchBuilds.size,
+      waiters: [...this.searchBuilds.values()].reduce(
+        (total, build) => total + build.waiters.size,
+        0
+      ),
+      cacheBytes: this.searchCacheBytes,
+      reservationBytes: this.searchBuildReservationBytes
+    }
   }
 
   async removeLibrary(libraryId: unknown): Promise<BookReaderResult<true>> {
@@ -774,7 +1334,10 @@ export class BookSessionManager {
       }
       this.writeLibraries(libraries.filter((item) => item.libraryId !== libraryId))
       for (const [sessionId, session] of this.sessions) {
-        if (session.libraryId === libraryId) this.sessions.delete(sessionId)
+        if (session.libraryId === libraryId) {
+          this.revokeSessionSearch(session)
+          this.sessions.delete(sessionId)
+        }
       }
       return { ok: true, value: true }
     })

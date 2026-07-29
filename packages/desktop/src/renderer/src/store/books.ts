@@ -5,6 +5,9 @@ import type {
   BookChapterDto,
   BookReaderError,
   BookReaderNodeDto,
+  BookSearchIndexStatusDto,
+  BookSearchProgressDto,
+  BookSearchResultDto,
   BookshelfEntryDto,
   BookSessionDto
 } from '@shared/types/bookReader'
@@ -12,6 +15,7 @@ import { adjacentChapter, flattenReadableNodeIds } from '@/book/readerModel'
 
 const SAVE_DEBOUNCE_MS = 2_000
 const SAVE_EPSILON = 0.002
+const SEARCH_DEBOUNCE_MS = 200
 
 interface PendingReadingPosition {
   sessionId: string
@@ -55,6 +59,121 @@ export const useBooksStore = defineStore('books', () => {
       !restoringReadingPosition.value &&
       Boolean(session.value && chapter.value)
   )
+  const searchQuery = ref('')
+  const searchResults = ref<BookSearchResultDto[]>([])
+  const searchLoading = ref(false)
+  const searchProgress = ref<BookSearchProgressDto | null>(null)
+  const searchIndexStatus = ref<BookSearchIndexStatusDto | null>(null)
+  const searchTotalResults = ref(0)
+  const searchTruncated = ref(false)
+  const searchError = ref<BookReaderError | null>(null)
+  let searchTimer: ReturnType<typeof setTimeout> | null = null
+  let searchGeneration = 0
+  let activeSearch: { sessionId: string; searchId: string } | null = null
+
+  const clearSearchTimer = (): void => {
+    if (searchTimer) clearTimeout(searchTimer)
+    searchTimer = null
+  }
+
+  const cancelSearch = async (clear = false): Promise<void> => {
+    clearSearchTimer()
+    searchGeneration += 1
+    const active = activeSearch
+    activeSearch = null
+    searchLoading.value = false
+    searchProgress.value = null
+    if (clear) {
+      searchQuery.value = ''
+      searchResults.value = []
+      searchIndexStatus.value = null
+      searchTotalResults.value = 0
+      searchTruncated.value = false
+      searchError.value = null
+    }
+    if (active) {
+      try {
+        await window.electron.books.cancelSearch(active.sessionId, active.searchId)
+      } catch {
+        // Cancellation is best-effort; generation checks still reject stale results.
+      }
+    }
+  }
+
+  const runSearch = async (query: string, token: number): Promise<void> => {
+    const sessionSnapshot = session.value
+    if (!sessionSnapshot || mode.value !== 'reader' || token !== searchGeneration) return
+    const searchId = crypto.randomUUID()
+    const prior = activeSearch
+    activeSearch = { sessionId: sessionSnapshot.sessionId, searchId }
+    searchLoading.value = true
+    searchProgress.value = null
+    searchError.value = null
+    const request = window.electron.books.search(sessionSnapshot.sessionId, { searchId, query })
+    if (prior) {
+      window.electron.books.cancelSearch(prior.sessionId, prior.searchId).catch(() => undefined)
+    }
+    try {
+      const result = await request
+      if (
+        token !== searchGeneration ||
+        activeSearch?.searchId !== searchId ||
+        session.value?.sessionId !== sessionSnapshot.sessionId
+      ) {
+        return
+      }
+      if (!result.ok) {
+        if (result.error.code !== 'search-cancelled') searchError.value = result.error
+        return
+      }
+      searchResults.value = result.value.results
+      searchIndexStatus.value = result.value.index
+      searchTotalResults.value = result.value.totalResults
+      searchTruncated.value = result.value.truncated
+    } catch {
+      if (token === searchGeneration) searchError.value = unexpectedError()
+    } finally {
+      if (token === searchGeneration) {
+        searchLoading.value = false
+        searchProgress.value = null
+        activeSearch = null
+      }
+    }
+  }
+
+  const scheduleSearch = (query: string): void => {
+    searchQuery.value = query
+    clearSearchTimer()
+    const token = ++searchGeneration
+    const prior = activeSearch
+    activeSearch = null
+    searchLoading.value = false
+    searchProgress.value = null
+    searchResults.value = []
+    searchIndexStatus.value = null
+    searchTotalResults.value = 0
+    searchTruncated.value = false
+    searchError.value = null
+    if (prior) {
+      window.electron.books.cancelSearch(prior.sessionId, prior.searchId).catch(() => undefined)
+    }
+    if (!query.trim()) {
+      return
+    }
+    searchTimer = setTimeout(() => {
+      searchTimer = null
+      runSearch(query, token)
+    }, SEARCH_DEBOUNCE_MS)
+  }
+
+  const handleSearchProgress = (progress: BookSearchProgressDto): void => {
+    if (
+      activeSearch?.searchId === progress.searchId &&
+      activeSearch.sessionId === session.value?.sessionId
+    ) {
+      searchProgress.value = progress
+    }
+  }
 
   const start = (): { token: number; operationId: number } => {
     const value = { token: ++generation, operationId: ++operation }
@@ -354,6 +473,7 @@ export const useBooksStore = defineStore('books', () => {
   }
 
   const showBookshelf = async (): Promise<void> => {
+    cancelSearch(true)
     await flushReadingPosition()
     const { token, operationId } = start()
     const oldSession = session.value
@@ -393,6 +513,7 @@ export const useBooksStore = defineStore('books', () => {
   }
 
   const openPicker = async (): Promise<void> => {
+    cancelSearch(true)
     const oldSession = session.value
     const { token, operationId } = start()
     try {
@@ -415,6 +536,7 @@ export const useBooksStore = defineStore('books', () => {
   }
 
   const openLibrary = async (libraryId: string): Promise<void> => {
+    cancelSearch(true)
     const oldSession = session.value
     const { token, operationId } = start()
     try {
@@ -509,6 +631,7 @@ export const useBooksStore = defineStore('books', () => {
   }
 
   const performRefresh = async (): Promise<void> => {
+    cancelSearch(true)
     await flushReadingPosition()
     const sessionSnapshot = session.value
     if (!sessionSnapshot) return
@@ -578,6 +701,7 @@ export const useBooksStore = defineStore('books', () => {
     if (nextNodeId.value) await openNode(nextNodeId.value)
   }
   const showEditor = async (): Promise<void> => {
+    cancelSearch(true)
     await flushReadingPosition()
     const { token, operationId } = start()
     const oldSession = session.value
@@ -593,6 +717,15 @@ export const useBooksStore = defineStore('books', () => {
     }
   }
 
+  const openSearchResult = async (
+    result: BookSearchResultDto,
+    fragment: string | null
+  ): Promise<void> => {
+    await flushReadingPosition()
+    await cancelSearch(false)
+    await openNode(result.nodeId, fragment)
+  }
+
   return {
     mode,
     libraries,
@@ -600,6 +733,14 @@ export const useBooksStore = defineStore('books', () => {
     chapter,
     loading,
     error,
+    searchQuery,
+    searchResults,
+    searchLoading,
+    searchProgress,
+    searchIndexStatus,
+    searchTotalResults,
+    searchTruncated,
+    searchError,
     readingPositionReady,
     previousNodeId,
     nextNodeId,
@@ -616,6 +757,10 @@ export const useBooksStore = defineStore('books', () => {
     cancelReadingPositionRestore,
     flushReadingPosition,
     registerReadingPositionProvider,
+    scheduleSearch,
+    cancelSearch,
+    handleSearchProgress,
+    openSearchResult,
     saveReadingPosition,
     refresh,
     removeLibrary,

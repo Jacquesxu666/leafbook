@@ -17,6 +17,7 @@ import type {
   IpcMainEventChannels,
   BootInfo
 } from '@shared/types/ipc'
+import type { BookSearchProgressDto, BookSearchRequestDto } from '@shared/types/bookReader'
 
 type RendererEventListener<K extends keyof IpcMainEventChannels> = (
   event: IpcRendererEvent,
@@ -238,7 +239,17 @@ const booksAPI = {
   saveReadingPosition: (sessionId: string, nodeId: string, chapterProgress: number) =>
     invoke('lb::books::save-reading-position', sessionId, nodeId, chapterProgress),
   followLink: (sessionId: string, nodeId: string, href: string) =>
-    invoke('lb::books::follow-link', sessionId, nodeId, href)
+    invoke('lb::books::follow-link', sessionId, nodeId, href),
+  search: (sessionId: string, request: BookSearchRequestDto) =>
+    invoke('lb::books::search', sessionId, request),
+  cancelSearch: (sessionId: string, searchId: string) =>
+    invoke('lb::books::cancel-search', sessionId, searchId),
+  onSearchProgress: (handler: (progress: BookSearchProgressDto) => void) => {
+    const listener = (_event: IpcRendererEvent, progress: BookSearchProgressDto) =>
+      handler(progress)
+    ipcRenderer.on('lb::books::search-progress', listener)
+    return () => ipcRenderer.removeListener('lb::books::search-progress', listener)
+  }
 }
 
 const electronAPI = {

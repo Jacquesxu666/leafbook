@@ -133,6 +133,140 @@ test('Escape closes the mobile contents drawer from a focused tree button', asyn
   }
 })
 
+test('searches the whole book, opens a matched heading, and rebuilds after refresh', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'leafbook-e2e-search-book-'))
+  const nfdHeading = 'Café Target heading'.normalize('NFD')
+  const nfdBody = 'Résumé body needle'.normalize('NFD')
+  const filler = Array.from(
+    { length: 40 },
+    (_, index) => `Paragraph ${index + 1} keeps the target below the fold.`
+  ).join('\n\n')
+  const tail = Array.from(
+    { length: 40 },
+    (_, index) => `Trailing paragraph ${index + 1} leaves room after the target.`
+  ).join('\n\n')
+  await fs.writeFile(
+    path.join(root, 'SUMMARY.md'),
+    '# Summary\n\n- [Welcome](README.md)\n- [Search chapter](search.md)\n- [Partial chapter](partial.md)\n'
+  )
+  await fs.writeFile(path.join(root, 'README.md'), '# Welcome\n\nOpen search with slash.')
+  await fs.writeFile(
+    path.join(root, 'search.md'),
+    `---\ntags: [phase-six]\n---\n# Search chapter\n\n${filler}\n\n## ΟΣ ${nfdHeading}\n\nΟΣ ${nfdBody}\n\n\`\`\`ts\nconst codeNeedle = true\n\`\`\`\n\n${tail}\n`
+  )
+  await fs.writeFile(path.join(root, 'partial.md'), `# Partial chapter\n\n${'x'.repeat(1_100_000)}`)
+
+  const { app, page } = await launchElectron([], { suppressErrorDialog: true })
+  try {
+    await app.evaluate(({ BrowserWindow }) => {
+      const window = BrowserWindow.getAllWindows()[0]
+      if (!window) throw new Error('Editor window was unavailable.')
+      window.setContentSize(650, 800)
+    })
+    await app.evaluate(({ dialog }, selectedRoot) => {
+      dialog.showOpenDialog = async () =>
+        ({
+          canceled: false,
+          filePaths: [selectedRoot],
+          bookmarks: []
+        }) as Electron.OpenDialogReturnValue
+    }, root)
+    await clickMenuById(app, 'leafbookOpenBook')
+
+    await page.locator('.book-content').focus()
+    await page.keyboard.press('/')
+    const searchButton = page.getByRole('button', { name: 'Search', exact: true })
+    await expect(searchButton).toHaveAttribute('aria-expanded', 'true')
+    const input = page.getByRole('searchbox', { name: 'Search this book' })
+    await expect(input).toBeFocused()
+    const panelBox = await page.locator('#book-search-panel').boundingBox()
+    const inputBox = await input.boundingBox()
+    expect(panelBox?.width).toBe(650)
+    expect(panelBox?.height).toBeGreaterThan(500)
+    expect(inputBox?.height).toBe(42)
+    const closeSearch = page.getByRole('button', { name: 'Close search' })
+    await expect(closeSearch).toHaveCSS('appearance', 'none')
+    await expect(closeSearch).toHaveCSS('border-top-width', '1px')
+    await expect(closeSearch).toHaveCSS('border-top-left-radius', '7px')
+    await input.fill('ος')
+    const result = page.getByRole('option').first()
+    await expect(result).toContainText('Search chapter')
+    await expect.poll(() => result.locator('mark').first().textContent()).toBe('ΟΣ')
+    await expect(
+      page.getByText('Some document content was truncated to keep search bounded.')
+    ).toBeVisible()
+    await expect(result).toHaveCSS('border-top-width', '1px')
+    const resultBox = await result.boundingBox()
+    expect(resultBox?.height).toBeGreaterThanOrEqual(68)
+    expect(resultBox?.height).toBeLessThanOrEqual(160)
+    expect((await page.screenshot()).byteLength).toBeGreaterThan(10_000)
+    await expect(page.getByRole('option')).toHaveCount(2)
+    await page.keyboard.press('ArrowDown')
+    await expect(page.getByRole('option').nth(1)).toBeFocused()
+    await page.keyboard.press('ArrowUp')
+    await expect(result).toBeFocused()
+    await page.keyboard.press('Enter')
+    await expect(page.locator('#book-search-panel')).toHaveCount(0)
+    const targetHeading = page
+      .locator('.leafbook-markdown h2')
+      .filter({ hasText: 'Target heading' })
+    await expect
+      .poll(() => targetHeading.textContent().then((text) => text?.normalize('NFC')))
+      .toBe('ΟΣ Café Target heading')
+    await expect
+      .poll(() =>
+        targetHeading.evaluate((heading) => {
+          const container = heading.closest('.book-content')
+          if (!container) return Number.POSITIVE_INFINITY
+          return Math.abs(
+            heading.getBoundingClientRect().top - container.getBoundingClientRect().top
+          )
+        })
+      )
+      .toBeLessThan(20)
+
+    await searchButton.click()
+    await input.fill('Café')
+    await expect
+      .poll(() => page.getByRole('option').first().locator('mark').textContent())
+      .toBe('Cafe\u0301')
+    await input.fill('Résumé')
+    await expect
+      .poll(() =>
+        page
+          .getByRole('option')
+          .first()
+          .textContent()
+          .then((text) => text?.normalize('NFC'))
+      )
+      .toContain('Résumé body needle')
+    await input.fill('codeneedle')
+    await expect(page.getByRole('option').first()).toContainText('codeNeedle')
+    await page.keyboard.press('Escape')
+
+    await fs.writeFile(
+      path.join(root, 'search.md'),
+      '# Search chapter\n\n## Refreshed heading\n\nA freshIndexNeedle appears now.\n'
+    )
+    await page.getByRole('button', { name: 'Refresh' }).click()
+    await expect(page.locator('.leafbook-markdown')).toContainText('freshIndexNeedle')
+    await searchButton.click()
+    await input.fill('codeneedle')
+    await expect(page.getByText('0 results', { exact: true })).toBeVisible()
+    await expect(page.getByRole('option')).toHaveCount(0)
+    await input.fill('freshindexneedle')
+    await expect(page.getByRole('option').first()).toContainText('freshIndexNeedle')
+    await page.keyboard.press('Escape')
+    await expect(page.locator('#book-search-panel')).toHaveCount(0)
+    await expect(searchButton).toHaveAttribute('aria-expanded', 'false')
+    await expect(searchButton).toBeFocused()
+    await expectNoRendererErrors(app)
+  } finally {
+    await app.close()
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
 test('persists reading progress and restores the last chapter scroll position', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'leafbook-e2e-progress-book-'))
   const longChapter = Array.from(

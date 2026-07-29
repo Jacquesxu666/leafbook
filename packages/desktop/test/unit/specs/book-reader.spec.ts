@@ -2,11 +2,14 @@
 import fs from 'fs/promises'
 import os from 'os'
 import path from 'path'
+import { randomUUID } from 'crypto'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import type {
   BookReaderNodeDto,
   BookReaderResult,
+  BookSearchProgressDto,
+  BookSearchResponseDto,
   BookshelfEntryDto,
   BookSessionDto
 } from '@shared/types/bookReader'
@@ -22,7 +25,9 @@ import { useBooksStore } from '@/store/books'
 const mocks = vi.hoisted(() => ({
   stores: new Map<string, Record<string, unknown>>(),
   selectedPath: '',
-  openedExternal: vi.fn()
+  openedExternal: vi.fn(),
+  browserWindow: null as Record<string, unknown> | null,
+  ipcHandlers: new Map<string, (...args: never[]) => unknown>()
 }))
 
 vi.mock('electron-store', () => ({
@@ -45,18 +50,24 @@ vi.mock('electron-store', () => ({
 }))
 
 vi.mock('electron', () => ({
-  BrowserWindow: { fromWebContents: () => null },
+  app: { getPath: () => '/ipc-user-data' },
+  BrowserWindow: { fromWebContents: () => mocks.browserWindow },
   dialog: {
     showOpenDialog: async () => ({
       canceled: !mocks.selectedPath,
       filePaths: mocks.selectedPath ? [mocks.selectedPath] : []
     })
   },
+  ipcMain: {
+    handle: (channel: string, handler: (...args: never[]) => unknown) =>
+      mocks.ipcHandlers.set(channel, handler)
+  },
   shell: { openExternal: mocks.openedExternal }
 }))
 
 import { BookSessionManager } from 'main_renderer/book/sessionManager'
-import { loadBookFromDirectory } from 'main_renderer/book/filesystem'
+import { loadBookFromDirectory, safelyReadBookChapter } from 'main_renderer/book/filesystem'
+import { isTrustedEditorSender, registerBookHandlers } from 'main_renderer/ipc/books'
 
 const temporaryDirectories: string[] = []
 const deferredValue = <T>(): {
@@ -69,6 +80,7 @@ const deferredValue = <T>(): {
   })
   return { promise, resolve: complete }
 }
+type TestRootIdentity = { realPath: string; dev: bigint; ino: bigint } | null
 const makeBook = async (files: Record<string, string>): Promise<string> => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'leafbook-reader-'))
   temporaryDirectories.push(root)
@@ -84,11 +96,90 @@ beforeEach(() => {
   mocks.stores.clear()
   mocks.selectedPath = ''
   mocks.openedExternal.mockReset()
+  mocks.browserWindow = null
+  mocks.ipcHandlers.clear()
 })
 afterEach(async () => {
   await Promise.all(
     temporaryDirectories.splice(0).map((root) => fs.rm(root, { recursive: true, force: true }))
   )
+})
+
+describe('book IPC trust boundary', () => {
+  it('gates bookshelf listing and every book handler behind an editor sender', async () => {
+    registerBookHandlers()
+    const listHandler = mocks.ipcHandlers.get('lb::books::list')
+    expect(listHandler).toBeDefined()
+    const untrustedEvent = {
+      sender: {
+        id: 90,
+        isDestroyed: () => false,
+        getURL: () => 'file:///index.html?type=settings',
+        once: vi.fn()
+      }
+    }
+    expect(isTrustedEditorSender(untrustedEvent as never)).toBe(false)
+    expect(await listHandler?.(untrustedEvent as never)).toEqual([])
+
+    mocks.browserWindow = {
+      restoreBufferId: 'editor-buffer',
+      isDestroyed: () => false
+    }
+    const trustedEvent = {
+      sender: {
+        id: 91,
+        isDestroyed: () => false,
+        getURL: () => 'file:///index.html?type=editor',
+        once: vi.fn()
+      }
+    }
+    expect(isTrustedEditorSender(trustedEvent as never)).toBe(true)
+    expect(
+      [...mocks.ipcHandlers.keys()].filter((channel) => channel.startsWith('lb::books::'))
+    ).toEqual(
+      expect.arrayContaining(['lb::books::list', 'lb::books::search', 'lb::books::cancel-search'])
+    )
+  })
+
+  it('contains a renderer destruction race while sending search progress', async () => {
+    registerBookHandlers()
+    mocks.browserWindow = {
+      restoreBufferId: 'editor-buffer',
+      isDestroyed: () => false
+    }
+    const send = vi.fn(() => {
+      throw new Error('webContents was destroyed during send')
+    })
+    const event = {
+      sender: {
+        id: 92,
+        isDestroyed: () => false,
+        getURL: () => 'file:///index.html?type=editor',
+        once: vi.fn(),
+        send
+      }
+    }
+    const search = vi
+      .spyOn(BookSessionManager.prototype, 'search')
+      .mockImplementation(async (_sessionId, request, _ownerId, onProgress) => {
+        const searchId = (request as { searchId: string }).searchId
+        onProgress?.({ searchId, phase: 'indexing', completed: 1, total: 1 })
+        return { ok: false, error: { code: 'search-cancelled', message: 'test complete' } }
+      })
+    const handler = mocks.ipcHandlers.get('lb::books::search')
+    await expect(
+      handler?.(
+        event as never,
+        randomUUID() as never,
+        {
+          searchId: randomUUID(),
+          query: 'needle'
+        } as never
+      )
+    ).resolves.toMatchObject({ ok: false, error: { code: 'search-cancelled' } })
+    expect(send).toHaveBeenCalledOnce()
+    search.mockRestore()
+  })
 })
 
 describe('BookSessionManager authorization boundary', () => {
@@ -172,6 +263,403 @@ describe('BookSessionManager authorization boundary', () => {
     expect(await second.removeLibrary(opened.value.libraryId)).toEqual({ ok: true, value: true })
     expect(await second.listLibraries()).toEqual([])
     expect((await fs.stat(root)).isDirectory()).toBe(true)
+  })
+
+  it('searches only model-owned unique chapters without exposing filesystem paths', async () => {
+    const root = await makeBook({
+      'SUMMARY.md':
+        '- [First title](README.md)\n- [Duplicate alias](README.md)\n- [Second](second.md)\n',
+      'README.md':
+        '---\ntags: [phase-six]\n---\n# First\n\nLeafBook search needle\n\n## Target\n\n```ts\nconst codeNeedle = true\n```',
+      'second.md': '# Second\n\nOther text',
+      'orphan.md': '# Orphan\n\nLeafBook search needle'
+    })
+    mocks.selectedPath = root
+    const manager = new BookSessionManager('/search-boundary-user-data')
+    const opened = await manager.openPicker({ sender: { id: 71 } } as never)
+    expect(opened.ok).toBe(true)
+    if (!opened.ok) return
+
+    const found = await manager.search(
+      opened.value.sessionId,
+      { searchId: randomUUID(), query: 'leafbook needle' },
+      71
+    )
+    expect(found.ok).toBe(true)
+    if (!found.ok) return
+    expect(found.value.results).toHaveLength(1)
+    expect(found.value.index).toMatchObject({
+      eligibleDocuments: 2,
+      indexedDocuments: 2,
+      omittedDocuments: 0,
+      partial: false
+    })
+    expect(JSON.stringify(found.value)).not.toContain(root)
+    expect(JSON.stringify(found.value)).not.toContain('README.md')
+
+    const tag = await manager.search(
+      opened.value.sessionId,
+      { searchId: randomUUID(), query: 'phase-six' },
+      71
+    )
+    expect(tag.ok && tag.value.results[0]?.matches[0]?.kind).toBe('tag')
+    const code = await manager.search(
+      opened.value.sessionId,
+      { searchId: randomUUID(), query: 'codeneedle' },
+      71
+    )
+    expect(code.ok && code.value.results[0]?.matches[0]?.fragment).toBe('Target')
+    expect(
+      await manager.search(
+        opened.value.sessionId,
+        { searchId: randomUUID(), query: 'leafbook' },
+        72
+      )
+    ).toMatchObject({ ok: false, error: { code: 'session-not-found' } })
+  })
+
+  it('keeps a shared index build alive when one search waiter is cancelled', async () => {
+    const root = await makeBook({
+      'SUMMARY.md': '- [First](README.md)\n- [Second](second.md)\n',
+      'README.md': '# First\n\nshared needle',
+      'second.md': '# Second\n\nshared needle'
+    })
+    mocks.selectedPath = root
+    const gate = deferredValue<void>()
+    const read = vi.fn(async (rootPath: string, relativePath: string, byteLimit?: number) => {
+      await gate.promise
+      return safelyReadBookChapter(rootPath, relativePath, byteLimit)
+    })
+    const manager = new BookSessionManager('/search-cancel-user-data', loadBookFromDirectory, read)
+    const opened = await manager.openPicker({ sender: { id: 73 } } as never)
+    expect(opened.ok).toBe(true)
+    if (!opened.ok) return
+    const firstSearchId = randomUUID()
+    const secondSearchId = randomUUID()
+    const first = manager.search(
+      opened.value.sessionId,
+      { searchId: firstSearchId, query: 'shared' },
+      73
+    )
+    await vi.waitFor(() => expect(read).toHaveBeenCalledTimes(1))
+    const second = manager.search(
+      opened.value.sessionId,
+      { searchId: secondSearchId, query: 'needle' },
+      73
+    )
+    await Promise.resolve()
+    expect(manager.cancelSearch(opened.value.sessionId, firstSearchId, 73)).toEqual({
+      ok: true,
+      value: true
+    })
+    gate.resolve()
+
+    expect(await first).toMatchObject({ ok: false, error: { code: 'search-cancelled' } })
+    const secondResult = await second
+    expect(secondResult).toEqual(
+      expect.objectContaining({ ok: true, value: expect.objectContaining({ totalResults: 2 }) })
+    )
+    expect(read).toHaveBeenCalledTimes(2)
+  })
+
+  it('isolates a throwing progress callback and reuses the completed shared index', async () => {
+    const root = await makeBook({
+      'README.md': '# Progress\n\ncallback isolation needle'
+    })
+    mocks.selectedPath = root
+    const read = vi.fn(safelyReadBookChapter)
+    const manager = new BookSessionManager(
+      '/search-progress-isolation-user-data',
+      loadBookFromDirectory,
+      read
+    )
+    const opened = await manager.openPicker({ sender: { id: 76 } } as never)
+    expect(opened.ok).toBe(true)
+    if (!opened.ok) return
+    const internal = manager as unknown as {
+      sessions: Map<string, unknown>
+      acquireSearchIndex: (
+        session: unknown,
+        waiterId: string,
+        signal: AbortSignal,
+        onProgress: (progress: BookSearchProgressDto) => void
+      ) => Promise<unknown>
+    }
+    const session = internal.sessions.get(opened.value.sessionId)
+    expect(session).toBeDefined()
+    if (!session) return
+    const badProgress = vi.fn(() => {
+      throw new Error('renderer progress callback failed')
+    })
+    const goodProgress = vi.fn()
+    const first = internal.acquireSearchIndex(
+      session,
+      randomUUID(),
+      new AbortController().signal,
+      badProgress
+    )
+    const second = internal.acquireSearchIndex(
+      session,
+      randomUUID(),
+      new AbortController().signal,
+      goodProgress
+    )
+
+    const [firstIndex, secondIndex] = await Promise.all([first, second])
+    expect(firstIndex).toBe(secondIndex)
+    expect(badProgress).toHaveBeenCalled()
+    expect(goodProgress).toHaveBeenCalled()
+    const reused = await manager.search(
+      opened.value.sessionId,
+      { searchId: randomUUID(), query: 'needle' },
+      76
+    )
+    expect(reused).toMatchObject({ ok: true, value: { totalResults: 1 } })
+    expect(read).toHaveBeenCalledTimes(1)
+    expect(manager.searchDebugStateForTests()).toMatchObject({
+      builds: 0,
+      waiters: 0,
+      reservationBytes: 0
+    })
+  })
+
+  it('bounds a flood of latest-wins searches to one owner, build, waiter and reservation', async () => {
+    const root = await makeBook({
+      'README.md': '# Flood\n\nbounded search needle'
+    })
+    mocks.selectedPath = root
+    const gate = deferredValue<void>()
+    const read = vi.fn(async (rootPath: string, relativePath: string, byteLimit?: number) => {
+      await gate.promise
+      return safelyReadBookChapter(rootPath, relativePath, byteLimit)
+    })
+    const manager = new BookSessionManager('/search-flood-user-data', loadBookFromDirectory, read)
+    const opened = await manager.openPicker({ sender: { id: 74 } } as never)
+    expect(opened.ok).toBe(true)
+    if (!opened.ok) return
+
+    const requests = [
+      manager.search(opened.value.sessionId, { searchId: randomUUID(), query: 'needle' }, 74)
+    ]
+    await vi.waitFor(() => expect(read).toHaveBeenCalledTimes(1))
+    for (let index = 0; index < 100; index += 1) {
+      requests.push(
+        manager.search(
+          opened.value.sessionId,
+          { searchId: randomUUID(), query: `needle ${index}` },
+          74
+        )
+      )
+    }
+    await Promise.resolve()
+    expect(manager.searchDebugStateForTests()).toMatchObject({
+      activeOwners: 1,
+      builds: 1,
+      reservationBytes: 32 * 1024 * 1024
+    })
+    expect(manager.searchDebugStateForTests().waiters).toBeLessThanOrEqual(1)
+    expect(
+      manager.searchDebugStateForTests().cacheBytes +
+        manager.searchDebugStateForTests().reservationBytes
+    ).toBeLessThanOrEqual(64 * 1024 * 1024)
+    gate.resolve()
+
+    const settled = await Promise.all(requests)
+    expect(settled.filter((result) => result.ok)).toHaveLength(1)
+    expect(
+      settled.filter((result) => !result.ok && result.error.code === 'search-cancelled')
+    ).toHaveLength(100)
+    expect(manager.searchDebugStateForTests()).toMatchObject({
+      activeOwners: 0,
+      builds: 0,
+      waiters: 0,
+      reservationBytes: 0
+    })
+    expect(manager.searchDebugStateForTests().cacheBytes).toBeLessThanOrEqual(64 * 1024 * 1024)
+  })
+
+  it('rejects excess owners and concurrent cross-session builds with a stable busy error', async () => {
+    const root = await makeBook({ 'README.md': '# Busy\n\nneedle' })
+    mocks.selectedPath = root
+    const gate = deferredValue<void>()
+    const read = vi.fn(async (rootPath: string, relativePath: string, byteLimit?: number) => {
+      await gate.promise
+      return safelyReadBookChapter(rootPath, relativePath, byteLimit)
+    })
+    const manager = new BookSessionManager(
+      '/search-global-cap-user-data',
+      loadBookFromDirectory,
+      read
+    )
+    const firstSession = await manager.openPicker({ sender: { id: 100 } } as never)
+    expect(firstSession.ok).toBe(true)
+    if (!firstSession.ok) return
+    const otherSessions = await Promise.all(
+      Array.from({ length: 8 }, (_, index) =>
+        manager.openLibrary(firstSession.value.libraryId, 101 + index)
+      )
+    )
+    expect(otherSessions.every((result) => result.ok)).toBe(true)
+    const first = manager.search(
+      firstSession.value.sessionId,
+      { searchId: randomUUID(), query: 'needle' },
+      100
+    )
+    await vi.waitFor(() => expect(read).toHaveBeenCalledTimes(1))
+    const competing = otherSessions.map((result, index) => {
+      if (!result.ok) throw new Error('Expected a test session.')
+      return manager.search(
+        result.value.sessionId,
+        { searchId: randomUUID(), query: 'needle' },
+        101 + index
+      )
+    })
+    expect(manager.searchDebugStateForTests().activeOwners).toBeLessThanOrEqual(8)
+    await vi.waitFor(() => expect(manager.searchDebugStateForTests().activeOwners).toBe(1))
+    gate.resolve()
+    const competingResults = await Promise.all(competing)
+    expect(
+      competingResults.every(
+        (result) => !result.ok && ['search-busy', 'search-cancelled'].includes(result.error.code)
+      )
+    ).toBe(true)
+    expect(await first).toMatchObject({ ok: true })
+    expect(manager.searchDebugStateForTests().activeOwners).toBe(0)
+  })
+
+  it('reports content truncation as partial without claiming a document was omitted', async () => {
+    const root = await makeBook({
+      'README.md': `# Large\n\n${Array.from({ length: 4 }, () => '\uFDFA'.repeat(4_096)).join('\n')}`
+    })
+    mocks.selectedPath = root
+    const manager = new BookSessionManager('/search-partial-user-data')
+    const opened = await manager.openPicker({ sender: { id: 75 } } as never)
+    expect(opened.ok).toBe(true)
+    if (!opened.ok) return
+    const result = await manager.search(
+      opened.value.sessionId,
+      { searchId: randomUUID(), query: 'large' },
+      75
+    )
+    expect(result).toMatchObject({
+      ok: true,
+      value: {
+        index: {
+          eligibleDocuments: 1,
+          indexedDocuments: 1,
+          omittedDocuments: 0,
+          partial: true
+        }
+      }
+    })
+    const debug = manager.searchDebugStateForTests()
+    expect(debug.cacheBytes + debug.reservationBytes).toBeLessThanOrEqual(64 * 1024 * 1024)
+  })
+
+  it('bounds root identity I/O while indexing and matching thousands of lines', async () => {
+    const root = await makeBook({
+      'README.md': Array.from({ length: 4_000 }, (_, index) => `searchable line ${index}`).join(
+        '\n'
+      )
+    })
+    mocks.selectedPath = root
+    const manager = new BookSessionManager('/search-root-checkpoint-budget-user-data')
+    const opened = await manager.openPicker({ sender: { id: 77 } } as never)
+    expect(opened.ok).toBe(true)
+    if (!opened.ok) return
+    const internal = manager as unknown as {
+      identifyRoot: (rootPath: string) => Promise<TestRootIdentity>
+    }
+    const identifyRoot = vi.spyOn(internal, 'identifyRoot')
+
+    const result = await manager.search(
+      opened.value.sessionId,
+      { searchId: randomUUID(), query: 'searchable' },
+      77
+    )
+    expect(result).toMatchObject({ ok: true, value: { totalResults: 1 } })
+    expect(identifyRoot.mock.calls.length).toBeGreaterThanOrEqual(3)
+    expect(identifyRoot.mock.calls.length).toBeLessThanOrEqual(32)
+  })
+
+  it('rejects a root identity replacement at a periodic search checkpoint', async () => {
+    const root = await makeBook({
+      'README.md': Array.from({ length: 4_000 }, (_, index) => `periodic line ${index}`).join('\n')
+    })
+    mocks.selectedPath = root
+    const manager = new BookSessionManager('/search-periodic-root-change-user-data')
+    const opened = await manager.openPicker({ sender: { id: 78 } } as never)
+    expect(opened.ok).toBe(true)
+    if (!opened.ok) return
+    const internal = manager as unknown as {
+      identifyRoot: (rootPath: string) => Promise<TestRootIdentity>
+    }
+    const originalIdentifyRoot = internal.identifyRoot.bind(manager)
+    let identityCalls = 0
+    vi.spyOn(internal, 'identifyRoot').mockImplementation(async (rootPath) => {
+      const identity = await originalIdentifyRoot(rootPath)
+      identityCalls += 1
+      return identityCalls >= 3 && identity ? { ...identity, ino: identity.ino + 1n } : identity
+    })
+
+    expect(
+      await manager.search(
+        opened.value.sessionId,
+        { searchId: randomUUID(), query: 'periodic' },
+        78
+      )
+    ).toMatchObject({ ok: false, error: { code: 'search-unavailable' } })
+    expect(identityCalls).toBe(3)
+  })
+
+  it('rejects a root identity replacement during the final search check', async () => {
+    const root = await makeBook({ 'README.md': '# Final\n\nfinal identity needle' })
+    mocks.selectedPath = root
+    const manager = new BookSessionManager('/search-final-root-change-user-data')
+    const opened = await manager.openPicker({ sender: { id: 79 } } as never)
+    expect(opened.ok).toBe(true)
+    if (!opened.ok) return
+    const internal = manager as unknown as {
+      identifyRoot: (rootPath: string) => Promise<TestRootIdentity>
+    }
+    const originalIdentifyRoot = internal.identifyRoot.bind(manager)
+    let replaced = false
+    vi.spyOn(internal, 'identifyRoot').mockImplementation(async (rootPath) => {
+      const identity = await originalIdentifyRoot(rootPath)
+      return replaced && identity ? { ...identity, ino: identity.ino + 1n } : identity
+    })
+
+    const result = await manager.search(
+      opened.value.sessionId,
+      { searchId: randomUUID(), query: 'needle' },
+      79,
+      (progress) => {
+        if (progress.phase === 'matching') replaced = true
+      }
+    )
+    expect(result).toMatchObject({ ok: false, error: { code: 'book-unavailable' } })
+  })
+
+  it('keeps the full inferred parent hierarchy in group landing breadcrumbs', async () => {
+    const root = await makeBook({
+      'README.md': '# Root book',
+      'part/sub/README.md': '# Nested landing\n\nbreadcrumb needle'
+    })
+    mocks.selectedPath = root
+    const manager = new BookSessionManager('/search-breadcrumb-user-data')
+    const opened = await manager.openPicker({ sender: { id: 76 } } as never)
+    expect(opened.ok).toBe(true)
+    if (!opened.ok) return
+    const result = await manager.search(
+      opened.value.sessionId,
+      { searchId: randomUUID(), query: 'breadcrumb needle' },
+      76
+    )
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    const breadcrumbText = result.value.results[0]?.breadcrumbs.join(' / ').toLowerCase()
+    expect(breadcrumbText).toContain('part')
+    expect(breadcrumbText).toContain('nested landing')
   })
 
   it('persists per-chapter reading positions and resumes them across manager restarts', async () => {
@@ -975,6 +1463,76 @@ describe('book store async generations', () => {
     expect(readChapter).toHaveBeenCalledTimes(1)
     expect(readChapter).toHaveBeenCalledWith('stable-session-id', 'stable-node-id-0001')
     expect(store.chapter?.nodeId).toBe('stable-node-id-0001')
+  })
+
+  it('debounces searches, cancels the prior request and ignores its stale result', async () => {
+    vi.useFakeTimers()
+    try {
+      setActivePinia(createPinia())
+      const first = deferred<BookReaderResult<BookSearchResponseDto>>()
+      const second = deferred<BookReaderResult<BookSearchResponseDto>>()
+      const search = vi
+        .fn()
+        .mockImplementationOnce(() => first.promise)
+        .mockImplementationOnce(() => second.promise)
+      const cancelSearch = vi.fn().mockResolvedValue({ ok: true, value: true })
+      Object.defineProperty(window, 'electron', {
+        configurable: true,
+        value: { books: { search, cancelSearch } }
+      })
+      const store = useBooksStore()
+      store.session = sessionDto('stable-session-id', 'Search')
+      store.mode = 'reader'
+
+      store.scheduleSearch('first')
+      await vi.advanceTimersByTimeAsync(200)
+      const firstSearchId = search.mock.calls[0]?.[1].searchId as string
+      store.scheduleSearch('second')
+      first.resolve({
+        ok: true,
+        value: {
+          searchId: firstSearchId,
+          query: 'first',
+          results: [{ nodeId: 'first-node', title: 'First', breadcrumbs: [], matches: [] }],
+          totalResults: 1,
+          truncated: false,
+          index: {
+            eligibleDocuments: 1,
+            indexedDocuments: 1,
+            omittedDocuments: 0,
+            partial: false
+          }
+        }
+      })
+      await Promise.resolve()
+      expect(store.searchResults).toEqual([])
+      expect(search).toHaveBeenCalledTimes(1)
+      await vi.advanceTimersByTimeAsync(200)
+      expect(search).toHaveBeenCalledTimes(2)
+      expect(cancelSearch).toHaveBeenCalledTimes(1)
+
+      const secondSearchId = search.mock.calls[1]?.[1].searchId as string
+      second.resolve({
+        ok: true,
+        value: {
+          searchId: secondSearchId,
+          query: 'second',
+          results: [{ nodeId: 'second-node', title: 'Second', breadcrumbs: [], matches: [] }],
+          totalResults: 1,
+          truncated: false,
+          index: {
+            eligibleDocuments: 1,
+            indexedDocuments: 1,
+            omittedDocuments: 0,
+            partial: false
+          }
+        }
+      })
+      await Promise.resolve()
+      expect(store.searchResults.map((result) => result.nodeId)).toEqual(['second-node'])
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('does not revive or close a session again when a stale refresh resolves', async () => {

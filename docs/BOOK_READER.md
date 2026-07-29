@@ -224,6 +224,8 @@ The workspace provides:
 - a sanitized, non-editable chapter surface;
 - a generated current-chapter outline;
 - refresh, diagnostics summary, loading, empty, and error states;
+- full-book search with progress, partial-index notices, keyboard selection,
+  and path-free plain-text snippets;
 - responsive contents/outline panels and accessible navigation semantics.
 
 The existing shared titlebar remains mounted above the book workspace, so
@@ -243,6 +245,95 @@ unique suffixes so every outline item resolves to exactly one heading.
 
 Book diagnostics are informative and non-blocking. A fatal root scan prevents
 the reader session from opening.
+
+## Full-book search
+
+Search is a reader-session capability, not a general filesystem API. LeafBook
+lazily builds an in-memory index from the first readable occurrence of each
+unique Markdown path already authorized by the current book model. Orphans,
+missing targets, external links, and paths outside that model are never added.
+Root and group landing chapters participate when they are part of readable
+order. Duplicate navigation occurrences contribute display aliases but are
+read only once. Chapter content is obtained through the same descriptor,
+symlink, containment, size, and stability checks as normal chapter reading.
+
+The bounded extractor indexes the public chapter title, filename, navigation
+aliases, headings, body text, fenced code, and YAML frontmatter tags. Search
+queries are trimmed, NFKC-normalized, case-folded literal AND queries with one
+through eight whitespace-separated tokens and a 256 UTF-16-unit maximum.
+There is no regular-expression or fuzzy interpretation. Results rank exact and
+prefix title matches first, followed by filename/tags, headings, body, and
+code; ties use book order and first match offset. A physical document appears
+once with at most three plain-text snippets. Highlight offsets refer to the
+snippet's original UTF-16 text, including compatibility-normalized matches,
+and the renderer creates highlight elements without injecting result HTML.
+Queries and indexed fields use the same grapheme-cluster normalization
+primitive. Modern Electron's native `Intl.Segmenter` is the formal grapheme
+path. A deterministic, surrogate-safe fallback approximates the required
+boundaries for CRLF, Prepend characters, starter/combining/SpacingMark
+sequences, common Indic viramas, variation selectors, emoji modifiers, ZWJ
+sequences, regional-indicator pairs, and Hangul Jamo composition; it is
+deliberately not described as a complete bundled UAX #29 implementation. NFC
+and NFD forms therefore match in either direction across metadata and Markdown
+fields; each normalized cluster maps to the complete original UTF-16 cluster,
+so highlights include combining marks and never split a surrogate.
+
+Case folding is locale-independent and identical in query, synchronous index,
+and asynchronous index paths. After NFKC it uses ECMAScript's
+locale-independent lowercase mapping plus the required non-Turkic default-fold
+differences for final sigma (`ς` → `σ`) and sharp s (`ß`/`ẞ` → `ss`). Thus
+`Σ`/`σ`/`ς` and `Straße`/`STRASSE` compare consistently, while dotless Turkish
+`ı` remains distinct from `i`; `İ` follows default non-Turkic `i` + combining
+dot semantics. LeafBook does not claim to embed a complete versioned Unicode
+`CaseFolding.txt` table.
+Each document admits at most 256 KiB of source text, 8,000 units, 128 aliases,
+128 tags, 4,096 UTF-16 units per field, and a conservative 4 MiB index-memory
+estimate. Every cap, including frontmatter and fence/heading truncation, marks
+the index partial. Each unit uses a two-pass cluster-normalization budget: the
+first pass computes each cluster's actual normalized UTF-16 length, whether a
+mapping is required, and the complete string/mapping estimate; only the last
+whole-cluster prefix that fits is retained, and mapping arrays are allocated in
+the second pass.
+Expansion-heavy compatibility characters therefore cannot make a document's
+reported estimate exceed its budget, and retained matches still map back to
+the original UTF-16 range.
+
+An index is capped at 32 MiB by a conservative in-memory estimate. Completed
+indexes share a 64 MiB process-wide least-recently-used cache and are never
+written to disk. Before the single global build slot starts, it reserves the
+full 32 MiB and evicts LRU entries until cache plus reservation is at most
+64 MiB; there is deliberately no unbounded build queue, so another session
+receives `search-busy`. At most eight renderer owners may have a search
+operation, and each owner has exactly one latest-wins operation. A new query
+registers before cancelling its predecessor so their shared build survives;
+the final waiter still aborts it. Index extraction checkpoints about every
+64 KiB or 64 units, matching every 64 units, and both recheck cancellation,
+exact session/controller identity, and owner generation in memory after
+yielding. Extraction checkpoints are inside the actual frontmatter, line,
+unit, normalization-preflight, and mapping loops; cluster iteration itself is
+therefore cancellable. Root `realpath`/`stat` identity is rechecked every eight
+lightweight checkpoints (about 512 KiB for byte-driven work), after each
+document, and before returning a search result. Progress is initiator-only and
+partial/omitted counts remain distinct. A throwing waiter callback is disabled
+without rejecting the shared build, and IPC progress delivery contains the
+renderer-destruction check/send race. Refresh, close, library removal,
+renderer-owner cleanup, root invalidation, and session eviction revoke builds,
+queries, reservations, and cached indexes. The index is a session snapshot;
+use Refresh to include changed files.
+
+The Search button or unmodified `/` opens the responsive search panel. Every
+input change immediately advances the renderer generation, clears results and
+progress, and cancels the active request before its new 200 ms debounce starts;
+an old response cannot populate the empty interval or become an Enter target.
+Up/Down selects results, Enter opens the selected match, and Escape closes the
+panel and restores focus to Search. A partial index with omitted documents
+reports their count; content-only truncation instead says content was
+truncated. Mobile results are top-aligned with a 68 px minimum and 160 px
+maximum height, and the Close control has an explicit border, radius,
+background, color, and native-appearance reset. Result navigation flushes the
+current Phase 5 reading position before opening the opaque node with the
+matched heading fragment. Search cancellation itself never writes reading
+progress.
 
 ## Test coverage
 
@@ -264,6 +355,22 @@ persistence remains usable. Fake-timer coverage verifies missing animation
 frames, a stalled second frame, normal two-frame completion, and abort cleanup
 without leaking a frame callback or timeout.
 
+Search unit coverage includes query limits and Unicode normalization, literal
+AND matching, bounded field extraction, fenced-code classification, stable
+ranking, original UTF-16 highlight mapping, result caps, model-only unique
+chapter indexing, path-free DTOs, owner rejection, shared-build cancellation,
+renderer debounce, and stale-result suppression. Boundary tests also cover a
+101-request same-owner flood, the eight-owner/global-build cap, reservation
+plus cache accounting, four 4,096-character U+FDFA expansion units, boundary
+line/ligature/CJK truncation, cancellation during the actual asynchronous
+extractor, cancellation inside matching, throwing shared progress callbacks,
+NFC/NFD matching across every field, Hangul/emoji/combining-cluster highlights,
+Greek sigma and sharp-s expansion folds, default non-Turkic dotted/dotless-I
+separation, forced fallback segmentation without global mutation, bounded root
+identity calls, periodic/final root replacement rejection, the IPC destruction
+race, all partial flags, trusted listing IPC, and inferred group-landing
+breadcrumbs.
+
 The Electron vertical-slice test replaces only the native dialog result with a
 temporary book, then exercises:
 
@@ -272,6 +379,16 @@ Open Book menu -> contents -> first chapter -> Next -> bookshelf -> editor
 ```
 
 The temporary source folder is removed by the test, not by LeafBook.
+
+The search vertical slice opens the panel with `/` at a mobile viewport, uses
+lowercase final-sigma `ος` input to find and navigate to an uppercase `ΟΣ`
+heading, then uses NFC input to find NFD heading/body and fenced-code text. It
+changes the source chapter, refreshes to rebuild the session index, finds the
+new text, and verifies Escape closes the panel and returns focus to Search.
+It also verifies mobile panel/input/result geometry and explicit button
+borders at 650 px, captures an in-memory screenshot, uses ArrowDown/Enter for
+activation, checks empty results, and distinguishes content truncation from
+omitted documents.
 
 A second vertical slice follows an explicit deep fragment into a long chapter,
 verifies immediate overall progress, scrolls elsewhere, and confirms that

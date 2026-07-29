@@ -88,6 +88,15 @@
         </div>
         <div class="reader-actions">
           <button
+            ref="searchButton"
+            class="secondary"
+            aria-controls="book-search-panel"
+            :aria-expanded="searchOpen"
+            @click="toggleSearch"
+          >
+            Search
+          </button>
+          <button
             ref="contentsButton"
             class="secondary"
             aria-controls="book-contents"
@@ -107,6 +116,20 @@
           <button class="secondary" @click="books.refresh">Refresh</button>
         </div>
       </header>
+      <book-search-panel
+        v-if="searchOpen"
+        :query="books.searchQuery"
+        :results="books.searchResults"
+        :loading="books.searchLoading"
+        :progress="books.searchProgress"
+        :index-status="books.searchIndexStatus"
+        :total-results="books.searchTotalResults"
+        :truncated="books.searchTruncated"
+        :error="books.searchError"
+        @query="books.scheduleSearch"
+        @activate="activateSearchResult"
+        @close="closeSearch"
+      />
       <p v-if="books.error" class="error-banner reader-error" role="alert">
         {{ books.error.message }}
       </p>
@@ -211,23 +234,27 @@
 
 <script setup lang="ts">
 import { nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
-import type { BookReaderNodeDto } from '@shared/types/bookReader'
+import type { BookReaderNodeDto, BookSearchResultDto } from '@shared/types/bookReader'
 import { useBooksStore } from '@/store/books'
 import { renderBookMarkdown, type RenderedBookChapter } from '@/book/renderMarkdown'
 import { restoreReadingPosition, waitForPaint } from '@/book/restoreReadingPosition'
 import BookTreeNode from './BookTreeNode.vue'
+import BookSearchPanel from './BookSearchPanel.vue'
 
 const books = useBooksStore()
 const navCollapsed = ref(false)
 const outlineCollapsed = ref(false)
 const contentElement = ref<HTMLElement | null>(null)
 const contentsButton = ref<HTMLButtonElement | null>(null)
+const searchButton = ref<HTMLButtonElement | null>(null)
+const searchOpen = ref(false)
 const rendered = reactive<RenderedBookChapter>({ html: '', outline: [] })
 const formatDate = (value: string): string => new Date(value).toLocaleDateString()
 const formatProgress = (value: number): string => `${Math.round(value * 100)}%`
 let restoreGeneration = 0
 let restoringPosition = false
 let unregisterReadingPositionProvider: (() => void) | null = null
+let unregisterSearchProgress: (() => void) | null = null
 
 const currentReadingRatio = (): number => {
   const element = contentElement.value
@@ -384,6 +411,21 @@ const keyboardNavigation = async (event: KeyboardEvent): Promise<void> => {
   if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) {
     return
   }
+  if (event.key === 'Escape' && searchOpen.value) {
+    event.preventDefault()
+    await closeSearch()
+    return
+  }
+  const target = event.target as HTMLElement | null
+  if (
+    event.key === '/' &&
+    books.mode === 'reader' &&
+    !target?.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])')
+  ) {
+    event.preventDefault()
+    searchOpen.value = true
+    return
+  }
   if (event.key === 'Escape' && !navCollapsed.value) {
     event.preventDefault()
     navCollapsed.value = true
@@ -391,7 +433,6 @@ const keyboardNavigation = async (event: KeyboardEvent): Promise<void> => {
     contentsButton.value?.focus()
     return
   }
-  const target = event.target as HTMLElement | null
   if (
     target?.closest(
       'button, a, [role="link"], input, textarea, select, [contenteditable]:not([contenteditable="false"])'
@@ -414,7 +455,25 @@ const navigateNext = async (): Promise<void> => {
   await books.next()
 }
 const leaveReader = async (): Promise<void> => {
+  searchOpen.value = false
   await books.showBookshelf()
+}
+const toggleSearch = (): void => {
+  if (searchOpen.value) closeSearch()
+  else searchOpen.value = true
+}
+const closeSearch = async (): Promise<void> => {
+  searchOpen.value = false
+  await books.cancelSearch(false)
+  await nextTick()
+  searchButton.value?.focus()
+}
+const activateSearchResult = async (
+  result: BookSearchResultDto,
+  fragment: string | null
+): Promise<void> => {
+  searchOpen.value = false
+  await books.openSearchResult(result, fragment)
 }
 onMounted(() => {
   unregisterReadingPositionProvider = books.registerReadingPositionProvider(() =>
@@ -426,11 +485,14 @@ onMounted(() => {
       ? null
       : currentReadingRatio()
   )
+  unregisterSearchProgress = window.electron.books.onSearchProgress(books.handleSearchProgress)
   window.addEventListener('keydown', keyboardNavigation)
 })
 onBeforeUnmount(() => {
+  books.cancelSearch(false)
   books.flushReadingPosition().catch(() => undefined)
   unregisterReadingPositionProvider?.()
+  unregisterSearchProgress?.()
   window.removeEventListener('keydown', keyboardNavigation)
 })
 </script>

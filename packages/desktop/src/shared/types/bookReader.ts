@@ -11,6 +11,9 @@ export type BookReaderErrorCode =
   | 'chapter-read-failed'
   | 'unsafe-link'
   | 'link-not-found'
+  | 'search-cancelled'
+  | 'search-busy'
+  | 'search-unavailable'
 
 export interface BookReaderError {
   code: BookReaderErrorCode
@@ -69,4 +72,54 @@ export interface BookChapterDto {
 export interface BookLinkNavigationDto {
   nodeId: string
   fragment: string | null
+}
+
+export type BookSearchMatchKind = 'title' | 'filename' | 'tag' | 'heading' | 'body' | 'code'
+
+export interface BookSearchHighlightDto {
+  start: number
+  end: number
+}
+
+export interface BookSearchMatchDto {
+  kind: BookSearchMatchKind
+  snippet: string
+  highlights: BookSearchHighlightDto[]
+  fragment: string | null
+}
+
+export interface BookSearchResultDto {
+  nodeId: string
+  title: string
+  breadcrumbs: string[]
+  matches: BookSearchMatchDto[]
+}
+
+export interface BookSearchRequestDto {
+  searchId: string
+  query: string
+  limit?: number
+}
+
+export interface BookSearchIndexStatusDto {
+  eligibleDocuments: number
+  indexedDocuments: number
+  omittedDocuments: number
+  partial: boolean
+}
+
+export interface BookSearchResponseDto {
+  searchId: string
+  query: string
+  results: BookSearchResultDto[]
+  totalResults: number
+  truncated: boolean
+  index: BookSearchIndexStatusDto
+}
+
+export interface BookSearchProgressDto {
+  searchId: string
+  phase: 'indexing' | 'matching'
+  completed: number
+  total: number
 }
