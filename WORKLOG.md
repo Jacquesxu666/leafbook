@@ -572,3 +572,216 @@
 - 尚未解决的问题：
   - LeafBook 自有网站、公开下载、签名/公证和自动更新渠道尚未建立。
 - Git commit：将随本次提交入库，最终 SHA 见 Git 历史（不推送）。
+
+## 2026-07-28 — Phase 3 书籍领域模型与 GitBook 导航解析
+
+- 用户目标：在 LeafBook 品牌基础提交上继续 Phase 3，只实现可供后续 UI
+  使用的书籍领域模型、`SUMMARY.md` 解析、无 SUMMARY 推断和安全文件系统
+  扫描；不实现 UI、IPC，不提交、不推送。
+- 实际完成：
+  - 从 `6f62c95b26162b9644bc55ba76b92a2970855950` 创建本地分支
+    `feature/leafbook-book-domain`，确认开始时工作树干净。
+  - 新增可序列化的 `Book`、metadata、navigation、chapter/group/external
+    node、source/order 与结构化 diagnostic 模型；领域层只保存 POSIX
+    书根相对路径，不保存绝对书根或 Electron/文件句柄状态。
+  - 实现纯 TypeScript 的 SUMMARY 解析器，支持标题/分组 heading、嵌套
+    无序列表、中文标题、`.md`/`.markdown`、URL 编码空格、独立 fragment、
+    安全外链、顺序保持及同文件去重。
+  - 实现纯构建器：SUMMARY 存在时严格以其顺序为准并报告缺失和孤儿文档；
+    无 SUMMARY 时确定性推断目录树，目录 landing page 不重复显示；入口
+    优先 SUMMARY 首个存在的本地页面，再回退根 README/index。
+  - 明确 README/index 选择策略：优先精确
+    `README.md`、`README.markdown`、`index.md`、`index.markdown`，再按相同
+    次序选择大小写不敏感匹配；标题优先正文首个 H1，再回退文件名/目录名。
+  - 新增 main-process 文件系统适配器：realpath 书根边界、symlink 逃逸和
+    环路防护、隐藏目录/`.git`/`node_modules` 忽略、可配置 exclude、
+    深度/文件数上限及非崩溃式诊断。
+  - 拒绝绝对路径、Windows 绝对路径、`file://`、NUL、`../`/编码目录
+    逃逸、查询串、畸形 URL 编码和非 Markdown 本地目标；未增加依赖或
+    修改 lockfile。
+  - 增加 Phase 4 可直接遵循的领域契约与安全边界文档。
+- 修改或创建的文件：
+  - `docs/BOOK_DOMAIN.md`
+  - `packages/desktop/src/common/book/model.ts`
+  - `packages/desktop/src/common/book/path.ts`
+  - `packages/desktop/src/common/book/summary.ts`
+  - `packages/desktop/src/common/book/builder.ts`
+  - `packages/desktop/src/common/book/index.ts`
+  - `packages/desktop/src/main/book/filesystem.ts`
+  - `packages/desktop/src/main/book/index.ts`
+  - `packages/desktop/test/unit/specs/book-domain.spec.ts`
+  - `WORKLOG.md`
+- 测试及结果：
+  - Phase 3 定向 Vitest：20 项全部通过。
+  - desktop 全量单元测试：52 个测试文件、767 项全部通过。
+  - `pnpm --filter leafbook typecheck`：通过。
+  - Phase 3 新增路径定向 ESLint：通过。
+  - `pnpm lint`：通过，0 errors；保留 135 条本次未引入的既有 warnings。
+  - `pnpm build`：Electron main、preload、renderer production build
+    全部通过；仅有既有 CodeMirror 动静态导入提示。
+  - `git diff --check`：通过。
+- 关键决策：
+  - pure parse/build 与 Node fs adapter 分离，后续 renderer 只消费可序列化
+    模型；绝对根路径必须留在 main-process I/O 边界。
+  - 导航身份为 `path + fragment`；同一 Markdown 文件可以在不同锚点出现，
+    完全相同的目标保留稳定 occurrence ID 并仅产生一条重复诊断。文件存在性
+    与孤儿检查仍按物理 path。
+  - SUMMARY 是权威编排，不自动追加未列出的 Markdown；只通过
+    `orphaned-chapters` diagnostic 告知数量。
+  - 目录 README/index 通过 group/root `landingPath` 表达，不再创建重复
+    chapter node。
+- 尚未解决的问题：
+  - Phase 4 尚需设计窄 IPC、书籍状态管理和导航 UI，并确保外链打开仍走
+    Electron 的受控外部链接策略。
+  - `book.yaml` 等扩展元数据、全文索引、阅读进度和发布能力不属于 Phase 3。
+- Git commit：无（按要求未提交、未推送）。
+
+## 2026-07-28 — Phase 3 安全与边界返修
+
+- 用户目标：继续 Phase 3，按审查清单返修书籍领域层与文件系统扫描器；
+  不扩大到 UI/IPC，不增加依赖，不提交、不推送。
+- 实际完成：
+  - 将物理文件路径与 SUMMARY URL 目标彻底分离：物理路径不再 URL decode，
+    SUMMARY 目标仅 decode 一次，保留 `a%20b.md` 与 `a b.md` 的独立身份。
+  - 对 common 输入增加 runtime 约束，收口 `rootName`、SUMMARY 路径、文件
+    路径与外部 diagnostic；绝对路径及 Node 原始错误不会进入可序列化模型。
+  - 外链改用 WHATWG URL，仅接受显式 HTTP/HTTPS/mailto，拒绝协议相对、
+    credentials、file、控制字符、畸形 URL 和其他 scheme，并保存 canonical
+    URL。
+  - SUMMARY 解析器增加正确 fence 处理与无效 list sentinel；重复身份改为
+    path+fragment，不同锚点合法，完全相同目标只报一次并使用 occurrence ID。
+  - builder 使用目录 trie，增加 files/nodes/depth/content/diagnostics 硬上限、
+    NFC+casefold 冲突诊断、SUMMARY 行号透传、特殊根文件孤儿排除及正确长度
+    fence H1 提取。
+  - scanner 增加 finite integer 默认/钳制和 files/directories/entries/
+    diagnostics/per-file/total/SUMMARY bytes 独立预算；SUMMARY 在普通遍历前
+    优先安全加载且不消耗 maxFiles。
+  - 禁止遍历任何目录 symlink；文件使用可用时的 `O_NOFOLLOW`、handle
+    `fstat`、当前 realpath/identity/containment 复核后从句柄读取，并提供
+    可测试的替换竞态 seam；文档明确无 openat 时残留的父目录竞态。
+  - 补充所有审查反例测试并重写 Phase 3 领域契约。
+- 修改或创建的文件：
+  - `docs/BOOK_DOMAIN.md`
+  - `packages/desktop/src/common/book/model.ts`
+  - `packages/desktop/src/common/book/path.ts`
+  - `packages/desktop/src/common/book/summary.ts`
+  - `packages/desktop/src/common/book/builder.ts`
+  - `packages/desktop/src/main/book/filesystem.ts`
+  - `packages/desktop/test/unit/specs/book-domain.spec.ts`
+  - `WORKLOG.md`
+- 测试及结果：
+  - Phase 3 定向 Vitest：39 项通过。
+  - `pnpm --filter leafbook typecheck`：通过。
+  - desktop 全量单元测试：52 个测试文件、786 项通过。
+  - `pnpm lint`：通过，0 errors；保留 135 条既有 warnings。
+  - `pnpm build`：Electron main、preload、renderer production build 通过；
+    仅有既有 CodeMirror 动静态导入提示。
+  - `git diff --check`：通过。
+- 关键决策：
+  - SUMMARY 选择固定为精确 `SUMMARY.md` 优先、精确
+    `SUMMARY.markdown` 备选；未选择候选既不参与导航也不计孤儿。
+  - root README/index 是 landing/标题/入口回退语义，不因未列入 SUMMARY
+    被报告为孤儿。
+  - Phase 4 在主进程真正打开外链前必须再次验证，serialized URL 不是授权。
+- 尚未解决的问题：
+  - UI、IPC、书架状态、阅读页面和主进程外链打开属于 Phase 4。
+- Git commit：无（按要求未提交、未推送）。
+
+## 2026-07-28 — Phase 3 第二轮边界收口
+
+- 用户目标：按复审清单进一步收紧 Phase 3 的不可信输入、解析/扫描工作量、
+  文件描述符读取与竞态说明；保持无 UI、IPC、依赖、提交和推送。
+- 实际完成：
+  - 外部 diagnostic 改为按 code 重建稳定 severity/message，绝不透传任意
+    Node/raw message；空或非法 source/related path 被丢弃。
+  - SUMMARY parser 增加 characters/lines/nodes/depth/diagnostics/list items/
+    link destination/fragment 独立硬上限，并在继续循环或创建节点前生效。
+  - pure builder 对候选 files 和 incoming diagnostics 按迭代次数早停，对原始
+    content characters 先预算再编码；非法和重复候选同样消耗候选预算。
+  - scanner 改用 `opendir` 有界异步迭代；单目录读取到上限加一后关闭并整目录
+    跳过，同时保留全局 entry 早停；exclude 增加数量、单项和总字符预算并只
+    预编译一次。
+  - 文件与 SUMMARY 改为 descriptor 循环读取至 byte limit + 1，不再使用
+    `readFile`；使用 `TextDecoder`，读取前后复核 fstat identity/size，并区分
+    identity replacement、same-inode change 和 byte growth。
+  - chapter identity/ID 改用无歧义 JSON tuple，消除 path/fragment 内 `#`
+    导致的串联碰撞。
+  - filesystem 入口拒绝 relative、empty、null root 并返回结构化结果，不
+    调用 `path.resolve`；所有扫描 options 均 runtime 校验和钳制。
+  - 更新 Phase 4 picker 授权要求、主进程重验和父目录并发 namespace 残余
+    race 的精确契约说明。
+- 修改或创建的文件：
+  - `docs/BOOK_DOMAIN.md`
+  - `packages/desktop/src/common/book/model.ts`
+  - `packages/desktop/src/common/book/summary.ts`
+  - `packages/desktop/src/common/book/builder.ts`
+  - `packages/desktop/src/main/book/filesystem.ts`
+  - `packages/desktop/test/unit/specs/book-domain.spec.ts`
+  - `WORKLOG.md`
+- 测试及结果：
+  - Phase 3 定向 Vitest：51 项通过。
+  - 定向 ESLint：通过。
+  - desktop 全量单元测试：52 个测试文件、798 项通过。
+  - `pnpm --filter leafbook typecheck`：通过。
+  - `pnpm lint`：通过，0 errors；保留 135 条既有 warnings。
+  - `pnpm build`：Electron main、preload、renderer production build 通过；
+    仅有既有 CodeMirror 动静态导入提示。
+  - `git diff --check`：通过。
+- 关键决策：
+  - SUMMARY 即使位于超大根目录仍先以独立预算直接探测；普通目录超限时不接受
+    依赖底层枚举顺序的部分结果。
+  - 诊断文本属于领域协议的一部分，只能由受控 code 映射生成；调用方文本不
+    是可序列化边界内的可信数据。
+  - Node 缺少 openat 风格能力，故只承诺静态 symlink 拒绝与内容 descriptor
+    containment，不宣称并发父目录命名空间不可变。
+- 尚未解决的问题：
+  - UI、IPC、书架状态、阅读页面和受控外链打开仍属于 Phase 4。
+- Git commit：无（按要求未提交、未推送）。
+
+## 2026-07-28 — Phase 3 最终边界与容量语义返修
+
+- 用户目标：完成 Phase 3 最后一轮小范围返修，修复稳定文件身份、运行时输入、
+  根目录错误码和容量诊断误报；不扩展到 UI/IPC，不增加依赖，不提交、不推送。
+- 实际完成：
+  - 文件读取前后统一使用 bigint stat，比较 `dev`、`ino`、`size`、`mtimeNs`
+    和 `ctimeNs`；同 inode、同长度且恢复 mtime 的覆写仍会产生
+    `scan-file-changed`，内容不会进入书籍模型。
+  - `buildBook` 对顶层运行时输入做归一化；`undefined`、`null`、数组及其他
+    非对象输入返回安全空结果和受控诊断，不抛异常。
+  - 新增稳定错误码 `scan-root-error`（error），用于非法、缺失、不可读或
+    非目录 root；单个目录项/文件读取失败继续映射为 `scan-read-error`
+    （warning）。
+  - 修正容量诊断语义：`maxFiles`、`maxNodes`、SUMMARY `maxLines` 仅在观察到
+    真实额外候选并发生截断时报告；末尾换行不再产生虚假行溢出。额外文件探测
+    仍受 entry/directory/depth/per-directory 上限约束。
+  - 仅对 Phase 3 TypeScript、测试、领域文档和工作日志执行 Prettier 写入，
+    并补充精确上限与真实溢出的成对回归测试。
+- 修改或创建的文件：
+  - `docs/BOOK_DOMAIN.md`
+  - `packages/desktop/src/common/book/model.ts`
+  - `packages/desktop/src/common/book/path.ts`
+  - `packages/desktop/src/common/book/summary.ts`
+  - `packages/desktop/src/common/book/builder.ts`
+  - `packages/desktop/src/main/book/filesystem.ts`
+  - `packages/desktop/test/unit/specs/book-domain.spec.ts`
+  - `WORKLOG.md`
+- 测试及结果：
+  - Phase 3 定向 Vitest：60 项通过。
+  - `pnpm --filter leafbook typecheck`：通过。
+  - Phase 3 定向 ESLint：通过。
+  - Phase 3 文件 Prettier check：通过。
+  - desktop 全量单元测试：52 个测试文件、807 项通过。
+  - `pnpm lint`：通过，0 errors；保留 135 条既有 warnings。
+  - `pnpm build`：Electron main、preload、renderer production build 通过；
+    仅有既有 CodeMirror 动静态导入提示。
+  - `git diff --check`：通过。
+- 关键决策：
+  - 文件“未变化”要求身份、长度及纳秒级 mtime/ctime 全部稳定；ctime 用于覆盖
+    攻击者恢复 mtime 的同 inode 覆写场景。
+  - 达到容量上限本身不是错误；只有确认存在无法接纳的下一个合格对象时才报告
+    overflow/truncation。
+  - root 级失败与项目内局部读取失败使用不同稳定 code/severity，便于 Phase 4
+    UI 做明确状态展示。
+- 尚未解决的问题：
+  - UI、IPC、书架状态、阅读页面和受控外链打开仍属于 Phase 4。
+- Git commit：将随本次提交入库，最终 SHA 见 Git 历史（不推送）。
