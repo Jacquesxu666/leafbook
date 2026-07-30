@@ -3578,3 +3578,42 @@ book_structure_ready=true code=0`. The harness verified the original sample
   project after verification. Dependency manifests, the lockfile, workflows,
   and version files are unchanged. HEAD remains
   `596ad81aced1f9924d2956f62e94c496a91c07d7`. No commit or push was created.
+
+## 2026-07-30 — Phase 9C commit and next-version assessment
+
+- User goal: commit the completed Phase 9C work, then assess the remaining
+  work and define the next LeafBook iteration.
+- Completed: committed the complete Phase 9C heading-based book preparation
+  workflow as `4edcfec2` (`feat: prepare inferred books from headings`). The
+  commit contains the independently accepted main-process preparation and
+  session lifecycle, typed IPC/preload surface, Muya heading analysis, Unicode
+  case-fold boundary, Reader UI/accessibility behavior, real-book RC harness,
+  tests, and documentation. No push was requested or performed.
+- Files: the Phase 9C commit contains 39 intended files. This follow-up changes
+  only `WORKLOG.md`.
+- Tests: no tests were rerun after the commit because the committed tree is the
+  exact accepted tree. Its final evidence remains Desktop 1215/1215, Muya
+  1454/1454, Reader Electron E2E 12/12, typecheck, production build, ESLint,
+  Prettier, `git diff --check`, privacy/cleanup 6/6, and the authorized
+  privacy-safe real-book RC. The post-commit worktree was clean before this
+  log-only update.
+- Key decisions: the next version should be a release-hardening iteration, not
+  another broad feature phase. Recommended order: safe inline-SVG visual
+  fidelity; macOS/Windows/Linux release-matrix automation and packaging
+  verification; partial-create detection/recovery and durability guidance;
+  then an explicit decision to accept the same-user syscall/path race in the
+  desktop threat model or fund a native descriptor-relative filesystem layer.
+  Unicode case-fold drift is a small scheduled maintenance task rather than a
+  runtime update.
+- Estimated effort: one experienced developer should budget about 15–22
+  engineering days for an RC and 20–30 engineering days for a stable release,
+  including cross-platform stabilization and a short soak period. A native
+  cross-platform filesystem helper to materially reduce the accepted syscall
+  race would add roughly 8–15 engineering days and should be treated as a
+  separate go/no-go item.
+- Unresolved: `product_ready=false`, `visual_fidelity=false`,
+  `content_adaptation_gaps=1`, and `release_matrix_ready=false` remain truthful.
+  The accepted P3 boundaries remain crash partial create, the same-user
+  syscall/path window, and pinned Unicode case-fold drift.
+- Git commit: Phase 9C is `4edcfec2`; this log-only handoff is committed
+  separately so the functional commit remains reviewable.
