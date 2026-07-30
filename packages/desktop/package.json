@@ -39,6 +39,7 @@
     "test": "vitest run",
     "test:unit": "vitest run test/unit",
     "test:e2e": "playwright test test/e2e",
+    "test:real-book:rc": "node scripts/run-real-book-rc.mjs",
     "typecheck": "vue-tsc --noEmit -p tsconfig.json",
     "typecheck:watch": "vue-tsc --noEmit -p tsconfig.json --watch"
   },

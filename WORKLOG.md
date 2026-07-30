@@ -2433,3 +2433,105 @@
   release approval, and inherited workflow remediation remain external
   blockers.
 - Git commit: not created; nothing was pushed.
+
+## 2026-07-29 — Phase 9B opt-in real-book RC harness
+
+- User goal: validate a real Markdown book through inferred and structured
+  LeafBook workflows without modifying or disclosing the original.
+- Completed: added a skipped-by-default Electron RC suite activated only by
+  the package wrapper's marker-bound 256-bit nonce, never by
+  `LEAFBOOK_RC_BOOK_ROOT` alone; added a marker/owner/realpath-validated temp
+  root, descriptor-based bounded nofollow copier with deterministic
+  swap-to-symlink rejection, capped hidden-excluding `O_NOFOLLOW` streaming
+  source manifest comparison, broad-root rejection, guarded
+  cleanup, caller-owned Electron profile support, Track A inferred-landing
+  checks, and Track B generated-fragment SUMMARY checks with search and
+  measured position persistence across a new Electron process; Save now uses a
+  complete copied-tree manifest to prove only SUMMARY bytes and digest change.
+  The runner discards bounded child output without writing it, strips all
+  `LEAFBOOK_RC_*` variables from Electron, retains signal handlers through
+  cleanup, and emits only fixed aggregate status:
+  `RC_HARNESS_PASS product_ready=false adaptation_gaps=2 code=0`.
+- Files: `packages/desktop/test/e2e/real-book-rc.spec.ts`,
+  `packages/desktop/test/e2e/helpers.ts`,
+  `packages/desktop/scripts/run-real-book-rc.mjs`,
+  `packages/desktop/package.json`, `docs/REAL_BOOK_RC.md`, and `WORKLOG.md`.
+- Tests: before the authorization hardening, real-book Electron RC 1/1 passed
+  in 40.8 seconds; this is historical functional evidence, not a current
+  hardened-wrapper acceptance run. The hardened absent-environment wrapper
+  emitted its fixed SKIP status. The current hardened authorized run completed
+  in 16.4 seconds with
+  `RC_HARNESS_PASS product_ready=false adaptation_gaps=2 code=0`;
+  deterministic child-failure runner
+  cleanup, synthetic private-output non-disclosure, direct-bypass plus invalid
+  nonce source non-access, pre-root signal cleanup, child-clean-exit signal
+  cleanup, and post-run artifact-absence checks passed; selected source Electron regression
+  gate passed 6/6; desktop full unit passed 65 files and 1095/1095 tests; Muya
+  full unit passed 212 files and 1449/1449 tests; desktop typecheck and
+  production build passed; scoped ESLint, Prettier, and `git diff --check`
+  passed.
+- Evidence: source before/after manifest matched and validated cleanup
+  succeeded; inferred navigation exposed four logical entries with Arrange
+  disabled; the initial inferred landing was not the manuscript and manual
+  selection rendered 34 H1 headings; search,
+  reading-position restore, dirty cancel/discard, remote-request zero,
+  single-file HTML, and two-file website checks passed; structured navigation
+  resolved first/middle/last aliases to their actual ordinal H1 targets, search
+  and reading-position reopen persistence passed, arrangement
+  Undo+Cancel was an exact zero-write, Save changed only the copied SUMMARY,
+  and both outputs contained one physical manuscript body.
+- Key decisions: source paths, prose, titles, search tokens, hashes, and visual
+  artifacts are never logged or committed; generated labels are synthetic;
+  production navigation is not patched from the RC harness. Functional
+  stability of the harness is not product acceptance: the wrong inferred
+  landing and single physical chapter keep book UX/product RC not passed.
+- Unresolved: inferred navigation selects the wrong nested landing and presents
+  the main manuscript as one physical chapter; Phase 9C needs a source-splitting
+  versus virtual-heading-chapter decision. Ten SVG boundary tags represent five
+  inline SVG elements, and the reader safely strips all five; this remains a
+  visual-fidelity gap. Node lacks directory-handle-relative traversal and
+  cleanup has a validation-to-remove interval; these same-user local races are
+  accepted P3 constraints for the opt-in RC harness. `SIGKILL`, a process
+  crash, or power loss may leave an owner-private RC temp and orphan child;
+  recovery is deliberately manual and requires exact prefix, canonical parent,
+  current-UID, type, and marker/nonce validation—never a broad removal or
+  automatic sweep.
+- Git commit: not created; nothing was pushed.
+
+## 2026-07-29 — Phase 9B final privacy and cleanup hardening
+
+- User goal: close the final RC cleanup-marker and assertion-privacy findings
+  without changing production behavior or exposing real-book data.
+- Completed: replaced the internal temporary-root cleanup marker read with a
+  bounded descriptor read using `O_RDONLY | O_NOFOLLOW | O_NONBLOCK`, exact
+  32-byte size/content validation, single-link regular-file checks, and
+  descriptor plus pathname post-read identity checks. Cleanup now revalidates
+  the authorized runner parent and internal root realpath, prefix, UID, and
+  directory identity before recursive removal. Four deterministic fixtures
+  prove fail-closed retention for symlink, oversized, directory, and pathname
+  identity-swap markers. The runner authorization readers received the same
+  nonblocking and pathname-identity checks.
+- Privacy: all RC assertions were mechanically audited. Private arrays,
+  buffers, paths, headings, fragments, tokens, manifests, raw HTML, and
+  SUMMARY bytes are reduced to booleans, counts, or generic numeric evidence
+  before assertion. The redundant derived-negation adaptation-gap assertion
+  was removed; the independent DOM count observation and later manual
+  manuscript selection remain.
+- Files: `packages/desktop/test/e2e/real-book-rc.spec.ts`,
+  `packages/desktop/scripts/run-real-book-rc.mjs`,
+  `docs/REAL_BOOK_RC.md`, and `WORKLOG.md`.
+- Tests: the no-environment wrapper emitted the fixed SKIP status; child
+  failure, synthetic private-output, direct-bypass, signal cleanup,
+  pre-root-signal cleanup, and broad-root rejection self-tests passed. One
+  authorized real-book wrapper RC passed with fixed aggregate status and
+  exercised all four cleanup fixtures. The assertion privacy scan reported 62
+  assertions, zero forbidden direct/container inputs, zero length matchers,
+  and zero interpolated errors; the four-file source privacy scan reported zero
+  findings. Desktop typecheck and scoped ESLint passed.
+- Key decisions: fixture teardown is separate from the guarded cleanup attempt,
+  so each fixture first proves that the attacker-shaped root was retained.
+  Cleanup remains fail closed; no recovery sweep or production path was added.
+- Unresolved: Node still lacks directory-handle-relative recursive removal, so
+  the previously documented validation-to-remove same-user race remains an
+  accepted P3 constraint.
+- Git commit: not created; nothing was pushed.

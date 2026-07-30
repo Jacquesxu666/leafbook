@@ -63,6 +63,13 @@ export interface LaunchOptions {
   // should opt in — otherwise existing specs would silently ignore renderer
   // exceptions that previously surfaced as a dialog (a hidden regression risk).
   suppressErrorDialog?: boolean
+  /**
+   * Optional caller-owned profile directory. Privacy-sensitive RC harnesses use
+   * this to keep every writable artifact below one validated temporary root.
+   */
+  userDataDir?: string
+  /** Prefixes removed from the spawned Electron environment. */
+  stripEnvironmentPrefixes?: string[]
 }
 
 export const launchElectron = async (
@@ -73,14 +80,23 @@ export const launchElectron = async (
   const executablePath = getElectronPath()
   // Pass project root as entry so Electron reads package.json and getAppPath() returns project root.
   // Passing out/main/index.js directly bypasses package.json and breaks __static path resolution.
-  const userDataDir = trackTempDir(getTempPath())
+  const userDataDir = options.userDataDir
+    ? path.resolve(options.userDataDir)
+    : trackTempDir(getTempPath())
   const args = (
     process.env.LEAFBOOK_E2E_EXECUTABLE
       ? ['--user-data-dir', userDataDir]
       : [projectRoot, '--user-data-dir', userDataDir]
   ).concat(userArgs)
   const env: Record<string, string> = {}
-  for (const [k, v] of Object.entries(process.env)) if (v !== undefined) env[k] = v
+  for (const [k, v] of Object.entries(process.env)) {
+    if (
+      v !== undefined &&
+      !options.stripEnvironmentPrefixes?.some((prefix) => k.startsWith(prefix))
+    ) {
+      env[k] = v
+    }
+  }
   env.PERF_TESTING = 'true'
   if (options.suppressErrorDialog) env.MARKTEXT_ERROR_INTERACTION = '1'
   const app = await _electron.launch({
