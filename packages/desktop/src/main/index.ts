@@ -86,8 +86,15 @@ if (!process.mas && process.env.NODE_ENV !== 'development') {
   }
 }
 
-// Register sandbox-safe IPC handlers used by the contextBridge preload
-registerSandboxIpcHandlers()
+let accessor!: Accessor
+
+// Register sandbox-safe IPC handlers used by the contextBridge preload. Upload
+// configuration is read from main-owned persisted preferences at invocation
+// time; renderer payloads can never select a command or executable.
+registerSandboxIpcHandlers(() => ({
+  currentUploader: accessor?.preferences.getItem<unknown>('currentUploader'),
+  cliScript: accessor?.preferences.getItem<unknown>('cliScript')
+}))
 
 // Windows-specific AppUserModelID
 electronApp.setAppUserModelId(APP_ID)
@@ -98,7 +105,6 @@ app.on('browser-window-created', (_, window) => {
 })
 
 // Instantiate and start the main App controller
-let accessor: Accessor
 try {
   accessor = new Accessor(appEnvironment)
 } catch (err) {

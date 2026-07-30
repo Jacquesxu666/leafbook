@@ -263,6 +263,16 @@ describe('LeafBook public identity', () => {
     expect(() => renderThirdPartyNotices({})).toThrow('No third-party packages were returned')
   })
 
+  it('preserves multiple versions in the generated dependency license inventory', () => {
+    const notices = renderThirdPartyNotices({
+      'example@1.0.0': { licenses: 'MIT', licenseText: 'MIT v1 body' },
+      'example@2.0.0': { licenses: 'Apache-2.0', licenseText: 'Apache v2 body' }
+    })
+    expect(notices).toContain('example@1.0.0 (MIT)')
+    expect(notices).toContain('example@2.0.0 (Apache-2.0)')
+    expect(notices).toContain('multiple versions are intentionally preserved')
+  })
+
   it('keeps checked-in icon outputs at the required PNG dimensions', () => {
     const pngDimensions = (relativePath: string): [number, number] => {
       const png = fs.readFileSync(`${desktopRoot}/${relativePath}`)

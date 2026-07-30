@@ -1,10 +1,11 @@
+/* eslint-disable @stylistic/space-before-function-paren */
 import dayjs from 'dayjs'
 
 export type FileCreateType = 'file' | 'directory'
 export type PasteType = 'cut' | 'copy'
 export type HashType = 'sha1' | 'sha256' | 'sha512'
 
-export const create = async(pathname: string, type: FileCreateType): Promise<void> => {
+export const create = async (pathname: string, type: FileCreateType): Promise<void> => {
   return type === 'directory'
     ? window.fileUtils.ensureDir(pathname)
     : window.fileUtils.outputFile(pathname, '')
@@ -16,11 +17,11 @@ export interface PasteOptions {
   type: PasteType
 }
 
-export const paste = async({ src, dest, type }: PasteOptions): Promise<void> => {
+export const paste = async ({ src, dest, type }: PasteOptions): Promise<void> => {
   return type === 'cut' ? window.fileUtils.move(src, dest) : window.fileUtils.copy(src, dest)
 }
 
-export const rename = async(src: string, dest: string): Promise<void> => {
+export const rename = async (src: string, dest: string): Promise<void> => {
   return window.fileUtils.move(src, dest)
 }
 
@@ -33,7 +34,7 @@ const toHex = (buf: ArrayBuffer | Uint8Array): string => {
 
 // Replacement for crypto.createHash that uses the Web Crypto API. Only SHA-1 is
 // used by callers in this file.
-export const getHash = async(
+export const getHash = async (
   content: string | Uint8Array | ArrayBuffer,
   encoding?: string,
   type?: HashType
@@ -60,7 +61,7 @@ export const getHash = async(
 export const getContentHash = (content: string | Uint8Array | ArrayBuffer): Promise<string> =>
   getHash(content, 'utf8', 'sha1')
 
-export const moveImageToFolder = async(
+export const moveImageToFolder = async (
   pathname: string,
   image: string | File,
   outputDir: string,
@@ -110,20 +111,14 @@ export interface UploadImagePreferences {
   cliScript?: string
 }
 
-export const uploadImage = async(
+export const uploadImage = async (
   pathname: string,
   image: string | File,
-  preferences: UploadImagePreferences
+  _preferences: UploadImagePreferences
 ): Promise<unknown> => {
-  // Pass only a plain serializable object — the full Pinia $state is a Vue
-  // Proxy which Electron's structured-clone algorithm cannot serialize.
-  const ipcPrefs = {
-    currentUploader: preferences.currentUploader,
-    cliScript: preferences.cliScript ?? ''
-  }
   const isPath = typeof image === 'string'
   if (isPath) {
-    return window.uploader.uploadImage({ pathname, image, isPath: true, preferences: ipcPrefs })
+    return window.uploader.uploadImage({ pathname, image, isPath: true })
   }
   const file = image as File
   const arrayBuffer = await file.arrayBuffer()
@@ -133,8 +128,7 @@ export const uploadImage = async(
       data: new Uint8Array(arrayBuffer),
       name: file.name
     },
-    isPath: false,
-    preferences: ipcPrefs
+    isPath: false
   }
   return window.uploader.uploadImage(payload)
 }

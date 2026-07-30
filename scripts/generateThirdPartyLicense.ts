@@ -25,27 +25,15 @@ const scriptDirectory = path.dirname(fileURLToPath(import.meta.url))
 const desktopRoot = path.resolve(scriptDirectory, '..', 'packages/desktop')
 
 export function renderThirdPartyNotices(packages: LicensePackages): string {
-  const packageKeys = Object.keys(packages)
+  const packageKeys = Object.keys(packages).sort((left, right) => left.localeCompare(right))
   if (packageKeys.length === 0) {
     throw new Error('No third-party packages were returned')
   }
   let summary = ''
   let licenseList = ''
   let index = 1
-  const addedKeys: Record<string, true> = {}
 
   packageKeys.forEach((key) => {
-    let packageName = key
-    const nameRegex = /(^.+)(?:@)/.exec(key)
-    if (nameRegex && nameRegex[1]) {
-      packageName = nameRegex[1]
-    }
-
-    if (Object.hasOwn(addedKeys, packageName)) {
-      return
-    }
-    addedKeys[packageName] = true
-
     const { licenses, licenseFile, licenseText } = packages[key]
     let body = ''
     if (typeof licenseFile === 'string' && fs.existsSync(licenseFile)) {
@@ -61,11 +49,11 @@ export function renderThirdPartyNotices(packages: LicensePackages): string {
       body = `No license file was provided by this package. Declared license: ${licenses}.`
     }
     if (!body) {
-      throw new Error(`Empty license body for ${packageName}`)
+      throw new Error(`Empty license body for ${key}`)
     }
     body = body.replace(/[ \t]+$/gm, '')
-    summary += `${index++}. ${packageName} (${licenses})\n`
-    licenseList += `# ${packageName} (${licenses})
+    summary += `${index++}. ${key} (${licenses})\n`
+    licenseList += `# ${key} (${licenses})
 -------------------------------------------------\
 
 ${body}
@@ -76,7 +64,13 @@ ${body}
   return `# Third Party Notices
 -------------------------------------------------
 
-This file contains all third-party packages that are bundled and shipped with LeafBook.
+This file is a generated production dependency license inventory reported by
+license-checker. Entries retain the package identity and version returned by
+that tool; multiple versions are intentionally preserved.
+
+It is not an SBOM. Package-manager resolution, optional or platform-specific
+paths, bundled assets, and transitive completeness require independent release
+review.
 
 -------------------------------------------------
 # Summary

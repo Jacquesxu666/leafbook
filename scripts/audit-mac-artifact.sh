@@ -5,6 +5,11 @@ repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 desktop_package="$repository_root/packages/desktop/package.json"
 version="$(node -p "require(process.argv[1]).version" "$desktop_package")"
 dist_dir="$repository_root/dist"
+"$repository_root/scripts/check-safe-artifact-path.sh" directory "$dist_dir" "$repository_root"
+[[ -d "$dist_dir" && ! -L "$dist_dir" && "$(realpath "$dist_dir")" == "$dist_dir" ]] || {
+  echo "dist must be a canonical real directory." >&2
+  exit 1
+}
 if [[ "${1:-}" == "--" ]]; then
   shift
 fi
@@ -32,11 +37,34 @@ cleanup() {
 }
 trap cleanup EXIT
 
-for artifact in "$app_path" "$zip_path" "$dmg_path"; do
-  if [[ ! -e "$artifact" ]]; then
-    echo "Missing artifact: $artifact" >&2
+audit_bundle_paths() {
+  local bundle="$1"
+  local containment="$2"
+  "$repository_root/scripts/check-safe-artifact-path.sh" directory "$bundle" "$containment"
+  local relative
+  for relative in \
+    Contents/MacOS/LeafBook \
+    Contents/Info.plist \
+    Contents/Resources/app.asar \
+    Contents/Resources/licenses/LICENSE \
+    Contents/Resources/licenses/NOTICE \
+    Contents/Resources/licenses/THIRD-PARTY-LICENSES.txt; do
+    "$repository_root/scripts/check-safe-artifact-path.sh" regular "$bundle/$relative" "$bundle"
+  done
+  "$repository_root/scripts/check-no-updater-files.sh" "$bundle"
+}
+
+[[ -d "$app_path" && ! -L "$app_path" && "$(realpath "$app_path")" == "$app_path" ]] || {
+  echo "Missing or unsafe app bundle: $app_path" >&2
+  exit 1
+}
+audit_bundle_paths "$app_path" "$dist_dir"
+for artifact in "$zip_path" "$dmg_path"; do
+  [[ -f "$artifact" && ! -L "$artifact" && -s "$artifact" ]] || {
+    echo "Missing or unsafe regular artifact: $artifact" >&2
     exit 1
-  fi
+  }
+  "$repository_root/scripts/check-safe-artifact-path.sh" regular "$artifact" "$dist_dir"
 done
 
 plist="$app_path/Contents/Info.plist"
@@ -84,10 +112,7 @@ fi
 
 asar_listing="$temporary_root/asar-list.txt"
 pnpm --filter leafbook exec asar list "$asar" > "$asar_listing"
-if grep -qi "electron-updater" "$asar_listing"; then
-  echo "electron-updater is present in the packaged ASAR." >&2
-  exit 1
-fi
+"$repository_root/scripts/check-asar-listing-no-updater.sh" "$asar_listing"
 pnpm --filter leafbook exec asar extract "$asar" "$temporary_root/asar"
 node - "$temporary_root/asar/package.json" "$version" <<'NODE'
 const fs = require('node:fs')
@@ -109,11 +134,18 @@ unzip -Z1 "$zip_path" > "$zip_listing"
 grep -q "LeafBook.app/Contents/Resources/licenses/LICENSE" "$zip_listing"
 grep -q "LeafBook.app/Contents/Resources/licenses/NOTICE" "$zip_listing"
 grep -q "LeafBook.app/Contents/Resources/licenses/THIRD-PARTY-LICENSES.txt" "$zip_listing"
+zip_root="$temporary_root/zip"
+mkdir "$zip_root"
+unzip -q "$zip_path" -d "$zip_root"
+zip_app="$zip_root/LeafBook.app"
+[[ -d "$zip_app" && ! -L "$zip_app" ]]
+audit_bundle_paths "$zip_app" "$zip_root"
 
 mkdir "$mount_point"
 hdiutil attach "$dmg_path" -readonly -nobrowse -mountpoint "$mount_point" -quiet
 mounted=1
 dmg_app="$mount_point/LeafBook.app"
+audit_bundle_paths "$dmg_app" "$mount_point"
 [[ -s "$dmg_app/Contents/Resources/licenses/LICENSE" ]]
 [[ -s "$dmg_app/Contents/Resources/licenses/NOTICE" ]]
 [[ -s "$dmg_app/Contents/Resources/licenses/THIRD-PARTY-LICENSES.txt" ]]

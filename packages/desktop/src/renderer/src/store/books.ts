@@ -2,6 +2,8 @@
 import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
 import type {
+  BookArrangementDto,
+  BookArrangementOperationDto,
   BookChapterDto,
   BookReaderError,
   BookReaderNodeDto,
@@ -12,6 +14,8 @@ import type {
   BookSessionDto
 } from '@shared/types/bookReader'
 import { adjacentChapter, flattenReadableNodeIds } from '@/book/readerModel'
+import { generateBookExportHtml } from '@/book/exportBookHtml'
+import { disposeBookEditDecisions, requestBookEditDecision } from '@/services/bookEditDecision'
 import bus from '@/bus'
 
 const SAVE_DEBOUNCE_MS = 2_000
@@ -38,6 +42,18 @@ export const useBooksStore = defineStore('books', () => {
   const session = ref<BookSessionDto | null>(null)
   const chapter = ref<BookChapterDto | null>(null)
   const error = ref<BookReaderError | null>(null)
+  const arrangement = ref<BookArrangementDto | null>(null)
+  const arrangementError = ref<BookReaderError | null>(null)
+  const arrangementPending = ref(false)
+  const exportPending = ref(false)
+  const exportCancelRequested = ref(false)
+  const exportError = ref<BookReaderError | null>(null)
+  const exportSuccess = ref<string | null>(null)
+  const websitePending = ref(false)
+  const websiteCancelRequested = ref(false)
+  const websiteError = ref<BookReaderError | null>(null)
+  const websiteSuccess = ref<string | null>(null)
+  const outputPending = computed(() => exportPending.value || websitePending.value)
   const pending = ref(new Set<number>())
   const loading = computed(() => pending.value.size > 0)
   let generation = 0
@@ -71,6 +87,506 @@ export const useBooksStore = defineStore('books', () => {
   let searchTimer: ReturnType<typeof setTimeout> | null = null
   let searchGeneration = 0
   let activeSearch: { sessionId: string; searchId: string } | null = null
+  let arrangementGeneration = 0
+  let exportGeneration = 0
+  let activeExportId: string | null = null
+  let exportCancelSettlement: Promise<void> | null = null
+  let websiteGeneration = 0
+  let activeWebsiteId: string | null = null
+  let websiteCancelSettlement: Promise<void> | null = null
+
+  const arrangementOwner = (id: string, token: number) => ({
+    tabId: `book-arrangement:${id}`,
+    operationGeneration: token,
+    isCurrent: () => arrangementGeneration === token && arrangement.value?.arrangementId === id
+  })
+
+  const closeArrangement = async (): Promise<void> => {
+    const currentArrangement = arrangement.value
+    arrangementGeneration += 1
+    arrangement.value = null
+    arrangementError.value = null
+    arrangementPending.value = false
+    if (!currentArrangement) return
+    disposeBookEditDecisions(`book-arrangement:${currentArrangement.arrangementId}`)
+    try {
+      await window.electron.books.closeArrangement(currentArrangement.arrangementId)
+    } catch {
+      // Close is best-effort. Main also revokes the lease with its owning session.
+    }
+  }
+
+  const prepareBookTabs = (): Promise<boolean> =>
+    new Promise<boolean>((resolve) => {
+      bus.emit('lb::prepare-return-to-book', resolve)
+    })
+
+  const beginArrangement = async (): Promise<void> => {
+    const sessionSnapshot = session.value
+    if (
+      mode.value !== 'reader' ||
+      !sessionSnapshot ||
+      sessionSnapshot.navigationSource !== 'summary' ||
+      arrangementPending.value ||
+      arrangement.value ||
+      outputPending.value
+    ) {
+      return
+    }
+    const token = ++arrangementGeneration
+    arrangementPending.value = true
+    arrangementError.value = null
+    await cancelSearch(true)
+    if (token !== arrangementGeneration) return
+    if (!(await prepareBookTabs())) {
+      if (token === arrangementGeneration) arrangementPending.value = false
+      return
+    }
+    if (
+      token !== arrangementGeneration ||
+      mode.value !== 'reader' ||
+      session.value?.sessionId !== sessionSnapshot.sessionId ||
+      session.value.navigationSource !== 'summary'
+    ) {
+      if (token === arrangementGeneration) arrangementPending.value = false
+      return
+    }
+    await flushReadingPosition()
+    if (
+      token !== arrangementGeneration ||
+      mode.value !== 'reader' ||
+      session.value?.sessionId !== sessionSnapshot.sessionId
+    ) {
+      return
+    }
+    try {
+      const result = await window.electron.books.beginArrangement(sessionSnapshot.sessionId)
+      if (
+        token !== arrangementGeneration ||
+        mode.value !== 'reader' ||
+        session.value?.sessionId !== sessionSnapshot.sessionId
+      ) {
+        if (result.ok) {
+          await window.electron.books.closeArrangement(result.value.arrangementId)
+        }
+        return
+      }
+      if (!result.ok) {
+        arrangementError.value = result.error
+        error.value = result.error
+        return
+      }
+      arrangement.value = result.value
+    } catch {
+      if (token === arrangementGeneration) arrangementError.value = unexpectedError()
+    } finally {
+      if (token === arrangementGeneration) arrangementPending.value = false
+    }
+  }
+
+  const exportBook = async (): Promise<void> => {
+    const initialSession = session.value
+    if (
+      mode.value !== 'reader' ||
+      !initialSession ||
+      arrangementPending.value ||
+      arrangement.value ||
+      outputPending.value
+    ) {
+      return
+    }
+    const token = ++exportGeneration
+    exportPending.value = true
+    exportCancelRequested.value = false
+    exportCancelSettlement = null
+    exportError.value = null
+    exportSuccess.value = null
+    let exportId: string | null = null
+    await cancelSearch(true)
+    try {
+      if (!(await prepareBookTabs())) return
+      if (
+        token !== exportGeneration ||
+        mode.value !== 'reader' ||
+        session.value?.sessionId !== initialSession.sessionId
+      ) {
+        return
+      }
+      await flushReadingPosition()
+      const snapshot = await window.electron.books.beginExport(initialSession.sessionId)
+      if (
+        token !== exportGeneration ||
+        mode.value !== 'reader' ||
+        session.value?.sessionId !== initialSession.sessionId
+      ) {
+        if (snapshot.ok) await window.electron.books.cancelExport(snapshot.value.exportId)
+        return
+      }
+      if (!snapshot.ok) {
+        if (snapshot.error.code !== 'cancelled') {
+          exportError.value = snapshot.error
+          error.value = snapshot.error
+        }
+        return
+      }
+      exportId = snapshot.value.exportId
+      activeExportId = exportId
+      const html = await generateBookExportHtml(snapshot.value)
+      if (
+        token !== exportGeneration ||
+        mode.value !== 'reader' ||
+        session.value?.sessionId !== initialSession.sessionId
+      ) {
+        if (activeExportId === exportId) {
+          activeExportId = null
+          await window.electron.books.cancelExport(exportId)
+        }
+        exportId = null
+        return
+      }
+      const saved = await window.electron.books.commitExport({ exportId, html })
+      if (activeExportId === exportId) activeExportId = null
+      exportId = null
+      if (token !== exportGeneration) {
+        if (saved.ok) {
+          exportSuccess.value = saved.value.durabilityUncertain
+            ? `Export completed before cancellation: ${saved.value.fileName}, but storage durability could not be confirmed.`
+            : `Export completed before cancellation: ${saved.value.fileName}`
+        } else if (saved.error.committed) {
+          exportSuccess.value =
+            'Export may have committed before cancellation; verify the destination file.'
+        }
+        return
+      }
+      if (!saved.ok) {
+        exportError.value = saved.error
+        error.value = saved.error
+        return
+      }
+      exportSuccess.value = saved.value.durabilityUncertain
+        ? `Exported ${saved.value.fileName}, but storage durability could not be confirmed.`
+        : `Exported ${saved.value.fileName}`
+    } catch {
+      if (token === exportGeneration) {
+        exportError.value = unexpectedError()
+        error.value = exportError.value
+      }
+    } finally {
+      if (exportId) {
+        if (activeExportId === exportId) {
+          activeExportId = null
+          await window.electron.books.cancelExport(exportId).catch(() => undefined)
+        }
+      }
+      await exportCancelSettlement
+      if (token === exportGeneration || exportCancelRequested.value) {
+        exportPending.value = false
+        exportCancelRequested.value = false
+        exportCancelSettlement = null
+      }
+    }
+  }
+
+  const cancelExport = async (): Promise<void> => {
+    if (!exportPending.value || exportCancelRequested.value) return
+    exportCancelRequested.value = true
+    exportGeneration += 1
+    const exportId = activeExportId
+    activeExportId = null
+    if (exportId) {
+      exportCancelSettlement = window.electron.books
+        .cancelExport(exportId)
+        .then(() => undefined)
+        .catch(() => undefined)
+      await exportCancelSettlement
+    }
+  }
+
+  const generateWebsite = async (): Promise<void> => {
+    const initialSession = session.value
+    if (
+      mode.value !== 'reader' ||
+      !initialSession ||
+      arrangementPending.value ||
+      arrangement.value ||
+      outputPending.value
+    ) {
+      return
+    }
+    const token = ++websiteGeneration
+    websitePending.value = true
+    websiteCancelRequested.value = false
+    websiteCancelSettlement = null
+    websiteError.value = null
+    websiteSuccess.value = null
+    let websiteId: string | null = null
+    await cancelSearch(true)
+    try {
+      if (!(await prepareBookTabs())) return
+      if (
+        token !== websiteGeneration ||
+        mode.value !== 'reader' ||
+        session.value?.sessionId !== initialSession.sessionId
+      ) {
+        return
+      }
+      await flushReadingPosition()
+      const snapshot = await window.electron.books.beginWebsite(initialSession.sessionId)
+      if (
+        token !== websiteGeneration ||
+        mode.value !== 'reader' ||
+        session.value?.sessionId !== initialSession.sessionId
+      ) {
+        if (snapshot.ok) await window.electron.books.cancelWebsite(snapshot.value.websiteId)
+        return
+      }
+      if (!snapshot.ok) {
+        if (snapshot.error.code !== 'cancelled') {
+          websiteError.value = snapshot.error
+          error.value = snapshot.error
+        }
+        return
+      }
+      websiteId = snapshot.value.websiteId
+      activeWebsiteId = websiteId
+      const html = await generateBookExportHtml({
+        ...snapshot.value,
+        exportId: snapshot.value.websiteId
+      })
+      if (
+        token !== websiteGeneration ||
+        mode.value !== 'reader' ||
+        session.value?.sessionId !== initialSession.sessionId
+      ) {
+        if (activeWebsiteId === websiteId) {
+          activeWebsiteId = null
+          await window.electron.books.cancelWebsite(websiteId)
+        }
+        websiteId = null
+        return
+      }
+      const saved = await window.electron.books.commitWebsite({ websiteId, html })
+      if (activeWebsiteId === websiteId) activeWebsiteId = null
+      websiteId = null
+      if (token !== websiteGeneration) {
+        if (saved.ok) {
+          websiteSuccess.value = saved.value.durabilityUncertain
+            ? `Website completed before cancellation: ${saved.value.directoryName}, but storage durability is uncertain.`
+            : `Website completed before cancellation: ${saved.value.directoryName}`
+        } else if (saved.error.committed) {
+          websiteSuccess.value =
+            'Website may have committed before cancellation; verify the selected folder.'
+        }
+        return
+      }
+      if (!saved.ok) {
+        websiteError.value = saved.error
+        error.value = saved.error
+        return
+      }
+      websiteSuccess.value = saved.value.durabilityUncertain
+        ? `Generated ${saved.value.directoryName}, but storage durability could not be confirmed.`
+        : `Generated ${saved.value.directoryName}`
+    } catch {
+      if (token === websiteGeneration) {
+        websiteError.value = unexpectedError()
+        error.value = websiteError.value
+      }
+    } finally {
+      if (websiteId && activeWebsiteId === websiteId) {
+        activeWebsiteId = null
+        await window.electron.books.cancelWebsite(websiteId).catch(() => undefined)
+      }
+      await websiteCancelSettlement
+      if (token === websiteGeneration || websiteCancelRequested.value) {
+        websitePending.value = false
+        websiteCancelRequested.value = false
+        websiteCancelSettlement = null
+      }
+    }
+  }
+
+  const cancelWebsite = async (): Promise<void> => {
+    if (!websitePending.value || websiteCancelRequested.value) return
+    websiteCancelRequested.value = true
+    websiteGeneration += 1
+    const websiteId = activeWebsiteId
+    activeWebsiteId = null
+    if (websiteId) {
+      websiteCancelSettlement = window.electron.books
+        .cancelWebsite(websiteId)
+        .then(() => undefined)
+        .catch(() => undefined)
+      await websiteCancelSettlement
+    }
+  }
+
+  const applyArrangement = async (
+    operationRequest: BookArrangementOperationDto
+  ): Promise<boolean> => {
+    const currentArrangement = arrangement.value
+    if (!currentArrangement || arrangementPending.value) return false
+    const token = arrangementGeneration
+    arrangementPending.value = true
+    arrangementError.value = null
+    try {
+      const result = await window.electron.books.applyArrangement({
+        arrangementId: currentArrangement.arrangementId,
+        operation: operationRequest
+      })
+      if (
+        token !== arrangementGeneration ||
+        arrangement.value?.arrangementId !== currentArrangement.arrangementId
+      ) {
+        return false
+      }
+      if (!result.ok) {
+        arrangementError.value = result.error
+        return false
+      }
+      arrangement.value = result.value
+      return true
+    } catch {
+      if (token === arrangementGeneration) arrangementError.value = unexpectedError()
+      return false
+    } finally {
+      if (token === arrangementGeneration) arrangementPending.value = false
+    }
+  }
+
+  const undoArrangement = async (): Promise<boolean> => {
+    const currentArrangement = arrangement.value
+    if (!currentArrangement?.canUndo || arrangementPending.value) return false
+    const token = arrangementGeneration
+    arrangementPending.value = true
+    arrangementError.value = null
+    try {
+      const result = await window.electron.books.undoArrangement(currentArrangement.arrangementId)
+      if (
+        token !== arrangementGeneration ||
+        arrangement.value?.arrangementId !== currentArrangement.arrangementId
+      ) {
+        return false
+      }
+      if (!result.ok) {
+        arrangementError.value = result.error
+        return false
+      }
+      arrangement.value = result.value
+      return true
+    } catch {
+      if (token === arrangementGeneration) arrangementError.value = unexpectedError()
+      return false
+    } finally {
+      if (token === arrangementGeneration) arrangementPending.value = false
+    }
+  }
+
+  const saveArrangementAttempt = async (
+    currentArrangement: BookArrangementDto,
+    token: number,
+    overwriteToken?: string
+  ): Promise<void> => {
+    const result = await window.electron.books.saveArrangement({
+      arrangementId: currentArrangement.arrangementId,
+      revision: currentArrangement.revision,
+      ...(overwriteToken ? { overwriteToken } : {})
+    })
+    if (
+      token !== arrangementGeneration ||
+      arrangement.value?.arrangementId !== currentArrangement.arrangementId
+    ) {
+      return
+    }
+    if (!result.ok && result.error.code === 'arrangement-conflict' && result.error.overwriteToken) {
+      const decision = await requestBookEditDecision(
+        'Contents changed on disk',
+        'SUMMARY changed outside LeafBook. Cancel to keep the external version, or explicitly overwrite it with this arrangement.',
+        [
+          { id: 'cancel', label: 'Cancel' },
+          { id: 'overwrite', label: 'Overwrite', danger: true }
+        ],
+        'cancel',
+        arrangementOwner(currentArrangement.arrangementId, token)
+      )
+      if (
+        decision === 'overwrite' &&
+        token === arrangementGeneration &&
+        arrangement.value?.arrangementId === currentArrangement.arrangementId
+      ) {
+        await saveArrangementAttempt(currentArrangement, token, result.error.overwriteToken)
+      }
+      return
+    }
+    if (!result.ok) {
+      arrangementError.value = result.error
+      if (
+        result.error.code === 'arrangement-not-found' ||
+        result.error.code === 'arrangement-read-only' ||
+        result.error.code === 'arrangement-commit-uncertain'
+      ) {
+        error.value = result.error
+        disposeBookEditDecisions(`book-arrangement:${currentArrangement.arrangementId}`, token)
+        try {
+          await window.electron.books.closeArrangement(currentArrangement.arrangementId)
+        } catch {
+          // Main may already have revoked a not-found or commit-uncertain lease.
+        }
+        if (
+          token === arrangementGeneration &&
+          arrangement.value?.arrangementId === currentArrangement.arrangementId
+        ) {
+          arrangementPending.value = false
+          arrangementGeneration += 1
+          arrangement.value = null
+        }
+      }
+      return
+    }
+    const priorNodeId = chapter.value?.nodeId ?? null
+    const priorSessionId = session.value?.sessionId
+    arrangementPending.value = false
+    arrangementGeneration += 1
+    arrangement.value = null
+    disposeBookEditDecisions(`book-arrangement:${currentArrangement.arrangementId}`, token)
+    await cancelSearch(true)
+    if (
+      result.value.session &&
+      priorSessionId === result.value.session.sessionId &&
+      mode.value === 'reader'
+    ) {
+      session.value = result.value.session
+      chapter.value = null
+      const readable = new Set(
+        flattenReadableNodeIds(result.value.session.nodes, result.value.session.landingNodeId)
+      )
+      const target =
+        priorNodeId && readable.has(priorNodeId)
+          ? priorNodeId
+          : (result.value.session.resumeNodeId ?? result.value.session.entryNodeId)
+      if (target) {
+        const readToken = ++generation
+        await readNode(result.value.session, target, readToken, 'restore')
+      }
+    } else if (priorSessionId && session.value?.sessionId === priorSessionId) {
+      await refresh()
+    }
+  }
+
+  const saveArrangement = async (): Promise<void> => {
+    const currentArrangement = arrangement.value
+    if (!currentArrangement?.dirty || arrangementPending.value) return
+    const token = arrangementGeneration
+    arrangementPending.value = true
+    arrangementError.value = null
+    try {
+      await saveArrangementAttempt(currentArrangement, token)
+    } catch {
+      if (token === arrangementGeneration) arrangementError.value = unexpectedError()
+    } finally {
+      if (token === arrangementGeneration) arrangementPending.value = false
+    }
+  }
 
   const clearSearchTimer = (): void => {
     if (searchTimer) clearTimeout(searchTimer)
@@ -143,6 +659,8 @@ export const useBooksStore = defineStore('books', () => {
   }
 
   const scheduleSearch = (query: string): void => {
+    if (outputPending.value) return
+    if (arrangementPending.value || arrangement.value) return
     searchQuery.value = query
     clearSearchTimer()
     const token = ++searchGeneration
@@ -474,6 +992,8 @@ export const useBooksStore = defineStore('books', () => {
   }
 
   const showBookshelf = async (): Promise<void> => {
+    if (outputPending.value) return
+    if (arrangement.value || arrangementPending.value) await closeArrangement()
     cancelSearch(true)
     await flushReadingPosition()
     const { token, operationId } = start()
@@ -514,6 +1034,8 @@ export const useBooksStore = defineStore('books', () => {
   }
 
   const openPicker = async (): Promise<void> => {
+    if (outputPending.value) return
+    if (arrangement.value || arrangementPending.value) await closeArrangement()
     cancelSearch(true)
     const oldSession = session.value
     const { token, operationId } = start()
@@ -537,6 +1059,8 @@ export const useBooksStore = defineStore('books', () => {
   }
 
   const openLibrary = async (libraryId: string): Promise<void> => {
+    if (outputPending.value) return
+    if (arrangement.value || arrangementPending.value) await closeArrangement()
     cancelSearch(true)
     const oldSession = session.value
     const { token, operationId } = start()
@@ -560,6 +1084,7 @@ export const useBooksStore = defineStore('books', () => {
   }
 
   const openNode = async (nodeId: string, fragmentOverride?: string | null): Promise<void> => {
+    if (arrangementPending.value || arrangement.value || outputPending.value) return
     if (refreshInFlight) await refreshInFlight
     await flushReadingPosition()
     const sessionSnapshot = session.value
@@ -573,6 +1098,7 @@ export const useBooksStore = defineStore('books', () => {
   }
 
   const activateNode = async (node: BookReaderNodeDto): Promise<void> => {
+    if (arrangementPending.value || arrangement.value || outputPending.value) return
     if (node.type === 'chapter') return openNode(node.nodeId)
     if (node.type === 'group' && node.landingNodeId) return openNode(node.landingNodeId)
     if (node.type !== 'external' || !session.value) return
@@ -594,6 +1120,8 @@ export const useBooksStore = defineStore('books', () => {
   }
 
   const followLink = async (href: string): Promise<void> => {
+    if (outputPending.value) return
+    if (arrangementPending.value || arrangement.value) return
     await flushReadingPosition()
     const sessionSnapshot = session.value
     const chapterSnapshot = chapter.value
@@ -632,6 +1160,7 @@ export const useBooksStore = defineStore('books', () => {
   }
 
   const performRefresh = async (): Promise<void> => {
+    if (arrangement.value || arrangementPending.value) await closeArrangement()
     cancelSearch(true)
     await flushReadingPosition()
     const sessionSnapshot = session.value
@@ -662,6 +1191,7 @@ export const useBooksStore = defineStore('books', () => {
     }
   }
   const refresh = async (): Promise<void> => {
+    if (outputPending.value) return
     if (refreshInFlight) return refreshInFlight
     const refreshOperation = performRefresh()
     refreshInFlight = refreshOperation
@@ -696,12 +1226,16 @@ export const useBooksStore = defineStore('books', () => {
   }
 
   const previous = async (): Promise<void> => {
+    if (arrangementPending.value || arrangement.value || outputPending.value) return
     if (previousNodeId.value) await openNode(previousNodeId.value)
   }
   const next = async (): Promise<void> => {
+    if (arrangementPending.value || arrangement.value || outputPending.value) return
     if (nextNodeId.value) await openNode(nextNodeId.value)
   }
   const editCurrentChapter = async (): Promise<void> => {
+    if (outputPending.value) return
+    if (arrangement.value || arrangementPending.value) await closeArrangement()
     await cancelSearch(true)
     await flushReadingPosition()
     const sessionSnapshot = session.value
@@ -739,6 +1273,8 @@ export const useBooksStore = defineStore('books', () => {
     if (!error.value && session.value) mode.value = 'reader'
   }
   const showEditor = async (): Promise<void> => {
+    if (outputPending.value) return
+    if (arrangement.value || arrangementPending.value) await closeArrangement()
     cancelSearch(true)
     await flushReadingPosition()
     const { token, operationId } = start()
@@ -771,6 +1307,18 @@ export const useBooksStore = defineStore('books', () => {
     chapter,
     loading,
     error,
+    arrangement,
+    arrangementError,
+    arrangementPending,
+    exportPending,
+    exportCancelRequested,
+    exportError,
+    exportSuccess,
+    websitePending,
+    websiteCancelRequested,
+    websiteError,
+    websiteSuccess,
+    outputPending,
     searchQuery,
     searchResults,
     searchLoading,
@@ -801,6 +1349,15 @@ export const useBooksStore = defineStore('books', () => {
     openSearchResult,
     saveReadingPosition,
     refresh,
+    beginArrangement,
+    applyArrangement,
+    undoArrangement,
+    saveArrangement,
+    closeArrangement,
+    exportBook,
+    cancelExport,
+    generateWebsite,
+    cancelWebsite,
     removeLibrary,
     previous,
     next,

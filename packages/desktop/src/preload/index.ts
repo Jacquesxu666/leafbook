@@ -18,6 +18,10 @@ import type {
   BootInfo
 } from '@shared/types/ipc'
 import type {
+  BookArrangementApplyRequestDto,
+  BookArrangementSaveRequestDto,
+  BookExportCommitRequestDto,
+  BookWebsiteCommitRequestDto,
   BookEditSaveRequestDto,
   BookSearchProgressDto,
   BookSearchRequestDto
@@ -245,6 +249,22 @@ const booksAPI = {
   saveEdit: (request: BookEditSaveRequestDto) => invoke('lb::books::save-edit', request),
   reloadEdit: (editId: string) => invoke('lb::books::reload-edit', editId),
   closeEdit: (editId: string) => invoke('lb::books::close-edit', editId),
+  beginArrangement: (sessionId: string) => invoke('lb::books::begin-arrangement', sessionId),
+  applyArrangement: (request: BookArrangementApplyRequestDto) =>
+    invoke('lb::books::apply-arrangement', request),
+  undoArrangement: (arrangementId: string) => invoke('lb::books::undo-arrangement', arrangementId),
+  saveArrangement: (request: BookArrangementSaveRequestDto) =>
+    invoke('lb::books::save-arrangement', request),
+  closeArrangement: (arrangementId: string) =>
+    invoke('lb::books::close-arrangement', arrangementId),
+  beginExport: (sessionId: string) => invoke('lb::books::begin-export', sessionId),
+  commitExport: (request: BookExportCommitRequestDto) =>
+    invoke('lb::books::commit-export', request),
+  cancelExport: (exportId: string) => invoke('lb::books::cancel-export', exportId),
+  beginWebsite: (sessionId: string) => invoke('lb::books::begin-website', sessionId),
+  commitWebsite: (request: BookWebsiteCommitRequestDto) =>
+    invoke('lb::books::commit-website', request),
+  cancelWebsite: (websiteId: string) => invoke('lb::books::cancel-website', websiteId),
   saveReadingPosition: (sessionId: string, nodeId: string, chapterProgress: number) =>
     invoke('lb::books::save-reading-position', sessionId, nodeId, chapterProgress),
   followLink: (sessionId: string, nodeId: string, href: string) =>

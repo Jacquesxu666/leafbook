@@ -10,12 +10,19 @@ import { registerCmdHandlers } from './cmd'
 import { registerI18nHandlers } from './i18n'
 import { registerBookHandlers } from './books'
 
-export const registerSandboxIpcHandlers = (): void => {
+export interface UploaderPreferences {
+  currentUploader: unknown
+  cliScript: unknown
+}
+
+export const registerSandboxIpcHandlers = (
+  getUploaderPreferences: () => UploaderPreferences
+): void => {
   registerBootInfo()
   registerFsHandlers()
   registerPathHandlers()
   registerRipgrepHandlers()
-  registerUploaderHandlers()
+  registerUploaderHandlers(getUploaderPreferences)
   registerFontsHandlers()
   registerShellHandlers()
   registerWindowHandlers()

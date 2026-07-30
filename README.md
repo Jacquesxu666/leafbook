@@ -11,8 +11,10 @@ navigation, reading progress, and whole-book search will follow.
 
 ## Development
 
-Requirements and detailed build notes remain in the inherited
-[developer documentation](packages/website/content/docs/dev/BUILD.md).
+Requirements and LeafBook-specific safe packaging notes are in
+[docs/BUILD.md](docs/BUILD.md). The inherited
+[developer documentation](packages/website/content/docs/dev/BUILD.md)
+remains transitional reference.
 The documents under `packages/website/content/docs` originated in MarkText and
 are retained as transitional reference material; LeafBook-specific guides will
 replace them as features diverge.

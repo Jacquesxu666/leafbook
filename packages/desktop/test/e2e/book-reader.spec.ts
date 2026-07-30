@@ -3,6 +3,7 @@ import { test, expect } from '@playwright/test'
 import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import { createHash } from 'node:crypto'
 import {
   clickMenuById,
   expectNoRendererErrors,
@@ -91,6 +92,260 @@ test('open book, navigate chapters, return to bookshelf, and preserve editor flo
   }
 })
 
+test('exports one offline HTML book with scoped Chinese heading navigation', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'leafbook-e2e-html-book-'))
+  const destination = await fs.mkdtemp(path.join(os.tmpdir(), 'leafbook-e2e-html-output-'))
+  const output = path.join(destination, '离线书.html')
+  await fs.writeFile(
+    path.join(root, 'SUMMARY.md'),
+    '- [第一章](one.md)\n- [第一章别名](one.md#重复标题)\n- [不存在的小节](one.md#不存在)\n- [缺失章节](missing.md)\n- [第二章](two.md)\n'
+  )
+  await fs.writeFile(
+    path.join(root, 'one.md'),
+    '# 重复标题\n\n[跳到第二章标题](two.md#重复标题)\n\n[缺失正文](missing.md)\n\n# 重复标题\n'
+  )
+  await fs.writeFile(
+    path.join(root, 'two.md'),
+    '# 重复标题\n\n![本地图](private.png)\n\n[外网](https://example.invalid/x)\n'
+  )
+  const { app, page } = await launchElectron([], { suppressErrorDialog: true })
+  try {
+    await app.evaluate(
+      ({ dialog }, values) => {
+        dialog.showOpenDialog = async () =>
+          ({
+            canceled: false,
+            filePaths: [values.root],
+            bookmarks: []
+          }) as Electron.OpenDialogReturnValue
+        dialog.showSaveDialog = async () =>
+          ({ canceled: false, filePath: values.output }) as Electron.SaveDialogReturnValue
+        dialog.showMessageBox = async () =>
+          ({ response: 1, checkboxChecked: false }) as Electron.MessageBoxReturnValue
+      },
+      { root, output }
+    )
+    await clickMenuById(app, 'leafbookOpenBook')
+    await page.getByRole('button', { name: 'Export…' }).click()
+    await expect(page.getByRole('status')).toContainText('Exported 离线书.html')
+    const html = await fs.readFile(output, 'utf8')
+    expect(html).toContain('Content-Security-Policy')
+    expect(html).toContain('第一章别名')
+    expect(html.match(/id="leafbook-chapter-1"/g)).toHaveLength(1)
+    expect(html).not.toMatch(/\s(?:href|src)=["'](?:https?:|file:|\/)/i)
+    expect(html).not.toMatch(/<script|\son[a-z]+=|\sstyle=|data-book-href=/i)
+    expect(html).not.toContain(root)
+    const result = await app.evaluate(async ({ BrowserWindow, session }, filePath) => {
+      const partition = `leafbook-export-e2e-${Date.now()}`
+      const isolatedSession = session.fromPartition(partition)
+      const requests: string[] = []
+      isolatedSession.webRequest.onBeforeRequest((details, callback) => {
+        requests.push(details.url)
+        callback({})
+      })
+      const consoleMessages: string[] = []
+      const window = new BrowserWindow({
+        show: false,
+        webPreferences: { partition }
+      })
+      window.webContents.on('console-message', (_event, _level, message) => {
+        consoleMessages.push(message)
+      })
+      try {
+        await window.loadFile(filePath)
+        const inspected = await window.webContents.executeJavaScript(`
+          (() => {
+            const link = [...document.querySelectorAll('.leafbook-book a')]
+              .find((anchor) => anchor.textContent.includes('跳到第二章标题'))
+            if (!(link instanceof HTMLAnchorElement)) {
+              return {
+                chapters: 0, hash: '', text: '', unsafeAnchors: 1,
+                resourceAttributes: 1, styleAttributes: 1, targetReached: false
+              }
+            }
+            link.click()
+            return {
+              chapters: document.querySelectorAll('.leafbook-chapter').length,
+              hash: location.hash,
+              text: document.body.textContent || '',
+              unsafeAnchors: [...document.querySelectorAll('a[href]')]
+                .filter((anchor) => !anchor.getAttribute('href').startsWith('#leafbook-')).length,
+              resourceAttributes: document.querySelectorAll(
+                '[src],[srcset],[poster],[background],[xlink\\\\:href]'
+              ).length,
+              styleAttributes: document.querySelectorAll('[style]').length,
+              missingFragmentLinks: [...document.querySelectorAll('.leafbook-toc a')]
+                .filter((anchor) => anchor.textContent.includes('不存在的小节')).length,
+              missingFragmentPlaceholders: [...document.querySelectorAll(
+                '.leafbook-toc .leafbook-broken-link'
+              )].filter((node) => node.textContent.includes('不存在的小节')).length,
+              missingBodyLinks: [...document.querySelectorAll('.leafbook-book a')]
+                .filter((anchor) => anchor.textContent.includes('缺失正文')).length,
+              missingBodyPlaceholders: [...document.querySelectorAll(
+                '.leafbook-book .leafbook-broken-link'
+              )].filter((node) => node.textContent.includes('缺失正文')).length,
+              missingChapterSections: [...document.querySelectorAll('.leafbook-chapter')]
+                .filter((section) => section.textContent.includes('缺失章节')).length,
+              targetReached: Boolean(document.querySelector(location.hash))
+            }
+          })()
+        `)
+        return { ...inspected, requests, consoleMessages }
+      } finally {
+        window.destroy()
+      }
+    }, output)
+    expect(result.chapters).toBe(2)
+    expect(result.hash).toBe('#leafbook-heading-3-1')
+    expect(result.targetReached).toBe(true)
+    expect(result.unsafeAnchors).toBe(0)
+    expect(result.resourceAttributes).toBe(0)
+    expect(result.styleAttributes).toBe(0)
+    expect(result.missingFragmentLinks).toBe(0)
+    expect(result.missingFragmentPlaceholders).toBe(1)
+    expect(result.missingBodyLinks).toBe(0)
+    expect(result.missingBodyPlaceholders).toBe(1)
+    expect(result.missingChapterSections).toBe(0)
+    expect(result.requests.filter((url: string) => /^https?:/i.test(url))).toEqual([])
+    expect(result.consoleMessages.filter((message: string) => /Refused to/i.test(message))).toEqual(
+      []
+    )
+    expect(result.text).toContain('本地图')
+    await expectNoRendererErrors(app)
+  } finally {
+    await app.close()
+    await fs.rm(root, { recursive: true, force: true })
+    await fs.rm(destination, { recursive: true, force: true })
+  }
+})
+
+test('generates an exact two-file offline website whose manifest hashes the loaded HTML', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'leafbook-e2e-site-book-'))
+  const destination = await fs.mkdtemp(path.join(os.tmpdir(), 'leafbook-e2e-site-output-'))
+  const output = path.join(destination, 'LeafBook-site')
+  await fs.writeFile(
+    path.join(root, 'SUMMARY.md'),
+    '- [第一章](one.md)\n- [别名](one.md#中文标题)\n- [缺失](missing.md)\n'
+  )
+  await fs.writeFile(
+    path.join(root, 'one.md'),
+    '# 中文标题\n\n[回到标题](one.md#中文标题)\n\n![本地图](private.png)\n'
+  )
+  const { app, page } = await launchElectron([], { suppressErrorDialog: true })
+  try {
+    await app.evaluate(
+      ({ dialog }, values) => {
+        dialog.showOpenDialog = async () =>
+          ({
+            canceled: false,
+            filePaths: [values.root],
+            bookmarks: []
+          }) as Electron.OpenDialogReturnValue
+        dialog.showSaveDialog = async () =>
+          ({ canceled: false, filePath: values.output }) as Electron.SaveDialogReturnValue
+        dialog.showMessageBox = async () =>
+          ({ response: 1, checkboxChecked: false }) as Electron.MessageBoxReturnValue
+      },
+      { root, output }
+    )
+    await clickMenuById(app, 'leafbookOpenBook')
+    await page.getByRole('button', { name: 'Generate Website…' }).click()
+    await expect(page.getByRole('status')).toContainText('Generated LeafBook-site')
+    expect((await fs.readdir(output)).sort()).toEqual(['index.html', 'leafbook-manifest.json'])
+    const html = await fs.readFile(path.join(output, 'index.html'))
+    const manifestBytes = await fs.readFile(path.join(output, 'leafbook-manifest.json'))
+    const expectedManifest = {
+      schemaVersion: 1,
+      generator: 'LeafBook',
+      files: [
+        {
+          path: 'index.html',
+          size: html.byteLength,
+          sha256: createHash('sha256').update(html).digest('hex')
+        }
+      ]
+    }
+    expect(JSON.parse(manifestBytes.toString('utf8'))).toEqual(expectedManifest)
+    expect(manifestBytes.toString('utf8')).toBe(`${JSON.stringify(expectedManifest, null, 2)}\n`)
+    expect(html.toString()).not.toContain(root)
+    expect(html.toString().match(/id="leafbook-chapter-1"/g)).toHaveLength(1)
+    const loaded = await app.evaluate(
+      async ({ BrowserWindow, session }, filePath) => {
+        const partition = `leafbook-site-e2e-${Date.now()}`
+        const isolated = session.fromPartition(partition)
+        const requests: string[] = []
+        isolated.webRequest.onBeforeRequest((details, callback) => {
+          requests.push(details.url)
+          callback({})
+        })
+        const errors: string[] = []
+        const window = new BrowserWindow({ show: false, webPreferences: { partition } })
+        window.webContents.on('console-message', (_event, level, message) => {
+          const knownNavigateWarning =
+            message === "Unrecognized Content-Security-Policy directive 'navigate-to'."
+          if (level >= 2 && !knownNavigateWarning) errors.push(message)
+        })
+        try {
+          await window.loadFile(filePath)
+          const inspected = await window.webContents.executeJavaScript(`
+            (() => {
+              const aliasLinks = [...document.querySelectorAll('.leafbook-toc a')]
+                .filter((anchor) => anchor.textContent === '别名')
+              const alias = aliasLinks[0]
+              const aliasHref = alias?.getAttribute('href') || ''
+              alias?.click()
+              return {
+                chapters: document.querySelectorAll('.leafbook-chapter').length,
+                scripts: document.querySelectorAll('script').length,
+                eventHandlerAttributes: [...document.querySelectorAll('*')]
+                  .flatMap((element) => [...element.attributes])
+                  .filter((attribute) => /^on/i.test(attribute.name)).length,
+                unsafeAttrs: document.querySelectorAll(
+                  '[src],[srcset],[poster],[background],[xlink\\\\:href],[style]'
+                ).length,
+                unsafeLinks: [...document.querySelectorAll('a[href]')]
+                  .filter((anchor) => !anchor.getAttribute('href').startsWith('#leafbook-')).length,
+                chinese: document.body.textContent.includes('中文标题'),
+                missingDisabled: [...document.querySelectorAll(
+                  '.leafbook-toc .leafbook-broken-link'
+                )].some((node) => node.textContent.includes('缺失')),
+                aliasLinks: aliasLinks.length,
+                aliasHref,
+                resolvedHash: location.hash,
+                aliasTargetResolved: Boolean(document.querySelector(location.hash))
+              }
+            })()
+          `)
+          return { ...inspected, requests, errors }
+        } finally {
+          window.destroy()
+        }
+      },
+      path.join(output, 'index.html')
+    )
+    expect(loaded).toMatchObject({
+      chapters: 1,
+      scripts: 0,
+      eventHandlerAttributes: 0,
+      unsafeAttrs: 0,
+      unsafeLinks: 0,
+      chinese: true,
+      missingDisabled: true,
+      aliasLinks: 1,
+      aliasHref: '#leafbook-heading-1-1',
+      resolvedHash: '#leafbook-heading-1-1',
+      aliasTargetResolved: true,
+      errors: []
+    })
+    expect(loaded.requests.filter((url: string) => /^https?:/i.test(url))).toEqual([])
+    await expectNoRendererErrors(app)
+  } finally {
+    await app.close()
+    await fs.rm(root, { recursive: true, force: true })
+    await fs.rm(destination, { recursive: true, force: true })
+  }
+})
+
 test('Escape closes the mobile contents drawer from a focused tree button', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'leafbook-e2e-mobile-book-'))
   await fs.writeFile(
@@ -151,6 +406,279 @@ test('Escape closes the mobile contents drawer from a focused tree button', asyn
       .toBe(true)
     await page.getByRole('button', { name: 'Back to Book' }).click()
     await expect(page.locator('.book-content')).toHaveAttribute('data-reading-ready', 'true')
+    await expectNoRendererErrors(app)
+  } finally {
+    await app.close()
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
+test('arranges an existing SUMMARY with keyboard, buttons, undo, save and zero-write cancel', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'leafbook-e2e-arrange-book-'))
+  const summaryPath = path.join(root, 'SUMMARY.md')
+  const originalSummary = '# Summary\n\n- [One](one.md)\n- [Two](two.md)\n- [Three](three.md)\n'
+  await fs.writeFile(summaryPath, originalSummary)
+  await fs.writeFile(path.join(root, 'one.md'), '# One\n\nFirst chapter.')
+  await fs.writeFile(path.join(root, 'two.md'), '# Two\n\nSecond chapter.')
+  await fs.writeFile(path.join(root, 'three.md'), '# Three\n\nThird chapter.')
+
+  const { app, page } = await launchElectron([], { suppressErrorDialog: true })
+  try {
+    await app.evaluate(({ dialog }, selectedRoot) => {
+      dialog.showOpenDialog = async () =>
+        ({
+          canceled: false,
+          filePaths: [selectedRoot],
+          bookmarks: []
+        }) as Electron.OpenDialogReturnValue
+    }, root)
+    await clickMenuById(app, 'leafbookOpenBook')
+    const arrange = page.getByRole('button', { name: 'Arrange', exact: true })
+    await expect(arrange).toBeVisible()
+    await arrange.click()
+    await expect(page.getByRole('heading', { name: 'Arrange book' })).toBeVisible()
+
+    await expect(page.locator('.arrangement-tree [tabindex="0"]')).toHaveCount(1)
+    await expect(page.locator('.arrangement-node-actions button:not([tabindex="-1"])')).toHaveCount(
+      0
+    )
+    const two = page.getByRole('treeitem', { name: 'Two, chapter entry' })
+    await two.focus()
+    await page.keyboard.press('Alt+ArrowUp')
+    await expect
+      .poll(() => page.locator('.arrangement-label .arrangement-title').allTextContents())
+      .toEqual(['Two', 'One', 'Three'])
+    await expect(page.getByText('Two: up completed.', { exact: true })).toBeAttached()
+    await expect(two).toBeFocused()
+    await expect(page.getByText('Unsaved changes')).toBeVisible()
+    await page.getByRole('button', { name: 'Undo', exact: true }).click()
+    await expect
+      .poll(() => page.locator('.arrangement-label .arrangement-title').allTextContents())
+      .toEqual(['One', 'Two', 'Three'])
+    await expect(two).toBeFocused()
+
+    await page.evaluate(() => {
+      const source = document
+        .querySelector<HTMLElement>('[aria-label="Two, chapter entry"]')
+        ?.closest<HTMLElement>('.arrangement-node')
+      if (!source) throw new Error('Arrangement drag source was unavailable.')
+      const transfer = new DataTransfer()
+      ;(
+        window as typeof window & { __leafbookDragTransfer?: DataTransfer }
+      ).__leafbookDragTransfer = transfer
+      source.dispatchEvent(new DragEvent('dragstart', { bubbles: true, dataTransfer: transfer }))
+    })
+    await page.evaluate(() => {
+      const source = document
+        .querySelector<HTMLElement>('[aria-label="Two, chapter entry"]')
+        ?.closest<HTMLElement>('.arrangement-node')
+      const target = document
+        .querySelector<HTMLElement>('[aria-label="One, chapter entry"]')
+        ?.closest<HTMLElement>('.arrangement-node')
+      const transfer = (window as typeof window & { __leafbookDragTransfer?: DataTransfer })
+        .__leafbookDragTransfer
+      if (!source || !target || !transfer) {
+        throw new Error('Arrangement drag endpoints were unavailable.')
+      }
+      for (const type of ['dragover', 'drop']) {
+        target.dispatchEvent(
+          new DragEvent(type, {
+            bubbles: true,
+            cancelable: true,
+            dataTransfer: transfer,
+            clientY: target.getBoundingClientRect().top + 1
+          })
+        )
+      }
+      source.dispatchEvent(new DragEvent('dragend', { bubbles: true, dataTransfer: transfer }))
+      delete (window as typeof window & { __leafbookDragTransfer?: DataTransfer })
+        .__leafbookDragTransfer
+    })
+    await expect
+      .poll(() => page.locator('.arrangement-label .arrangement-title').allTextContents())
+      .toEqual(['Two', 'One', 'Three'])
+    await page.getByRole('button', { name: 'Undo', exact: true }).click()
+    await expect
+      .poll(() => page.locator('.arrangement-label .arrangement-title').allTextContents())
+      .toEqual(['One', 'Two', 'Three'])
+
+    await page.getByRole('button', { name: 'Move Two up' }).click()
+    await page.getByRole('button', { name: 'Save contents' }).click()
+    await expect(page.getByRole('heading', { name: 'Arrange book' })).toHaveCount(0)
+    await expect
+      .poll(async () => {
+        const saved = await fs.readFile(summaryPath, 'utf8')
+        const twoIndex = saved.indexOf('- [Two](two.md)')
+        const oneIndex = saved.indexOf('- [One](one.md)')
+        const threeIndex = saved.indexOf('- [Three](three.md)')
+        return twoIndex >= 0 && twoIndex < oneIndex && oneIndex < threeIndex
+      })
+      .toBe(true)
+    await expect(page.locator('.leafbook-markdown')).toContainText('First chapter.')
+
+    const savedSummary = await fs.readFile(summaryPath, 'utf8')
+    await app.evaluate(({ BrowserWindow }) => {
+      BrowserWindow.getAllWindows()[0]?.setContentSize(650, 800)
+    })
+    await expect.poll(() => page.evaluate(() => innerWidth)).toBe(650)
+    await arrange.click()
+    await page.getByRole('button', { name: 'Move Three up' }).click()
+    await expect(page.getByText('Unsaved changes')).toBeVisible()
+    await page.getByRole('treeitem', { name: 'Three, chapter entry' }).focus()
+    await page.keyboard.press('Escape')
+    await expect(page.getByRole('heading', { name: 'Arrange book' })).toHaveCount(0)
+    expect(await fs.readFile(summaryPath, 'utf8')).toBe(savedSummary)
+    await expectNoRendererErrors(app)
+  } finally {
+    await app.close()
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
+test('announces a main-rejected arrangement without claiming success', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'leafbook-e2e-arrange-reject-'))
+  const summaryPath = path.join(root, 'SUMMARY.md')
+  const originalSummary =
+    '# Summary\n\n- [One](one.md)\n- [Two](two.md)\n \t- [Mixed child](child.md)\n'
+  await fs.writeFile(summaryPath, originalSummary)
+  await fs.writeFile(path.join(root, 'one.md'), '# One')
+  await fs.writeFile(path.join(root, 'two.md'), '# Two')
+  await fs.writeFile(path.join(root, 'child.md'), '# Child')
+
+  const { app, page } = await launchElectron([], { suppressErrorDialog: true })
+  try {
+    await app.evaluate(({ dialog }, selectedRoot) => {
+      dialog.showOpenDialog = async () =>
+        ({
+          canceled: false,
+          filePaths: [selectedRoot],
+          bookmarks: []
+        }) as Electron.OpenDialogReturnValue
+    }, root)
+    await clickMenuById(app, 'leafbookOpenBook')
+    await page.getByRole('button', { name: 'Arrange', exact: true }).click()
+    const two = page.getByRole('treeitem', { name: 'Two, chapter entry' })
+    await two.focus()
+    await page.keyboard.press('Alt+ArrowRight')
+
+    await expect(page.getByRole('alert')).toContainText(
+      'Mixed tab and space indentation cannot be reparented.'
+    )
+    await expect(page.locator('.arrangement-panel .sr-only')).toHaveText(
+      'Mixed tab and space indentation cannot be reparented.'
+    )
+    await expect(page.getByText('Two: indent completed.', { exact: true })).toHaveCount(0)
+    await expect(page.getByText('No changes', { exact: true })).toBeVisible()
+    expect(await fs.readFile(summaryPath, 'utf8')).toBe(originalSummary)
+    await expectNoRendererErrors(app)
+  } finally {
+    await app.close()
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
+test('keeps nested arrangement keyboard and drag events scoped to their own treeitem row', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'leafbook-e2e-arrange-nested-'))
+  const summaryPath = path.join(root, 'SUMMARY.md')
+  const originalSummary =
+    '# Summary\n\n## Part\n\n- [Tail](tail.md)\n- [Parent](parent.md)\n  - [Child A](a.md)\n  - [Child B](b.md)\n'
+  await fs.writeFile(summaryPath, originalSummary)
+  for (const name of ['tail', 'parent', 'a', 'b']) {
+    await fs.writeFile(path.join(root, `${name}.md`), `# ${name}`)
+  }
+
+  const { app, page } = await launchElectron([], { suppressErrorDialog: true })
+  const titles = () => page.locator('.arrangement-label .arrangement-title').allTextContents()
+  const drag = async (
+    sourceLabel: string,
+    targetLabel: string,
+    placement: 'before' | 'after'
+  ): Promise<void> => {
+    await page.evaluate((sourceName) => {
+      const source = [...document.querySelectorAll<HTMLElement>('[role="treeitem"]')].find(
+        (element) => element.getAttribute('aria-label') === sourceName
+      )
+      if (!source) throw new Error('Nested arrangement drag source was unavailable.')
+      const transfer = new DataTransfer()
+      ;(window as typeof window & { __leafbookNestedDrag?: DataTransfer }).__leafbookNestedDrag =
+        transfer
+      source.dispatchEvent(new DragEvent('dragstart', { bubbles: true, dataTransfer: transfer }))
+    }, sourceLabel)
+    await page.evaluate(
+      ({ sourceName, targetName, dropPlacement }) => {
+        const items = [...document.querySelectorAll<HTMLElement>('[role="treeitem"]')]
+        const source = items.find((element) => element.getAttribute('aria-label') === sourceName)
+        const target = items.find((element) => element.getAttribute('aria-label') === targetName)
+        const row = target?.querySelector<HTMLElement>(':scope > .arrangement-row')
+        const transfer = (window as typeof window & { __leafbookNestedDrag?: DataTransfer })
+          .__leafbookNestedDrag
+        if (!source || !target || !row || !transfer) {
+          throw new Error('Nested arrangement drag target was unavailable.')
+        }
+        const bounds = row.getBoundingClientRect()
+        const clientY = dropPlacement === 'before' ? bounds.top + 1 : bounds.bottom - 1
+        for (const type of ['dragover', 'drop']) {
+          target.dispatchEvent(
+            new DragEvent(type, {
+              bubbles: true,
+              cancelable: true,
+              dataTransfer: transfer,
+              clientY
+            })
+          )
+        }
+        source.dispatchEvent(new DragEvent('dragend', { bubbles: true, dataTransfer: transfer }))
+        delete (window as typeof window & { __leafbookNestedDrag?: DataTransfer })
+          .__leafbookNestedDrag
+      },
+      { sourceName: sourceLabel, targetName: targetLabel, dropPlacement: placement }
+    )
+  }
+
+  try {
+    await app.evaluate(({ dialog }, selectedRoot) => {
+      dialog.showOpenDialog = async () =>
+        ({
+          canceled: false,
+          filePaths: [selectedRoot],
+          bookmarks: []
+        }) as Electron.OpenDialogReturnValue
+    }, root)
+    await clickMenuById(app, 'leafbookOpenBook')
+    await page.getByRole('button', { name: 'Arrange', exact: true }).click()
+    await expect.poll(titles).toEqual(['Part', 'Tail', 'Parent', 'Child A', 'Child B'])
+
+    const childB = page.getByRole('treeitem', { name: 'Child B, chapter entry' })
+    await childB.focus()
+    await page.keyboard.press('Alt+ArrowUp')
+    await expect.poll(titles).toEqual(['Part', 'Tail', 'Parent', 'Child B', 'Child A'])
+    await expect(page.getByText('1 operations', { exact: true })).toBeVisible()
+    await page.getByRole('button', { name: 'Undo', exact: true }).click()
+    await expect.poll(titles).toEqual(['Part', 'Tail', 'Parent', 'Child A', 'Child B'])
+
+    await drag('Child B, chapter entry', 'Child A, chapter entry', 'before')
+    await expect.poll(titles).toEqual(['Part', 'Tail', 'Parent', 'Child B', 'Child A'])
+    await expect(page.getByText('2 operations', { exact: true })).toBeVisible()
+    await page.getByRole('button', { name: 'Undo', exact: true }).click()
+    await expect.poll(titles).toEqual(['Part', 'Tail', 'Parent', 'Child A', 'Child B'])
+
+    await drag('Tail, chapter entry', 'Parent, chapter entry', 'after')
+    await expect.poll(titles).toEqual(['Part', 'Parent', 'Child A', 'Child B', 'Tail'])
+    await expect(page.getByText('3 operations', { exact: true })).toBeVisible()
+    await page.getByRole('treeitem', { name: 'Child A, chapter entry' }).focus()
+    await page.keyboard.press('Escape')
+    await expect(page.getByRole('heading', { name: 'Arrange book' })).toHaveCount(0)
+    expect(await fs.readFile(summaryPath, 'utf8')).toBe(originalSummary)
+
+    const arrange = page.getByRole('button', { name: 'Arrange', exact: true })
+    for (let cycle = 0; cycle < 5; cycle += 1) {
+      await arrange.click()
+      await expect(page.getByRole('heading', { name: 'Arrange book' })).toBeVisible()
+      await page.getByRole('treeitem', { name: 'Parent, chapter entry' }).focus()
+      await page.keyboard.press('Escape')
+      await expect(page.getByRole('heading', { name: 'Arrange book' })).toHaveCount(0)
+    }
+    expect(await fs.readFile(summaryPath, 'utf8')).toBe(originalSummary)
     await expectNoRendererErrors(app)
   } finally {
     await app.close()

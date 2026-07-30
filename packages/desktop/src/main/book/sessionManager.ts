@@ -1,18 +1,29 @@
 /* eslint-disable @stylistic/indent, @stylistic/space-before-function-paren */
 import path from 'path'
 import fs from 'fs/promises'
-import fsSync, { constants as fsConstants } from 'fs'
+import fsSync, { constants as fsConstants, type BigIntStats } from 'fs'
 import { createHash, randomUUID } from 'crypto'
 import {
   BrowserWindow,
   dialog,
-  shell,
   type IpcMainInvokeEvent,
-  type OpenDialogOptions
+  type OpenDialogOptions,
+  type SaveDialogOptions
 } from 'electron'
 import Store from 'electron-store'
 import { loadBookFromDirectory, safelyReadBookChapter } from './filesystem'
+import { BookArrangementManager } from './arrangementManager'
 import { resolveBookTarget } from 'common/book/path'
+import { validateBookExportHtml } from 'common/book/exportPolicy'
+import {
+  BOOK_WEBSITE_FILES,
+  BOOK_WEBSITE_INDEX,
+  BOOK_WEBSITE_MANIFEST,
+  createBookWebsiteManifest,
+  parseBookWebsiteManifest,
+  serializeBookWebsiteManifest,
+  sha256Bytes
+} from 'common/book/websitePolicy'
 import {
   createBookSearchDocumentAsync,
   matchBookSearchDocumentAsync,
@@ -22,10 +33,21 @@ import {
 import type { BookNavigationNode } from 'common/book/model'
 import type {
   BookChapterDto,
+  BookArrangementApplyRequestDto,
+  BookArrangementDto,
+  BookArrangementSaveDto,
+  BookArrangementSaveRequestDto,
   BookEditDto,
   BookEditFormatDto,
   BookEditSaveDto,
   BookEditSaveRequestDto,
+  BookExportCommitRequestDto,
+  BookExportDocumentDto,
+  BookExportSaveDto,
+  BookExportSnapshotDto,
+  BookWebsiteCommitRequestDto,
+  BookWebsiteSaveDto,
+  BookWebsiteSnapshotDto,
   BookLinkNavigationDto,
   BookReadingProgressDto,
   BookReaderNodeDto,
@@ -54,6 +76,13 @@ const MAX_ACTIVE_SEARCH_OWNERS = 8
 const SEARCH_INDEX_RESERVATION_BYTES = MAX_SEARCH_INDEX_BYTES
 const SEARCH_ROOT_CHECKPOINT_INTERVAL = 8
 const MAX_EDIT_BYTES = 8 * 1024 * 1024
+const MAX_EXPORT_DOCUMENTS = 2_000
+const MAX_EXPORT_SOURCE_BYTES = 32 * 1024 * 1024
+const MAX_EXPORT_HTML_BYTES = 64 * 1024 * 1024
+const MAX_ACTIVE_EXPORT_OWNERS = 4
+const MAX_EXPORT_LINKS = 16_384
+const MAX_EXPORT_LINKS_PER_DOCUMENT = 1_024
+const EXPORT_HASH_CHUNK_BYTES = 64 * 1024
 
 interface PersistedChapterPosition {
   targetKey: string
@@ -103,6 +132,7 @@ interface BookSession {
   opaqueNodeIds: Map<string, string>
   readableNodeIds: string[]
   searchSources: SearchSource[]
+  summaryPath: 'SUMMARY.md' | 'SUMMARY.markdown' | null
 }
 
 interface SearchSource {
@@ -197,11 +227,78 @@ interface BookEditLease {
   revokeAfterCommit: boolean
 }
 
+interface ExportSourceRevision {
+  path: string
+  revision: string | null
+  byteLength: number
+}
+
+interface BookExportLease {
+  exportId: string
+  ownerId: number
+  ownerGeneration: number
+  session: BookSession
+  sessionGeneration: number
+  rootIdentity: RootIdentity
+  targetPath: string
+  parentPath: string
+  parentIdentity: FileIdentity
+  targetIdentity: FileIdentity | null
+  targetLinkCount: bigint | null
+  kind: 'html' | 'website'
+  websiteTargetState: 'absent' | 'empty' | 'owned' | null
+  websiteTargetFiles: WebsiteFileIdentities | null
+  sources: ExportSourceRevision[]
+  controller: AbortController
+  parentFd: number | null
+  generation: number
+  operationGeneration: number
+  operation:
+    | Promise<BookReaderResult<BookExportSaveDto>>
+    | Promise<BookReaderResult<BookWebsiteSaveDto>>
+    | null
+  state: 'ready' | 'validating' | 'writing' | 'committing'
+  criticalCommit: boolean
+  revokeAfterCommit: boolean
+}
+
+interface WebsiteDirectoryInspection {
+  state: 'absent' | 'empty' | 'owned'
+  identity: FileIdentity | null
+  linkCount: bigint | null
+  files: WebsiteFileIdentities | null
+}
+
+interface WebsiteFileIdentities {
+  index: FileIdentity
+  manifest: FileIdentity
+  indexSha256: string
+  manifestSha256: string
+}
+
 export interface BookSessionManagerTestHooks {
   afterEditRead?: (operation: 'begin' | 'reload') => void | Promise<void>
   afterEditTempSync?: () => void | Promise<void>
   beforeEditCommitCritical?: () => void | Promise<void>
   editCommitCriticalStarted?: () => void
+  afterArrangementSave?: () => void | Promise<void>
+  beforeExportParentPin?: () => void | Promise<void>
+  afterExportSourcePass?: (pass: 1 | 2) => void | Promise<void>
+  afterExportTempOpen?: (tempPath?: string) => void | Promise<void>
+  afterExportTempSync?: (tempPath?: string) => void | Promise<void>
+  beforeExportCommitCritical?: () => void | Promise<void>
+  exportCommitCriticalStarted?: () => void
+  afterExportRename?: () => void
+  beforeWebsiteFirstRename?: (stagePath?: string, targetPath?: string) => void
+  beforeWebsiteStageRename?: (stagePath?: string, targetPath?: string) => void
+  afterWebsiteStageRename?: (targetPath?: string) => void
+  beforeWebsiteRollback?: (backupPath?: string, targetPath?: string) => void
+  beforeWebsiteBackupCleanup?: (backupPath?: string) => void
+  duringWebsiteBackupCleanup?: (backupPath?: string) => void
+  beforeWebsiteIndexFinalInspection?: (backupPath?: string) => void
+  afterWebsiteIndexFinalInspection?: (backupPath?: string) => void
+  beforeWebsiteManifestFinalInspection?: (backupPath?: string) => void
+  afterWebsiteManifestFinalInspection?: (backupPath?: string) => void
 }
 
 const error = <T>(
@@ -236,7 +333,26 @@ const structuredError = (
     | 'edit-too-large'
     | 'edit-mixed-line-endings'
     | 'edit-commit-uncertain'
-    | 'edit-write-failed',
+    | 'edit-write-failed'
+    | 'arrangement-not-found'
+    | 'arrangement-read-only'
+    | 'arrangement-conflict'
+    | 'arrangement-encoding'
+    | 'arrangement-too-large'
+    | 'arrangement-commit-uncertain'
+    | 'arrangement-write-failed'
+    | 'export-busy'
+    | 'export-too-large'
+    | 'export-source-changed'
+    | 'export-invalid-output'
+    | 'export-write-failed'
+    | 'website-busy'
+    | 'website-too-large'
+    | 'website-source-changed'
+    | 'website-invalid-output'
+    | 'website-unsafe-target'
+    | 'website-commit-uncertain'
+    | 'website-write-failed',
   message: string,
   overwriteToken?: string,
   committed?: boolean
@@ -254,6 +370,23 @@ const validOpaqueId = (value: unknown): value is string =>
   /^[a-zA-Z0-9-]+$/.test(value)
 
 const hashBytes = (value: Uint8Array): string => createHash('sha256').update(value).digest('hex')
+
+const markdownLinkHrefs = (markdown: string): string[] => {
+  const values = new Set<string>()
+  const inline = /!?\[[^\]\n]{0,4096}\]\(\s*(?:<([^>\n]{1,8192})>|([^\s)\n]{1,8192}))/g
+  for (const match of markdown.matchAll(inline)) {
+    if (match[0].startsWith('!')) continue
+    const href = match[1] ?? match[2]
+    if (href) values.add(href)
+    if (values.size >= MAX_EXPORT_LINKS_PER_DOCUMENT) break
+  }
+  const autolink = /<((?:https?|mailto):[^>\n]{1,8192})>/gi
+  for (const match of markdown.matchAll(autolink)) {
+    if (match[1]) values.add(match[1])
+    if (values.size >= MAX_EXPORT_LINKS_PER_DOCUMENT) break
+  }
+  return [...values]
+}
 
 const sameFileIdentity = (left: FileIdentity, right: FileIdentity): boolean =>
   left.dev === right.dev && left.ino === right.ino
@@ -273,6 +406,285 @@ const fileIdentity = async (
     return { dev: stat.dev, ino: stat.ino, mode: Number(stat.mode) }
   } catch {
     return null
+  }
+}
+
+const fileIdentitySync = (targetPath: string, requireDirectory = false): FileIdentity | null => {
+  try {
+    const stat = fsSync.lstatSync(targetPath, { bigint: true })
+    if (stat.isSymbolicLink() || (requireDirectory ? !stat.isDirectory() : !stat.isFile())) {
+      return null
+    }
+    return { dev: stat.dev, ino: stat.ino, mode: Number(stat.mode) }
+  } catch {
+    return null
+  }
+}
+
+const readPinnedRegularFileSync = (
+  targetPath: string,
+  maxBytes: number
+): { bytes: Buffer; identity: FileIdentity } | null => {
+  let fd: number | null = null
+  try {
+    const pathname = fsSync.lstatSync(targetPath, { bigint: true })
+    if (
+      pathname.isSymbolicLink() ||
+      !pathname.isFile() ||
+      pathname.nlink !== 1n ||
+      pathname.size < 0n ||
+      pathname.size > BigInt(maxBytes)
+    ) {
+      return null
+    }
+    fd = fsSync.openSync(
+      targetPath,
+      fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0) | (fsConstants.O_NONBLOCK ?? 0)
+    )
+    const pinned = fsSync.fstatSync(fd, { bigint: true })
+    if (
+      !pinned.isFile() ||
+      pinned.nlink !== 1n ||
+      pinned.dev !== pathname.dev ||
+      pinned.ino !== pathname.ino ||
+      pinned.size !== pathname.size
+    ) {
+      return null
+    }
+    const bytes = Buffer.alloc(Number(pinned.size))
+    let offset = 0
+    while (offset < bytes.length) {
+      const count = fsSync.readSync(fd, bytes, offset, bytes.length - offset, offset)
+      if (count <= 0) return null
+      offset += count
+    }
+    const after = fsSync.fstatSync(fd, { bigint: true })
+    const current = fsSync.lstatSync(targetPath, { bigint: true })
+    if (
+      after.dev !== pinned.dev ||
+      after.ino !== pinned.ino ||
+      after.size !== pinned.size ||
+      current.isSymbolicLink() ||
+      current.dev !== pinned.dev ||
+      current.ino !== pinned.ino ||
+      current.size !== pinned.size ||
+      current.nlink !== 1n
+    ) {
+      return null
+    }
+    return {
+      bytes,
+      identity: { dev: pinned.dev, ino: pinned.ino, mode: Number(pinned.mode) }
+    }
+  } catch {
+    return null
+  } finally {
+    if (fd !== null) {
+      try {
+        fsSync.closeSync(fd)
+      } catch {
+        // Inspection is already failing closed.
+      }
+    }
+  }
+}
+
+const inspectWebsiteDirectorySync = (targetPath: string): WebsiteDirectoryInspection | null => {
+  try {
+    const stat = fsSync.lstatSync(targetPath, { bigint: true })
+    if (stat.isSymbolicLink() || !stat.isDirectory()) return null
+    const identity = { dev: stat.dev, ino: stat.ino, mode: Number(stat.mode) }
+    const entries = fsSync.readdirSync(targetPath)
+    if (entries.length === 0) {
+      return { state: 'empty', identity, linkCount: stat.nlink, files: null }
+    }
+    if (
+      entries.length !== BOOK_WEBSITE_FILES.length ||
+      !BOOK_WEBSITE_FILES.every((name) => entries.includes(name))
+    ) {
+      return null
+    }
+    const manifestRead = readPinnedRegularFileSync(
+      path.join(targetPath, BOOK_WEBSITE_MANIFEST),
+      16 * 1024
+    )
+    const indexRead = readPinnedRegularFileSync(
+      path.join(targetPath, BOOK_WEBSITE_INDEX),
+      MAX_EXPORT_HTML_BYTES
+    )
+    if (!manifestRead || !indexRead) return null
+    const manifest = parseBookWebsiteManifest(manifestRead.bytes)
+    const file = manifest?.files[0]
+    if (
+      !file ||
+      file.path !== BOOK_WEBSITE_INDEX ||
+      file.size !== indexRead.bytes.byteLength ||
+      file.sha256 !== sha256Bytes(indexRead.bytes) ||
+      !validateBookExportHtml(indexRead.bytes.toString('utf8'))
+    ) {
+      return null
+    }
+    const after = fsSync.lstatSync(targetPath, { bigint: true })
+    if (
+      after.isSymbolicLink() ||
+      !after.isDirectory() ||
+      after.dev !== stat.dev ||
+      after.ino !== stat.ino ||
+      after.nlink !== stat.nlink
+    ) {
+      return null
+    }
+    return {
+      state: 'owned',
+      identity,
+      linkCount: stat.nlink,
+      files: {
+        index: indexRead.identity,
+        manifest: manifestRead.identity,
+        indexSha256: sha256Bytes(indexRead.bytes),
+        manifestSha256: sha256Bytes(manifestRead.bytes)
+      }
+    }
+  } catch (inspectionError) {
+    if ((inspectionError as NodeJS.ErrnoException).code === 'ENOENT') {
+      return { state: 'absent', identity: null, linkCount: null, files: null }
+    }
+    return null
+  }
+}
+
+const sameWebsiteFiles = (
+  left: WebsiteFileIdentities | null,
+  right: WebsiteFileIdentities | null
+): boolean =>
+  left === null
+    ? right === null
+    : Boolean(
+        right &&
+        sameFileIdentity(left.index, right.index) &&
+        sameFileIdentity(left.manifest, right.manifest) &&
+        left.indexSha256 === right.indexSha256 &&
+        left.manifestSha256 === right.manifestSha256
+      )
+
+const sameWebsiteInspection = (
+  inspection: WebsiteDirectoryInspection | null,
+  state: 'absent' | 'empty' | 'owned',
+  identity: FileIdentity | null,
+  linkCount: bigint | null,
+  files: WebsiteFileIdentities | null
+): boolean =>
+  Boolean(
+    inspection &&
+    inspection.state === state &&
+    (identity === null
+      ? inspection.identity === null
+      : inspection.identity !== null && sameFileIdentity(inspection.identity, identity)) &&
+    inspection.linkCount === linkCount &&
+    sameWebsiteFiles(inspection.files, files)
+  )
+
+const rootIdentitySync = (rootPath: string): RootIdentity | null => {
+  try {
+    const realPath = fsSync.realpathSync(rootPath)
+    const stat = fsSync.statSync(realPath, { bigint: true })
+    if (!stat.isDirectory()) return null
+    return { realPath, dev: stat.dev, ino: stat.ino }
+  } catch {
+    return null
+  }
+}
+
+const exportSourceRevisionSync = (
+  root: RootIdentity,
+  source: ExportSourceRevision,
+  aggregateBytes: number
+): { revision: string | null; aggregateBytes: number } | undefined => {
+  let handle: number | null = null
+  try {
+    const candidate = path.resolve(root.realPath, source.path)
+    const relative = path.relative(root.realPath, candidate)
+    if (
+      relative === '' ||
+      relative === '..' ||
+      relative.startsWith(`..${path.sep}`) ||
+      path.isAbsolute(relative) ||
+      fsSync.realpathSync(candidate) !== candidate
+    ) {
+      return undefined
+    }
+    const pathnameBefore = fsSync.lstatSync(candidate, { bigint: true })
+    if (
+      pathnameBefore.isSymbolicLink() ||
+      !pathnameBefore.isFile() ||
+      pathnameBefore.size < 0n ||
+      pathnameBefore.size > BigInt(MAX_EXPORT_SOURCE_BYTES)
+    ) {
+      return undefined
+    }
+    handle = fsSync.openSync(
+      candidate,
+      fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0) | (fsConstants.O_NONBLOCK ?? 0)
+    )
+    const before = fsSync.fstatSync(handle, { bigint: true })
+    if (
+      !before.isFile() ||
+      before.dev !== pathnameBefore.dev ||
+      before.ino !== pathnameBefore.ino ||
+      before.size < 0n ||
+      before.size > BigInt(MAX_EXPORT_SOURCE_BYTES) ||
+      (before.size !== BigInt(source.byteLength) && before.size !== BigInt(source.byteLength + 3))
+    ) {
+      return undefined
+    }
+    const byteLength = Number(before.size)
+    const nextAggregate = aggregateBytes + byteLength
+    if (
+      !Number.isSafeInteger(byteLength) ||
+      nextAggregate > MAX_EXPORT_SOURCE_BYTES ||
+      nextAggregate < aggregateBytes
+    ) {
+      return undefined
+    }
+    const hash = createHash('sha256')
+    const chunk = Buffer.allocUnsafe(Math.min(EXPORT_HASH_CHUNK_BYTES, Math.max(1, byteLength)))
+    let offset = 0
+    let bomChecked = false
+    while (offset < byteLength) {
+      const requested = Math.min(chunk.length, byteLength - offset)
+      const read = fsSync.readSync(handle, chunk, 0, requested, offset)
+      if (read !== requested) return undefined
+      const bomBytes =
+        !bomChecked && read >= 3 && chunk[0] === 0xef && chunk[1] === 0xbb && chunk[2] === 0xbf
+          ? 3
+          : 0
+      bomChecked = true
+      hash.update(chunk.subarray(bomBytes, read))
+      offset += read
+    }
+    if (fsSync.readSync(handle, chunk, 0, 1, byteLength) !== 0) return undefined
+    const after = fsSync.fstatSync(handle, { bigint: true })
+    if (
+      !after.isFile() ||
+      after.dev !== before.dev ||
+      after.ino !== before.ino ||
+      after.size !== before.size ||
+      after.mode !== before.mode ||
+      after.nlink !== before.nlink ||
+      after.mtimeNs !== before.mtimeNs ||
+      after.ctimeNs !== before.ctimeNs
+    ) {
+      return undefined
+    }
+    return { revision: hash.digest('hex'), aggregateBytes: nextAggregate }
+  } catch (sourceError) {
+    return (sourceError as NodeJS.ErrnoException).code === 'ENOENT' &&
+      source.revision === null &&
+      source.byteLength === 0
+      ? { revision: null, aggregateBytes }
+      : undefined
+  } finally {
+    if (handle !== null) fsSync.closeSync(handle)
   }
 }
 
@@ -488,6 +900,9 @@ export class BookSessionManager {
   private readonly searchBuilds = new Map<BookSession, SearchBuild>()
   private readonly activeSearches = new Map<number, ActiveSearch>()
   private readonly editLeases = new Map<string, BookEditLease>()
+  private readonly arrangements = new BookArrangementManager()
+  private readonly exportLeases = new Map<string, BookExportLease>()
+  private readonly exportPreparations = new Set<number>()
   private searchCacheBytes = 0
   private searchBuildReservationBytes = 0
 
@@ -495,7 +910,10 @@ export class BookSessionManager {
     userDataPath: string,
     private readonly loadBook: typeof loadBookFromDirectory = loadBookFromDirectory,
     private readonly readBookChapter: typeof safelyReadBookChapter = safelyReadBookChapter,
-    private readonly openExternal: typeof shell.openExternal = shell.openExternal,
+    private readonly openExternal: (
+      ownerId: number,
+      target: string
+    ) => Promise<boolean> = async () => false,
     private readonly testHooks: BookSessionManagerTestHooks = {}
   ) {
     this.store = new Store<BookshelfSchema>({
@@ -582,6 +1000,8 @@ export class BookSessionManager {
         session.generation += 1
         this.revokeSessionSearch(session)
         this.revokeSessionEdits(sessionId)
+        this.arrangements.revokeSession(sessionId)
+        this.revokeSessionExports(sessionId)
         this.sessions.delete(sessionId)
       }
       return 'invalid'
@@ -614,6 +1034,10 @@ export class BookSessionManager {
     }
     for (const lease of this.editLeases.values()) {
       if (lease.ownerId === ownerId) this.revokeEditLease(lease)
+    }
+    this.arrangements.cleanupOwner(ownerId)
+    for (const lease of this.exportLeases.values()) {
+      if (lease.ownerId === ownerId) this.revokeExport(lease)
     }
   }
 
@@ -918,7 +1342,12 @@ export class BookSessionManager {
       chapterNodeByPath,
       opaqueNodeIds,
       readableNodeIds,
-      searchSources
+      searchSources,
+      summaryPath:
+        result.book.navigation.summaryPath === 'SUMMARY.md' ||
+        result.book.navigation.summaryPath === 'SUMMARY.markdown'
+          ? result.book.navigation.summaryPath
+          : null
     }
   }
 
@@ -932,6 +1361,8 @@ export class BookSessionManager {
       oldest[1].generation += 1
       this.revokeSessionSearch(oldest[1])
       this.revokeSessionEdits(oldest[0])
+      this.arrangements.revokeSession(oldest[0])
+      this.revokeSessionExports(oldest[0])
       this.sessions.delete(oldest[0])
     }
     return session.dto
@@ -965,6 +1396,8 @@ export class BookSessionManager {
     initial.generation += 1
     const sessionGeneration = initial.generation
     this.revokeSessionEdits(sessionId)
+    this.arrangements.revokeSession(sessionId)
+    this.revokeSessionExports(sessionId)
     const operation = this.refreshSession(sessionId, ownerId, initial, sessionGeneration)
     this.refreshes.set(sessionId, operation)
     try {
@@ -1051,6 +1484,8 @@ export class BookSessionManager {
     session.generation += 1
     this.revokeSessionSearch(session)
     this.revokeSessionEdits(sessionId)
+    this.arrangements.revokeSession(sessionId)
+    this.revokeSessionExports(sessionId)
     this.sessions.delete(sessionId)
     return { ok: true, value: true }
   }
@@ -1511,6 +1946,8 @@ export class BookSessionManager {
           session.generation += 1
           this.revokeSessionSearch(session)
           this.revokeSessionEdits(sessionId)
+          this.arrangements.revokeSession(sessionId)
+          this.revokeSessionExports(sessionId)
           this.sessions.delete(sessionId)
         }
       }
@@ -1559,6 +1996,115 @@ export class BookSessionManager {
     for (const lease of this.editLeases.values()) {
       if (lease.sessionId === sessionId) this.revokeEditLease(lease)
     }
+  }
+
+  async beginArrangement(
+    sessionId: unknown,
+    ownerId: number = 0
+  ): Promise<BookReaderResult<BookArrangementDto>> {
+    if (!validOpaqueId(sessionId)) {
+      return error('invalid-request', 'Invalid book arrangement request.')
+    }
+    const session = this.ownedSession(sessionId, ownerId)
+    if (!session) return error('session-not-found', 'This book session has expired.')
+    if (session.dto.navigationSource !== 'summary' || !session.summaryPath) {
+      return error('arrangement-read-only', 'Only a book with an existing SUMMARY can be arranged.')
+    }
+    if ((await this.validateSessionRoot(sessionId, session, false)) !== 'valid') {
+      return error('book-unavailable', 'This book folder changed and cannot be arranged.')
+    }
+    const generation = session.generation
+    return this.arrangements.begin({
+      ownerId,
+      sessionId,
+      sessionGeneration: generation,
+      rootPath: session.rootPath,
+      rootIdentity: session.rootIdentity,
+      summaryPath: session.summaryPath,
+      isCurrent: () =>
+        this.ownedSession(sessionId, ownerId) === session && session.generation === generation
+    })
+  }
+
+  applyArrangement(
+    request: BookArrangementApplyRequestDto,
+    ownerId: number = 0
+  ): BookReaderResult<BookArrangementDto> {
+    return this.arrangements.apply(request, ownerId)
+  }
+
+  undoArrangement(
+    arrangementId: unknown,
+    ownerId: number = 0
+  ): BookReaderResult<BookArrangementDto> {
+    return this.arrangements.undo(arrangementId, ownerId)
+  }
+
+  async saveArrangement(
+    request: BookArrangementSaveRequestDto,
+    ownerId: number = 0
+  ): Promise<BookReaderResult<BookArrangementSaveDto>> {
+    const sessionId = this.arrangements.sessionIdFor(request.arrangementId, ownerId)
+    if (!sessionId) {
+      return error('arrangement-not-found', 'This arrangement draft has expired.')
+    }
+    const session = this.ownedSession(sessionId, ownerId)
+    if (!session) return error('session-not-found', 'This book session has expired.')
+    const generation = session.generation
+    let held = false
+    try {
+      const saved = await this.arrangements.save(request, ownerId, true)
+      if (!saved.ok) return saved
+      held = true
+      await this.testHooks.afterArrangementSave?.()
+      if (this.ownedSession(sessionId, ownerId) !== session) return saved
+      try {
+        const result = await this.loadBook(session.rootPath)
+        if (
+          this.ownedSession(sessionId, ownerId) !== session ||
+          session.generation !== generation ||
+          result.diagnostics.some((item) => item.code === 'scan-root-error')
+        ) {
+          return saved
+        }
+        const rootStatus = await this.validateSessionRoot(sessionId, session, false)
+        if (
+          rootStatus !== 'valid' ||
+          this.ownedSession(sessionId, ownerId) !== session ||
+          session.generation !== generation
+        ) {
+          return saved
+        }
+        const replacement = this.createSession(
+          session.libraryId,
+          session.rootIdentity,
+          ownerId,
+          result,
+          session,
+          sessionId
+        )
+        replacement.generation = generation + 1
+        session.generation = replacement.generation
+        this.revokeSessionSearch(session)
+        this.revokeSessionEdits(sessionId)
+        this.arrangements.revokeSession(sessionId)
+        this.revokeSessionExports(sessionId)
+        this.sessions.set(sessionId, replacement)
+        saved.value.session = replacement.dto
+        return saved
+      } catch {
+        return saved
+      }
+    } finally {
+      if (held) {
+        this.arrangements.close(request.arrangementId, ownerId)
+        this.arrangements.finishSave(request.arrangementId, ownerId)
+      }
+    }
+  }
+
+  closeArrangement(arrangementId: unknown, ownerId: number = 0): BookReaderResult<true> {
+    return this.arrangements.close(arrangementId, ownerId)
   }
 
   private async pathAncestry(
@@ -1878,7 +2424,8 @@ export class BookSessionManager {
         fsConstants.O_WRONLY |
           fsConstants.O_CREAT |
           fsConstants.O_EXCL |
-          (fsConstants.O_NOFOLLOW ?? 0),
+          (fsConstants.O_NOFOLLOW ?? 0) |
+          (fsConstants.O_NONBLOCK ?? 0),
         lease.targetIdentity.mode & 0o777
       )
       if (!this.leaseIsCurrent(lease, generation, operationGeneration)) return null
@@ -2123,6 +2670,8 @@ export class BookSessionManager {
       }
     }
     this.revokeSessionSearch(session)
+    this.arrangements.revokeSession(lease.sessionId)
+    this.revokeSessionExports(lease.sessionId)
     this.sessions.set(lease.sessionId, replacement)
     lease.session = replacement
     lease.sessionGeneration = replacement.generation
@@ -2452,6 +3001,1361 @@ export class BookSessionManager {
     })
   }
 
+  private revokeExport(lease: BookExportLease): void {
+    lease.generation += 1
+    lease.controller.abort()
+    if (lease.operation || lease.criticalCommit) {
+      lease.revokeAfterCommit = true
+      if (this.exportLeases.get(lease.exportId) === lease) {
+        this.exportLeases.delete(lease.exportId)
+      }
+      return
+    }
+    if (this.exportLeases.get(lease.exportId) === lease) {
+      this.exportLeases.delete(lease.exportId)
+    }
+    if (lease.parentFd !== null) {
+      try {
+        fsSync.closeSync(lease.parentFd)
+      } catch {
+        // A prior revocation may already have closed this pinned descriptor.
+      }
+      lease.parentFd = null
+    }
+  }
+
+  private revokeSessionExports(sessionId: string): void {
+    for (const lease of this.exportLeases.values()) {
+      if (lease.session.dto.sessionId === sessionId) this.revokeExport(lease)
+    }
+  }
+
+  private exportLease(exportId: unknown, ownerId: number): BookExportLease | null {
+    if (!validOpaqueId(exportId)) return null
+    const lease = this.exportLeases.get(exportId)
+    return lease?.ownerId === ownerId ? lease : null
+  }
+
+  private exportLeaseCurrent(
+    lease: BookExportLease,
+    generation: number = lease.generation,
+    operationGeneration: number = lease.operationGeneration
+  ): boolean {
+    return (
+      !lease.controller.signal.aborted &&
+      lease.generation === generation &&
+      lease.operationGeneration === operationGeneration &&
+      this.exportLeases.get(lease.exportId) === lease &&
+      this.ownerIsCurrent(lease.ownerId, lease.ownerGeneration) &&
+      this.ownedSession(lease.session.dto.sessionId, lease.ownerId) === lease.session &&
+      lease.session.generation === lease.sessionGeneration
+    )
+  }
+
+  private exportParentCurrentSync(lease: BookExportLease): boolean {
+    if (lease.parentFd === null) return false
+    try {
+      const pinned = fsSync.fstatSync(lease.parentFd, { bigint: true })
+      const pathname = fileIdentitySync(lease.parentPath, true)
+      return (
+        pinned.isDirectory() &&
+        pinned.dev === lease.parentIdentity.dev &&
+        pinned.ino === lease.parentIdentity.ino &&
+        pathname !== null &&
+        sameFileIdentity(pathname, lease.parentIdentity) &&
+        fsSync.realpathSync(lease.parentPath) === lease.parentPath
+      )
+    } catch {
+      return false
+    }
+  }
+
+  private exportRootCurrentSync(lease: BookExportLease): boolean {
+    const root = rootIdentitySync(lease.session.rootPath)
+    return root !== null && sameRootIdentity(root, lease.rootIdentity)
+  }
+
+  private exportTargetCurrentSync(lease: BookExportLease): boolean {
+    if (lease.kind === 'website') {
+      const inspected = inspectWebsiteDirectorySync(lease.targetPath)
+      return Boolean(
+        lease.websiteTargetState &&
+        sameWebsiteInspection(
+          inspected,
+          lease.websiteTargetState,
+          lease.targetIdentity,
+          lease.targetLinkCount,
+          lease.websiteTargetFiles
+        )
+      )
+    }
+    const targetIdentity = fileIdentitySync(lease.targetPath)
+    let targetStat: BigIntStats | null = null
+    try {
+      targetStat = fsSync.lstatSync(lease.targetPath, { bigint: true })
+    } catch {
+      targetStat = null
+    }
+    return lease.targetIdentity
+      ? targetIdentity !== null &&
+          sameFileIdentity(targetIdentity, lease.targetIdentity) &&
+          targetStat !== null &&
+          !targetStat.isSymbolicLink() &&
+          targetStat.nlink === lease.targetLinkCount
+      : targetIdentity === null && targetStat === null
+  }
+
+  private exportSourcesCurrentSync(lease: BookExportLease): boolean {
+    let aggregateBytes = 0
+    for (const source of lease.sources) {
+      const verified = exportSourceRevisionSync(lease.rootIdentity, source, aggregateBytes)
+      if (!verified || verified.revision !== source.revision) return false
+      aggregateBytes = verified.aggregateBytes
+    }
+    return true
+  }
+
+  private safeExportHtml(html: string): boolean {
+    return (
+      typeof html === 'string' &&
+      Buffer.byteLength(html, 'utf8') <= MAX_EXPORT_HTML_BYTES &&
+      validateBookExportHtml(html)
+    )
+  }
+
+  async beginExport(
+    sessionId: unknown,
+    event: IpcMainInvokeEvent,
+    ownerId: number = 0
+  ): Promise<BookReaderResult<BookExportSnapshotDto>> {
+    return this.beginExportMode('html', sessionId, event, ownerId)
+  }
+
+  async beginWebsite(
+    sessionId: unknown,
+    event: IpcMainInvokeEvent,
+    ownerId: number = 0
+  ): Promise<BookReaderResult<BookWebsiteSnapshotDto>> {
+    const result = await this.beginExportMode('website', sessionId, event, ownerId)
+    if (!result.ok) return result
+    const { exportId, ...snapshot } = result.value
+    return { ok: true, value: { websiteId: exportId, ...snapshot } }
+  }
+
+  private async beginExportMode(
+    kind: 'html' | 'website',
+    sessionId: unknown,
+    event: IpcMainInvokeEvent,
+    ownerId: number
+  ): Promise<BookReaderResult<BookExportSnapshotDto>> {
+    if (this.exportPreparations.has(ownerId)) {
+      return error(
+        kind === 'website' ? 'website-busy' : 'export-busy',
+        'An export is already being prepared for this window.'
+      )
+    }
+    const activeOwners = new Set([
+      ...this.exportPreparations,
+      ...[...this.exportLeases.values()].map((lease) => lease.ownerId)
+    ])
+    if (!activeOwners.has(ownerId) && activeOwners.size >= MAX_ACTIVE_EXPORT_OWNERS) {
+      return error(
+        kind === 'website' ? 'website-busy' : 'export-busy',
+        'LeafBook is already preparing the maximum number of exports.'
+      )
+    }
+    for (const lease of this.exportLeases.values()) {
+      if (lease.ownerId === ownerId) {
+        return error(
+          kind === 'website' ? 'website-busy' : 'export-busy',
+          'Finish or cancel the active export before starting another.'
+        )
+      }
+    }
+    this.exportPreparations.add(ownerId)
+    try {
+      return await this.prepareExport(sessionId, event, ownerId, kind)
+    } finally {
+      this.exportPreparations.delete(ownerId)
+    }
+  }
+
+  private async prepareExport(
+    sessionId: unknown,
+    event: IpcMainInvokeEvent,
+    ownerId: number = 0,
+    kind: 'html' | 'website' = 'html'
+  ): Promise<BookReaderResult<BookExportSnapshotDto>> {
+    if (!validOpaqueId(sessionId)) return error('invalid-request', 'Invalid export request.')
+    const writeCode = kind === 'website' ? 'website-write-failed' : 'export-write-failed'
+    const sourceCode = kind === 'website' ? 'website-source-changed' : 'export-source-changed'
+    const tooLargeCode = kind === 'website' ? 'website-too-large' : 'export-too-large'
+    const session = this.ownedSession(sessionId, ownerId)
+    if (!session) return error('session-not-found', 'This book session has expired.')
+    const ownerGeneration = this.ownerGeneration(ownerId)
+    const sessionGeneration = session.generation
+    const window = BrowserWindow.fromWebContents(event.sender)
+    const safeName =
+      [...session.dto.title]
+        .map((character) => (character.charCodeAt(0) < 32 ? '-' : character))
+        .join('')
+        .replace(/[<>:"/\\|?*]/g, '-')
+        .replace(/[.\s]+$/g, '')
+        .slice(0, 120) || 'LeafBook'
+    const dialogOptions: SaveDialogOptions =
+      kind === 'website'
+        ? {
+            title: 'Generate Local Website',
+            defaultPath: 'LeafBook-site',
+            properties: ['createDirectory']
+          }
+        : {
+            title: 'Export Markdown Book',
+            defaultPath: `${safeName}.html`,
+            filters: [{ name: 'Self-contained HTML', extensions: ['html'] }],
+            properties: ['showOverwriteConfirmation']
+          }
+    const save = window
+      ? await dialog.showSaveDialog(window, dialogOptions)
+      : await dialog.showSaveDialog(dialogOptions)
+    if (!this.ownerIsCurrent(ownerId, ownerGeneration)) {
+      return error('session-not-found', 'The requesting window is no longer available.')
+    }
+    if (save.canceled || !save.filePath) return error('cancelled', 'The export was cancelled.')
+    const selectedTargetPath = path.resolve(save.filePath)
+    if (
+      kind === 'html' &&
+      path.extname(selectedTargetPath).toLocaleLowerCase('en-US') !== '.html'
+    ) {
+      return error('invalid-request', 'The export target must use the .html extension.')
+    }
+    const parentPath = path.dirname(selectedTargetPath)
+    let parentRealPath: string
+    try {
+      parentRealPath = await fs.realpath(parentPath)
+    } catch {
+      return error(writeCode, 'The export destination folder is unavailable.')
+    }
+    const targetPath = path.join(parentRealPath, path.basename(selectedTargetPath))
+    const relativeToRoot = path.relative(session.rootIdentity.realPath, targetPath)
+    if (
+      relativeToRoot === '' ||
+      (!relativeToRoot.startsWith(`..${path.sep}`) &&
+        relativeToRoot !== '..' &&
+        !path.isAbsolute(relativeToRoot))
+    ) {
+      return error('invalid-request', 'Choose an export destination outside the source book.')
+    }
+    const parentIdentity = await fileIdentity(parentRealPath, true)
+    if (!parentIdentity) {
+      return error(writeCode, 'The export destination folder is unsafe.')
+    }
+    let targetIdentity = kind === 'website' ? null : await fileIdentity(targetPath)
+    let targetLinkCount: bigint | null = null
+    let websiteTargetState: 'absent' | 'empty' | 'owned' | null = null
+    let websiteTargetFiles: WebsiteFileIdentities | null = null
+    if (kind === 'website') {
+      const inspected = inspectWebsiteDirectorySync(targetPath)
+      if (!inspected) {
+        return error(
+          'website-unsafe-target',
+          'LeafBook only replaces an empty folder or an exact, valid LeafBook website.'
+        )
+      }
+      websiteTargetState = inspected.state
+      targetIdentity = inspected.identity
+      targetLinkCount = inspected.linkCount
+      websiteTargetFiles = inspected.files
+      if (inspected.state !== 'absent') {
+        const confirmation = window
+          ? await dialog.showMessageBox(window, {
+              type: 'warning',
+              buttons: ['Cancel', 'Replace'],
+              defaultId: 0,
+              cancelId: 0,
+              title: 'Replace local website?',
+              message: `Replace “${path.basename(targetPath)}”?`,
+              detail:
+                inspected.state === 'empty'
+                  ? 'The selected empty folder will be replaced.'
+                  : 'Only the validated LeafBook website files will be replaced.'
+            })
+          : await dialog.showMessageBox({
+              type: 'warning',
+              buttons: ['Cancel', 'Replace'],
+              defaultId: 0,
+              cancelId: 0,
+              title: 'Replace local website?',
+              message: `Replace “${path.basename(targetPath)}”?`,
+              detail:
+                inspected.state === 'empty'
+                  ? 'The selected empty folder will be replaced.'
+                  : 'Only the validated LeafBook website files will be replaced.'
+            })
+        if (confirmation.response !== 1) return error('cancelled', 'The website was cancelled.')
+        const confirmed = inspectWebsiteDirectorySync(targetPath)
+        if (
+          !confirmed ||
+          confirmed.state !== inspected.state ||
+          !confirmed.identity ||
+          !inspected.identity ||
+          !sameFileIdentity(confirmed.identity, inspected.identity) ||
+          !sameWebsiteFiles(confirmed.files, inspected.files)
+        ) {
+          return error('website-unsafe-target', 'The website destination changed.')
+        }
+      }
+    } else {
+      try {
+        const existing = await fs.lstat(targetPath, { bigint: true })
+        if (
+          existing.isSymbolicLink() ||
+          !existing.isFile() ||
+          existing.nlink !== 1n ||
+          !targetIdentity
+        ) {
+          return error(writeCode, 'LeafBook will not replace this unsafe destination.')
+        }
+        targetLinkCount = existing.nlink
+        const confirmation = window
+          ? await dialog.showMessageBox(window, {
+              type: 'warning',
+              buttons: ['Cancel', 'Replace'],
+              defaultId: 0,
+              cancelId: 0,
+              title: 'Replace existing export?',
+              message: `Replace “${path.basename(targetPath)}”?`,
+              detail: 'This explicitly replaces the existing HTML export.'
+            })
+          : await dialog.showMessageBox({
+              type: 'warning',
+              buttons: ['Cancel', 'Replace'],
+              defaultId: 0,
+              cancelId: 0,
+              title: 'Replace existing export?',
+              message: `Replace “${path.basename(targetPath)}”?`,
+              detail: 'This explicitly replaces the existing HTML export.'
+            })
+        if (confirmation.response !== 1) return error('cancelled', 'The export was cancelled.')
+      } catch (targetError) {
+        if ((targetError as NodeJS.ErrnoException).code !== 'ENOENT') {
+          return error(writeCode, 'LeafBook could not inspect the export destination.')
+        }
+        targetIdentity = null
+        targetLinkCount = null
+      }
+    }
+    if (
+      this.ownedSession(sessionId, ownerId) !== session ||
+      session.generation !== sessionGeneration ||
+      (await this.validateSessionRoot(sessionId, session, false)) !== 'valid'
+    ) {
+      return error(sourceCode, 'The book changed while the export was starting.')
+    }
+
+    const sources = session.searchSources.slice(0, MAX_EXPORT_DOCUMENTS)
+    if (session.searchSources.length > sources.length) {
+      return error(tooLargeCode, 'This book has too many documents for one HTML export.')
+    }
+    const documentIdByPath = new Map<string, string>()
+    sources.forEach((source, index) => documentIdByPath.set(source.path, `${index + 1}`))
+    const documents: BookExportDocumentDto[] = []
+    const revisions: ExportSourceRevision[] = []
+    let sourceBytes = 0
+    let linkCount = 0
+    for (let index = 0; index < sources.length; index++) {
+      if (
+        !this.ownerIsCurrent(ownerId, ownerGeneration) ||
+        this.ownedSession(sessionId, ownerId) !== session ||
+        session.generation !== sessionGeneration
+      ) {
+        return error('cancelled', 'The export was cancelled.')
+      }
+      const source = sources[index]
+      if (!source) continue
+      const read = await this.readBookChapter(session.rootPath, source.path)
+      const markdown = read?.content ?? null
+      if (markdown !== null) {
+        sourceBytes += Buffer.byteLength(markdown, 'utf8')
+        if (sourceBytes > MAX_EXPORT_SOURCE_BYTES) {
+          return error(tooLargeCode, 'This book is too large for one HTML export.')
+        }
+      }
+      const documentId = documentIdByPath.get(source.path) as string
+      const linkTargets: Record<string, { documentId: string; fragment: string | null }> = {}
+      if (markdown !== null) {
+        for (const href of markdownLinkHrefs(markdown)) {
+          const target = localHrefTarget(source.path, href)
+          if (target.kind !== 'local') continue
+          const targetDocumentId = documentIdByPath.get(target.path)
+          if (!targetDocumentId) continue
+          linkTargets[href] = { documentId: targetDocumentId, fragment: target.fragment }
+          linkCount++
+          if (linkCount > MAX_EXPORT_LINKS) {
+            return error(tooLargeCode, 'This book has too many links for one HTML export.')
+          }
+        }
+      }
+      const nodeIds = [...session.targets]
+        .filter(([, target]) => target.kind === 'chapter' && target.path === source.path)
+        .map(([nodeId]) => nodeId)
+      documents.push({
+        documentId,
+        nodeIds,
+        title: source.title,
+        markdown,
+        linkTargets
+      })
+      revisions.push({
+        path: source.path,
+        revision: markdown === null ? null : hashBytes(Buffer.from(markdown, 'utf8')),
+        byteLength: markdown === null ? 0 : Buffer.byteLength(markdown, 'utf8')
+      })
+      if (
+        (index + 1) % 8 === 0 &&
+        (await this.validateSessionRoot(sessionId, session, false)) !== 'valid'
+      ) {
+        return error(sourceCode, 'The book changed while the export was prepared.')
+      }
+    }
+    if (session.summaryPath) {
+      const summary = await this.readBookChapter(session.rootPath, session.summaryPath)
+      if (!summary) {
+        return error(sourceCode, 'SUMMARY became unavailable during export.')
+      }
+      revisions.push({
+        path: session.summaryPath,
+        revision: hashBytes(Buffer.from(summary.content, 'utf8')),
+        byteLength: Buffer.byteLength(summary.content, 'utf8')
+      })
+    }
+    const finalRoot = await this.validateSessionRoot(sessionId, session, false)
+    if (finalRoot !== 'valid' || session.generation !== sessionGeneration) {
+      return error(sourceCode, 'The book changed while the export was prepared.')
+    }
+    await this.testHooks.beforeExportParentPin?.()
+    if (
+      !this.ownerIsCurrent(ownerId, ownerGeneration) ||
+      this.ownedSession(sessionId, ownerId) !== session ||
+      session.generation !== sessionGeneration
+    ) {
+      return error('cancelled', 'The export was cancelled.')
+    }
+    let parentFd: number | null = null
+    try {
+      const pathname = fsSync.lstatSync(parentRealPath, { bigint: true })
+      if (
+        pathname.isSymbolicLink() ||
+        !pathname.isDirectory() ||
+        pathname.dev !== parentIdentity.dev ||
+        pathname.ino !== parentIdentity.ino
+      ) {
+        return error(writeCode, 'The export destination folder changed.')
+      }
+      parentFd = fsSync.openSync(
+        parentRealPath,
+        fsConstants.O_RDONLY |
+          (fsConstants.O_DIRECTORY ?? 0) |
+          (fsConstants.O_NOFOLLOW ?? 0) |
+          (fsConstants.O_NONBLOCK ?? 0)
+      )
+      const pinned = fsSync.fstatSync(parentFd, { bigint: true })
+      const pathnameIdentity = fileIdentitySync(parentRealPath, true)
+      if (
+        !pinned.isDirectory() ||
+        pinned.dev !== parentIdentity.dev ||
+        pinned.ino !== parentIdentity.ino ||
+        !pathnameIdentity ||
+        !sameFileIdentity(pathnameIdentity, parentIdentity) ||
+        fsSync.realpathSync(parentRealPath) !== parentRealPath
+      ) {
+        fsSync.closeSync(parentFd)
+        return error(writeCode, 'The export destination folder changed.')
+      }
+    } catch {
+      if (parentFd !== null) {
+        try {
+          fsSync.closeSync(parentFd)
+        } catch {
+          // Ignore a close failure while rejecting the destination.
+        }
+      }
+      return error(writeCode, 'The export destination folder is unavailable.')
+    }
+    const exportId = randomUUID()
+    const lease: BookExportLease = {
+      exportId,
+      ownerId,
+      ownerGeneration,
+      session,
+      sessionGeneration,
+      rootIdentity: session.rootIdentity,
+      targetPath,
+      parentPath: parentRealPath,
+      parentIdentity,
+      targetIdentity,
+      targetLinkCount,
+      kind,
+      websiteTargetState,
+      websiteTargetFiles,
+      sources: revisions,
+      controller: new AbortController(),
+      parentFd,
+      generation: 0,
+      operationGeneration: 0,
+      operation: null,
+      state: 'ready',
+      criticalCommit: false,
+      revokeAfterCommit: false
+    }
+    this.exportLeases.set(exportId, lease)
+    const navigationTargets: Record<string, { documentId: string; fragment: string | null }> = {}
+    for (const [nodeId, target] of session.targets) {
+      if (target.kind !== 'chapter') continue
+      const documentId = documentIdByPath.get(target.path)
+      if (documentId) navigationTargets[nodeId] = { documentId, fragment: target.fragment }
+    }
+    return {
+      ok: true,
+      value: {
+        exportId,
+        title: session.dto.title,
+        nodes: session.dto.nodes,
+        landingNodeId: session.dto.landingNodeId,
+        navigationTargets,
+        documents
+      }
+    }
+  }
+
+  async commitExport(
+    request: BookExportCommitRequestDto,
+    ownerId: number = 0
+  ): Promise<BookReaderResult<BookExportSaveDto>> {
+    const lease = this.exportLease(request?.exportId, ownerId)
+    if (!lease || lease.kind !== 'html' || !this.exportLeaseCurrent(lease)) {
+      return error('cancelled', 'This export has expired.')
+    }
+    if (lease.operation) {
+      return error('export-busy', 'This export is already being saved.')
+    }
+    if (!this.safeExportHtml(request.html)) {
+      this.revokeExport(lease)
+      return error('export-invalid-output', 'LeafBook rejected unsafe generated HTML.')
+    }
+    const bytes = Buffer.from(request.html, 'utf8')
+    const generation = lease.generation
+    const operationGeneration = ++lease.operationGeneration
+    lease.state = 'validating'
+    const operation = (async () => {
+      await Promise.resolve()
+      return this.performExportCommit(lease, bytes, generation, operationGeneration)
+    })()
+    lease.operation = operation
+    try {
+      return await operation
+    } finally {
+      if (lease.operation === operation) lease.operation = null
+      lease.criticalCommit = false
+      lease.state = 'ready'
+      this.revokeExport(lease)
+    }
+  }
+
+  async commitWebsite(
+    request: BookWebsiteCommitRequestDto,
+    ownerId: number = 0
+  ): Promise<BookReaderResult<BookWebsiteSaveDto>> {
+    const lease = this.exportLease(request?.websiteId, ownerId)
+    if (!lease || lease.kind !== 'website' || !this.exportLeaseCurrent(lease)) {
+      return error('cancelled', 'This website generation has expired.')
+    }
+    if (lease.operation) {
+      return error('website-busy', 'This website is already being saved.')
+    }
+    if (!this.safeExportHtml(request.html)) {
+      this.revokeExport(lease)
+      return error('website-invalid-output', 'LeafBook rejected unsafe generated HTML.')
+    }
+    const bytes = Buffer.from(request.html, 'utf8')
+    const generation = lease.generation
+    const operationGeneration = ++lease.operationGeneration
+    lease.state = 'validating'
+    const operation = (async () => {
+      await Promise.resolve()
+      return this.performWebsiteCommit(lease, bytes, generation, operationGeneration)
+    })()
+    lease.operation = operation
+    try {
+      return await operation
+    } finally {
+      if (lease.operation === operation) lease.operation = null
+      lease.criticalCommit = false
+      lease.state = 'ready'
+      this.revokeExport(lease)
+    }
+  }
+
+  private syncExportParent(lease: BookExportLease): void {
+    if (lease.parentFd === null) throw new Error('Export parent descriptor was revoked.')
+    fsSync.fsyncSync(lease.parentFd)
+  }
+
+  private websiteCommonBoundaryCurrentSync(lease: BookExportLease): boolean {
+    return (
+      this.ownerIsCurrent(lease.ownerId, lease.ownerGeneration) &&
+      this.ownedSession(lease.session.dto.sessionId, lease.ownerId) === lease.session &&
+      lease.session.generation === lease.sessionGeneration &&
+      this.exportParentCurrentSync(lease) &&
+      this.exportRootCurrentSync(lease) &&
+      this.exportSourcesCurrentSync(lease)
+    )
+  }
+
+  private websiteDirectoryIdentityCurrentSync(
+    directoryPath: string,
+    identity: FileIdentity
+  ): boolean {
+    const current = fileIdentitySync(directoryPath, true)
+    return current !== null && sameFileIdentity(current, identity)
+  }
+
+  private cleanupRecordedWebsiteDirectorySync(
+    lease: BookExportLease,
+    directoryPath: string,
+    state: 'empty' | 'owned',
+    identity: FileIdentity,
+    linkCount: bigint,
+    files: WebsiteFileIdentities | null,
+    targetExpectation: {
+      state: 'absent' | 'empty' | 'owned'
+      identity: FileIdentity | null
+      linkCount: bigint | null
+      files: WebsiteFileIdentities | null
+    },
+    allowCleanupHook = false
+  ): boolean {
+    const targetCurrent = (): boolean =>
+      sameWebsiteInspection(
+        inspectWebsiteDirectorySync(lease.targetPath),
+        targetExpectation.state,
+        targetExpectation.identity,
+        targetExpectation.linkCount,
+        targetExpectation.files
+      )
+    const minimalParentAndDirectoryCurrent = (expectedLinkCount: bigint): boolean => {
+      if (!this.exportParentCurrentSync(lease)) return false
+      try {
+        const pathname = fsSync.lstatSync(directoryPath, { bigint: true })
+        return (
+          !pathname.isSymbolicLink() &&
+          pathname.isDirectory() &&
+          pathname.dev === identity.dev &&
+          pathname.ino === identity.ino &&
+          pathname.nlink === expectedLinkCount
+        )
+      } catch {
+        return false
+      }
+    }
+    try {
+      if (state === 'empty') {
+        if (
+          !this.websiteCommonBoundaryCurrentSync(lease) ||
+          !targetCurrent() ||
+          !minimalParentAndDirectoryCurrent(linkCount)
+        ) {
+          return false
+        }
+        if (
+          !this.websiteDirectoryIdentityCurrentSync(directoryPath, identity) ||
+          fsSync.readdirSync(directoryPath).length !== 0
+        ) {
+          return false
+        }
+        fsSync.rmdirSync(directoryPath)
+        return true
+      }
+      if (!files) return false
+      if (!this.websiteCommonBoundaryCurrentSync(lease) || !targetCurrent()) {
+        return false
+      }
+      if (allowCleanupHook) this.testHooks.beforeWebsiteIndexFinalInspection?.(directoryPath)
+      const finalIndexInspection = inspectWebsiteDirectorySync(directoryPath)
+      if (
+        !sameWebsiteInspection(finalIndexInspection, 'owned', identity, linkCount, files) ||
+        !minimalParentAndDirectoryCurrent(linkCount)
+      ) {
+        return false
+      }
+      if (allowCleanupHook) this.testHooks.afterWebsiteIndexFinalInspection?.(directoryPath)
+      fsSync.unlinkSync(path.join(directoryPath, BOOK_WEBSITE_INDEX))
+      const afterIndexLinkCount = fsSync.lstatSync(directoryPath, { bigint: true }).nlink
+      if (allowCleanupHook) this.testHooks.duringWebsiteBackupCleanup?.(directoryPath)
+      if (!this.websiteCommonBoundaryCurrentSync(lease) || !targetCurrent()) {
+        return false
+      }
+      if (allowCleanupHook) this.testHooks.beforeWebsiteManifestFinalInspection?.(directoryPath)
+      const remaining = fsSync.readdirSync(directoryPath)
+      const manifest = readPinnedRegularFileSync(
+        path.join(directoryPath, BOOK_WEBSITE_MANIFEST),
+        16 * 1024
+      )
+      if (
+        remaining.length !== 1 ||
+        remaining[0] !== BOOK_WEBSITE_MANIFEST ||
+        !manifest ||
+        !sameFileIdentity(manifest.identity, files.manifest) ||
+        sha256Bytes(manifest.bytes) !== files.manifestSha256 ||
+        !minimalParentAndDirectoryCurrent(afterIndexLinkCount)
+      ) {
+        return false
+      }
+      if (allowCleanupHook) this.testHooks.afterWebsiteManifestFinalInspection?.(directoryPath)
+      fsSync.unlinkSync(path.join(directoryPath, BOOK_WEBSITE_MANIFEST))
+      const afterManifestLinkCount = fsSync.lstatSync(directoryPath, { bigint: true }).nlink
+      if (
+        !this.websiteCommonBoundaryCurrentSync(lease) ||
+        !targetCurrent() ||
+        !minimalParentAndDirectoryCurrent(afterManifestLinkCount)
+      ) {
+        return false
+      }
+      if (
+        !this.websiteDirectoryIdentityCurrentSync(directoryPath, identity) ||
+        fsSync.readdirSync(directoryPath).length !== 0
+      ) {
+        return false
+      }
+      fsSync.rmdirSync(directoryPath)
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  private async performWebsiteCommit(
+    lease: BookExportLease,
+    html: Buffer,
+    generation: number,
+    operationGeneration: number
+  ): Promise<BookReaderResult<BookWebsiteSaveDto>> {
+    const current = (): boolean => this.exportLeaseCurrent(lease, generation, operationGeneration)
+    if (
+      (await this.validateSessionRoot(lease.session.dto.sessionId, lease.session, false)) !==
+        'valid' ||
+      !current()
+    ) {
+      return current()
+        ? error('website-source-changed', 'The source book changed before generation.')
+        : error('cancelled', 'Website generation was cancelled.')
+    }
+    if (!(await this.validateExportSources(lease, generation, operationGeneration))) {
+      return current()
+        ? error('website-source-changed', 'A source chapter changed before generation.')
+        : error('cancelled', 'Website generation was cancelled.')
+    }
+    await this.testHooks.afterExportSourcePass?.(1)
+    if (!current()) return error('cancelled', 'Website generation was cancelled.')
+    if (
+      !this.exportParentCurrentSync(lease) ||
+      !this.exportRootCurrentSync(lease) ||
+      !this.exportTargetCurrentSync(lease)
+    ) {
+      return error('website-unsafe-target', 'The website boundary changed before writing.')
+    }
+
+    const token = randomUUID()
+    const stagePath = path.join(lease.parentPath, `.leafbook-site-stage-${token}`)
+    const backupPath = path.join(lease.parentPath, `.leafbook-site-backup-${token}`)
+    let stageIdentity: FileIdentity | null = null
+    let stageLinkCount: bigint | null = null
+    let stageFiles: WebsiteFileIdentities | null = null
+    let stagePresent = false
+    let backupPresent = false
+    let targetCommitted = false
+    let durabilityUncertain = false
+    try {
+      await fs.mkdir(stagePath, { mode: 0o700 })
+      stagePresent = true
+      stageIdentity = fileIdentitySync(stagePath, true)
+      if (!stageIdentity) throw new Error('Could not pin the staging directory.')
+      await this.testHooks.afterExportTempOpen?.(stagePath)
+      const writeKnownFile = async (name: string, bytes: Buffer): Promise<FileIdentity> => {
+        const pathname = path.join(stagePath, name)
+        const handle = await fs.open(
+          pathname,
+          fsConstants.O_WRONLY |
+            fsConstants.O_CREAT |
+            fsConstants.O_EXCL |
+            (fsConstants.O_NOFOLLOW ?? 0) |
+            (fsConstants.O_NONBLOCK ?? 0),
+          0o600
+        )
+        try {
+          const before = await handle.stat({ bigint: true })
+          if (!before.isFile() || before.nlink !== 1n) throw new Error('Unsafe staging file.')
+          await handle.writeFile(bytes)
+          await handle.sync()
+          const after = await handle.stat({ bigint: true })
+          const pathnameAfter = fsSync.lstatSync(pathname, { bigint: true })
+          if (
+            !after.isFile() ||
+            after.nlink !== 1n ||
+            after.dev !== before.dev ||
+            after.ino !== before.ino ||
+            after.size !== BigInt(bytes.byteLength) ||
+            pathnameAfter.isSymbolicLink() ||
+            pathnameAfter.dev !== before.dev ||
+            pathnameAfter.ino !== before.ino ||
+            pathnameAfter.nlink !== 1n
+          ) {
+            throw new Error('The staging file identity changed.')
+          }
+          return { dev: after.dev, ino: after.ino, mode: Number(after.mode) }
+        } finally {
+          await handle.close()
+        }
+      }
+      const stageIndexIdentity = await writeKnownFile(BOOK_WEBSITE_INDEX, html)
+      const manifest = Buffer.from(
+        serializeBookWebsiteManifest(createBookWebsiteManifest(html)),
+        'utf8'
+      )
+      const stageManifestIdentity = await writeKnownFile(BOOK_WEBSITE_MANIFEST, manifest)
+      stageFiles = {
+        index: stageIndexIdentity,
+        manifest: stageManifestIdentity,
+        indexSha256: sha256Bytes(html),
+        manifestSha256: sha256Bytes(manifest)
+      }
+      stageLinkCount = fsSync.lstatSync(stagePath, { bigint: true }).nlink
+      const stageFd = fsSync.openSync(
+        stagePath,
+        fsConstants.O_RDONLY |
+          (fsConstants.O_DIRECTORY ?? 0) |
+          (fsConstants.O_NOFOLLOW ?? 0) |
+          (fsConstants.O_NONBLOCK ?? 0)
+      )
+      try {
+        fsSync.fsyncSync(stageFd)
+      } finally {
+        fsSync.closeSync(stageFd)
+      }
+      await this.testHooks.afterExportTempSync?.(stagePath)
+      const staged = inspectWebsiteDirectorySync(stagePath)
+      const stageNow = fileIdentitySync(stagePath, true)
+      if (
+        !staged ||
+        staged.state !== 'owned' ||
+        !stageNow ||
+        !sameFileIdentity(stageNow, stageIdentity) ||
+        !sameWebsiteFiles(staged.files, stageFiles)
+      ) {
+        throw new Error('The staging directory changed.')
+      }
+      if (
+        !current() ||
+        !this.exportParentCurrentSync(lease) ||
+        !this.exportRootCurrentSync(lease) ||
+        !this.exportTargetCurrentSync(lease) ||
+        !(await this.validateExportSources(lease, generation, operationGeneration))
+      ) {
+        return current()
+          ? error('website-source-changed', 'The source or destination changed before commit.')
+          : error('cancelled', 'Website generation was cancelled.')
+      }
+
+      await this.testHooks.beforeExportCommitCritical?.()
+      if (!current()) return error('cancelled', 'Website generation was cancelled.')
+      lease.criticalCommit = true
+      lease.state = 'committing'
+      this.testHooks.exportCommitCriticalStarted?.()
+      const stageCurrent = (): boolean =>
+        Boolean(
+          stageIdentity &&
+          stageLinkCount !== null &&
+          stageFiles &&
+          sameWebsiteInspection(
+            inspectWebsiteDirectorySync(stagePath),
+            'owned',
+            stageIdentity,
+            stageLinkCount,
+            stageFiles
+          )
+        )
+      const originalTargetCurrent = (): boolean =>
+        Boolean(
+          lease.websiteTargetState &&
+          sameWebsiteInspection(
+            inspectWebsiteDirectorySync(lease.targetPath),
+            lease.websiteTargetState,
+            lease.targetIdentity,
+            lease.targetLinkCount,
+            lease.websiteTargetFiles
+          )
+        )
+      const targetAbsent = (): boolean =>
+        sameWebsiteInspection(
+          inspectWebsiteDirectorySync(lease.targetPath),
+          'absent',
+          null,
+          null,
+          null
+        )
+      const backupOriginalCurrent = (): boolean =>
+        Boolean(
+          lease.websiteTargetState &&
+          lease.websiteTargetState !== 'absent' &&
+          sameWebsiteInspection(
+            inspectWebsiteDirectorySync(backupPath),
+            lease.websiteTargetState,
+            lease.targetIdentity,
+            lease.targetLinkCount,
+            lease.websiteTargetFiles
+          )
+        )
+      const stageAtTargetCurrent = (): boolean =>
+        Boolean(
+          stageIdentity &&
+          stageLinkCount !== null &&
+          stageFiles &&
+          sameWebsiteInspection(
+            inspectWebsiteDirectorySync(lease.targetPath),
+            'owned',
+            stageIdentity,
+            stageLinkCount,
+            stageFiles
+          )
+        )
+      const preRenameBoundaryCurrent = (): boolean =>
+        this.websiteCommonBoundaryCurrentSync(lease) && stageCurrent()
+      if (lease.websiteTargetState === 'absent') {
+        this.testHooks.beforeWebsiteStageRename?.(stagePath, lease.targetPath)
+        if (!preRenameBoundaryCurrent() || !originalTargetCurrent()) {
+          throw new Error('The website boundary changed before rename.')
+        }
+        fsSync.renameSync(stagePath, lease.targetPath)
+        stagePresent = false
+        targetCommitted = true
+      } else {
+        this.testHooks.beforeWebsiteFirstRename?.(stagePath, lease.targetPath)
+        if (!preRenameBoundaryCurrent() || !originalTargetCurrent()) {
+          throw new Error('The website boundary changed before backup rename.')
+        }
+        fsSync.renameSync(lease.targetPath, backupPath)
+        backupPresent = true
+        try {
+          if (
+            !this.websiteCommonBoundaryCurrentSync(lease) ||
+            !stageCurrent() ||
+            !targetAbsent() ||
+            !backupOriginalCurrent()
+          ) {
+            throw new Error('The backup directory identity changed.')
+          }
+          this.syncExportParent(lease)
+          this.testHooks.beforeWebsiteStageRename?.(stagePath, lease.targetPath)
+          if (
+            !this.websiteCommonBoundaryCurrentSync(lease) ||
+            !stageCurrent() ||
+            !targetAbsent() ||
+            !backupOriginalCurrent()
+          ) {
+            throw new Error('The website boundary changed before stage rename.')
+          }
+          fsSync.renameSync(stagePath, lease.targetPath)
+          stagePresent = false
+          targetCommitted = true
+        } catch (commitError) {
+          try {
+            this.testHooks.beforeWebsiteRollback?.(backupPath, lease.targetPath)
+            if (
+              !this.websiteCommonBoundaryCurrentSync(lease) ||
+              !stageCurrent() ||
+              !targetAbsent() ||
+              !backupOriginalCurrent()
+            ) {
+              throw new Error('The rollback boundary changed.')
+            }
+            fsSync.renameSync(backupPath, lease.targetPath)
+            backupPresent = false
+            if (!originalTargetCurrent()) throw new Error('The rollback identity is uncertain.')
+            this.syncExportParent(lease)
+          } catch {
+            return error(
+              'website-commit-uncertain',
+              'LeafBook could not confirm whether the previous website was restored.',
+              undefined,
+              true
+            )
+          }
+          throw commitError
+        }
+      }
+      this.testHooks.afterWebsiteStageRename?.(lease.targetPath)
+      if (
+        !this.websiteCommonBoundaryCurrentSync(lease) ||
+        !stageAtTargetCurrent() ||
+        (backupPresent && !backupOriginalCurrent())
+      ) {
+        return error(
+          'website-commit-uncertain',
+          'The website was moved into place, but its identity could not be verified.',
+          undefined,
+          true
+        )
+      }
+      this.testHooks.afterExportRename?.()
+
+      const committed = inspectWebsiteDirectorySync(lease.targetPath)
+      if (
+        !stageIdentity ||
+        stageLinkCount === null ||
+        !stageFiles ||
+        !sameWebsiteInspection(committed, 'owned', stageIdentity, stageLinkCount, stageFiles)
+      ) {
+        return error(
+          'website-commit-uncertain',
+          'The website was moved into place, but its identity could not be verified.',
+          undefined,
+          true
+        )
+      }
+      try {
+        this.syncExportParent(lease)
+      } catch {
+        durabilityUncertain = true
+      }
+      const replacedState = lease.websiteTargetState
+      if (
+        !durabilityUncertain &&
+        backupPresent &&
+        (replacedState === 'empty' || replacedState === 'owned') &&
+        lease.targetIdentity &&
+        lease.targetLinkCount !== null &&
+        stageIdentity &&
+        stageLinkCount !== null &&
+        stageFiles
+      ) {
+        this.testHooks.beforeWebsiteBackupCleanup?.(backupPath)
+        if (
+          !this.cleanupRecordedWebsiteDirectorySync(
+            lease,
+            backupPath,
+            replacedState,
+            lease.targetIdentity,
+            lease.targetLinkCount,
+            lease.websiteTargetFiles,
+            {
+              state: 'owned',
+              identity: stageIdentity,
+              linkCount: stageLinkCount,
+              files: stageFiles
+            },
+            true
+          )
+        ) {
+          durabilityUncertain = true
+        } else {
+          backupPresent = false
+          try {
+            this.syncExportParent(lease)
+          } catch {
+            durabilityUncertain = true
+          }
+        }
+      }
+      return {
+        ok: true,
+        value: {
+          directoryName: path.basename(lease.targetPath),
+          files: [BOOK_WEBSITE_INDEX, BOOK_WEBSITE_MANIFEST],
+          byteLength: html.byteLength + manifest.byteLength,
+          durabilityUncertain
+        }
+      }
+    } catch {
+      return error(
+        targetCommitted ? 'website-commit-uncertain' : 'website-write-failed',
+        targetCommitted
+          ? 'The website may have committed, but LeafBook could not verify durability.'
+          : 'LeafBook could not generate the local website.',
+        undefined,
+        targetCommitted
+      )
+    } finally {
+      if (
+        stagePresent &&
+        stageIdentity &&
+        stageLinkCount !== null &&
+        stageFiles &&
+        this.websiteCommonBoundaryCurrentSync(lease)
+      ) {
+        const currentStage = fileIdentitySync(stagePath, true)
+        if (currentStage && sameFileIdentity(currentStage, stageIdentity)) {
+          const targetState = lease.websiteTargetState
+          if (targetState) {
+            this.cleanupRecordedWebsiteDirectorySync(
+              lease,
+              stagePath,
+              'owned',
+              stageIdentity,
+              stageLinkCount,
+              stageFiles,
+              {
+                state: targetState,
+                identity: lease.targetIdentity,
+                linkCount: lease.targetLinkCount,
+                files: lease.websiteTargetFiles
+              }
+            )
+          }
+        }
+      }
+      // Unknown or changed backups are deliberately left untouched. Phase 8C
+      // does not scan for or recover orphaned transaction directories.
+      lease.criticalCommit = false
+    }
+  }
+
+  private async validateExportSources(
+    lease: BookExportLease,
+    generation: number,
+    operationGeneration: number
+  ): Promise<boolean> {
+    for (let index = 0; index < lease.sources.length; index++) {
+      if (!this.exportLeaseCurrent(lease, generation, operationGeneration)) return false
+      const source = lease.sources[index]
+      if (!source) continue
+      const read = await this.readBookChapter(lease.session.rootPath, source.path)
+      const revision = read ? hashBytes(Buffer.from(read.content, 'utf8')) : null
+      if (
+        !this.exportLeaseCurrent(lease, generation, operationGeneration) ||
+        revision !== source.revision
+      ) {
+        return false
+      }
+    }
+    return true
+  }
+
+  private async performExportCommit(
+    lease: BookExportLease,
+    bytes: Buffer,
+    generation: number,
+    operationGeneration: number
+  ): Promise<BookReaderResult<BookExportSaveDto>> {
+    const current = (): boolean => this.exportLeaseCurrent(lease, generation, operationGeneration)
+    if (
+      (await this.validateSessionRoot(lease.session.dto.sessionId, lease.session, false)) !==
+        'valid' ||
+      !current()
+    ) {
+      return current()
+        ? error('export-source-changed', 'The source book changed before export.')
+        : error('cancelled', 'This export was cancelled.')
+    }
+    if (!(await this.validateExportSources(lease, generation, operationGeneration))) {
+      return current()
+        ? error('export-source-changed', 'A source chapter changed before the export was saved.')
+        : error('cancelled', 'This export was cancelled.')
+    }
+    await this.testHooks.afterExportSourcePass?.(1)
+    if (!current()) return error('cancelled', 'This export was cancelled.')
+    if (
+      (await this.validateSessionRoot(lease.session.dto.sessionId, lease.session, false)) !==
+        'valid' ||
+      !current()
+    ) {
+      return current()
+        ? error('export-source-changed', 'The source book changed before export.')
+        : error('cancelled', 'This export was cancelled.')
+    }
+    if (
+      !this.exportParentCurrentSync(lease) ||
+      !this.exportRootCurrentSync(lease) ||
+      !this.exportTargetCurrentSync(lease)
+    ) {
+      return error('export-write-failed', 'The export boundary changed before writing.')
+    }
+
+    const tempPath = path.join(lease.parentPath, `.leafbook-export-${randomUUID()}.tmp`)
+    let handle: Awaited<ReturnType<typeof fs.open>> | null = null
+    let tempIdentity: FileIdentity | null = null
+    let committed = false
+    let durabilityUncertain = false
+    try {
+      lease.state = 'writing'
+      handle = await fs.open(
+        tempPath,
+        fsConstants.O_WRONLY |
+          fsConstants.O_CREAT |
+          fsConstants.O_EXCL |
+          (fsConstants.O_NOFOLLOW ?? 0) |
+          (fsConstants.O_NONBLOCK ?? 0),
+        0o600
+      )
+      await this.testHooks.afterExportTempOpen?.()
+      if (
+        !current() ||
+        !this.exportParentCurrentSync(lease) ||
+        !this.exportRootCurrentSync(lease)
+      ) {
+        return current()
+          ? error('export-write-failed', 'The export boundary changed while opening its temp file.')
+          : error('cancelled', 'This export was cancelled.')
+      }
+      const tempStat = await handle.stat({ bigint: true })
+      if (!current() || !tempStat.isFile() || tempStat.nlink !== 1n) {
+        return current()
+          ? error('export-write-failed', 'LeafBook could not pin the export temp file.')
+          : error('cancelled', 'This export was cancelled.')
+      }
+      tempIdentity = { dev: tempStat.dev, ino: tempStat.ino, mode: Number(tempStat.mode) }
+      await handle.writeFile(bytes)
+      if (!current()) return error('cancelled', 'This export was cancelled.')
+      await handle.sync()
+      if (!current()) return error('cancelled', 'This export was cancelled.')
+      await handle.close()
+      handle = null
+      await this.testHooks.afterExportTempSync?.()
+      if (!current()) return error('cancelled', 'This export was cancelled.')
+
+      lease.state = 'validating'
+      if (!(await this.validateExportSources(lease, generation, operationGeneration))) {
+        return current()
+          ? error(
+              'export-source-changed',
+              'A source chapter changed before the export was committed.'
+            )
+          : error('cancelled', 'This export was cancelled.')
+      }
+      await this.testHooks.afterExportSourcePass?.(2)
+      if (!current()) return error('cancelled', 'This export was cancelled.')
+      if (
+        (await this.validateSessionRoot(lease.session.dto.sessionId, lease.session, false)) !==
+          'valid' ||
+        !current()
+      ) {
+        return current()
+          ? error('export-source-changed', 'The source book changed before export commit.')
+          : error('cancelled', 'This export was cancelled.')
+      }
+      await this.testHooks.beforeExportCommitCritical?.()
+      if (!current()) return error('cancelled', 'This export was cancelled.')
+
+      // Node has no portable fd-relative rename. Keep every final pathname,
+      // pinned-directory, root, target, source and temp-inode check in the same
+      // synchronous event-loop turn as renameSync. This prevents renderer
+      // cancellation/cleanup from interleaving and fails closed on observed
+      // parent/root/source swaps.
+      if (
+        !this.exportParentCurrentSync(lease) ||
+        !this.exportRootCurrentSync(lease) ||
+        !this.exportTargetCurrentSync(lease) ||
+        !tempIdentity ||
+        !sameFileIdentity(
+          fileIdentitySync(tempPath) ?? { dev: -1n, ino: -1n, mode: 0 },
+          tempIdentity
+        )
+      ) {
+        return error('export-write-failed', 'The export boundary changed before commit.')
+      }
+      if (!this.exportSourcesCurrentSync(lease)) {
+        return error('export-source-changed', 'A source chapter changed at export commit.')
+      }
+
+      lease.state = 'committing'
+      this.testHooks.exportCommitCriticalStarted?.()
+      if (!current()) return error('cancelled', 'This export was cancelled.')
+      lease.criticalCommit = true
+      fsSync.renameSync(tempPath, lease.targetPath)
+      committed = true
+      this.testHooks.afterExportRename?.()
+
+      const committedTarget = fileIdentitySync(lease.targetPath)
+      const committedTargetStat = fsSync.lstatSync(lease.targetPath, {
+        bigint: true,
+        throwIfNoEntry: false
+      })
+      if (
+        !this.exportParentCurrentSync(lease) ||
+        !this.exportRootCurrentSync(lease) ||
+        !committedTarget ||
+        !sameFileIdentity(committedTarget, tempIdentity) ||
+        !committedTargetStat ||
+        committedTargetStat.isSymbolicLink() ||
+        committedTargetStat.nlink !== 1n ||
+        lease.controller.signal.aborted ||
+        lease.revokeAfterCommit
+      ) {
+        return error(
+          'export-write-failed',
+          'The export was written, but its destination identity became uncertain.',
+          undefined,
+          true
+        )
+      }
+      try {
+        if (lease.parentFd === null) throw new Error('Export parent descriptor was revoked.')
+        fsSync.fsyncSync(lease.parentFd)
+      } catch {
+        durabilityUncertain = true
+      }
+      return {
+        ok: true,
+        value: {
+          fileName: path.basename(lease.targetPath),
+          byteLength: bytes.length,
+          durabilityUncertain
+        }
+      }
+    } catch {
+      return error(
+        'export-write-failed',
+        committed
+          ? 'The export was written, but LeafBook could not verify its durability.'
+          : 'LeafBook could not write the export.',
+        undefined,
+        committed
+      )
+    } finally {
+      await handle?.close().catch(() => undefined)
+      if (
+        !committed &&
+        tempIdentity &&
+        this.exportParentCurrentSync(lease) &&
+        sameFileIdentity(
+          fileIdentitySync(tempPath) ?? { dev: -1n, ino: -1n, mode: 0 },
+          tempIdentity
+        )
+      ) {
+        try {
+          fsSync.unlinkSync(tempPath)
+        } catch {
+          // A random temp is harmless if safe pathname cleanup cannot be proven.
+        }
+      }
+    }
+  }
+
+  cancelExport(exportId: unknown, ownerId: number = 0): BookReaderResult<true> {
+    const lease = this.exportLease(exportId, ownerId)
+    if (!lease || lease.kind !== 'html') return error('cancelled', 'This export has expired.')
+    this.revokeExport(lease)
+    return { ok: true, value: true }
+  }
+
+  cancelWebsite(websiteId: unknown, ownerId: number = 0): BookReaderResult<true> {
+    const lease = this.exportLease(websiteId, ownerId)
+    if (!lease || lease.kind !== 'website') {
+      return error('cancelled', 'This website generation has expired.')
+    }
+    this.revokeExport(lease)
+    return { ok: true, value: true }
+  }
+
   async followLink(
     sessionId: unknown,
     nodeId: unknown,
@@ -2487,7 +4391,9 @@ export class BookSessionManager {
         return error('session-not-found', 'This book session has expired.')
       }
       try {
-        await this.openExternal(target.url)
+        if (!(await this.openExternal(ownerId, target.url))) {
+          return error('unsafe-link', 'LeafBook did not open the external link.')
+        }
         if (this.ownedSession(sessionId, ownerId) !== session) {
           return error('session-not-found', 'This book session has expired.')
         }
@@ -2509,7 +4415,9 @@ export class BookSessionManager {
         return error('session-not-found', 'This book session has expired.')
       }
       try {
-        await this.openExternal(revalidated.url)
+        if (!(await this.openExternal(ownerId, revalidated.url))) {
+          return error('unsafe-link', 'LeafBook did not open the external link.')
+        }
         if (this.ownedSession(sessionId, ownerId) !== session) {
           return error('session-not-found', 'This book session has expired.')
         }

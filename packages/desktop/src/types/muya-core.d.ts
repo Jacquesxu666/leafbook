@@ -82,13 +82,19 @@ declare module '@muyajs/core' {
     }): Promise<string>
   }
 
+  export function isSafeLocalResource(source: unknown): boolean
+
   export function renderToStaticHTML(...args: any[]): any
 
   export function escapeHTML(str: string): string
   export function unescapeHTML(str: string): string
   export function sanitize(html: string, config?: any, isInline?: boolean): string
   export function generateGithubSlug(text: string): string
-  export function getImageInfo(src: string): { isUnknownType: boolean; src: string; [key: string]: any }
+  export function getImageInfo(src: string): {
+    isUnknownType: boolean
+    src: string
+    [key: string]: any
+  }
   export function wordCount(markdown: string): {
     word: number
     paragraph: number

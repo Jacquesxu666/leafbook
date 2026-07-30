@@ -11,10 +11,11 @@ platform="${1:-}"
 architecture="${2:-}"
 dist_dir="${3:-$repository_root/dist}"
 
-if [[ ! -d "$dist_dir" ]]; then
-  echo "Artifact directory does not exist: $dist_dir" >&2
+if [[ ! -d "$dist_dir" || -L "$dist_dir" || "$(realpath "$dist_dir")" != "$repository_root/dist" ]]; then
+  echo "Artifact directory must be the canonical fixed repository dist directory." >&2
   exit 1
 fi
+"$repository_root/scripts/check-safe-artifact-path.sh" directory "$dist_dir" "$repository_root"
 if [[ -z "$(find "$dist_dir" -maxdepth 1 -type f -print -quit)" ]]; then
   echo "Artifact directory is empty: $dist_dir" >&2
   exit 1
@@ -51,10 +52,11 @@ case "$platform" in
 esac
 
 for artifact in "${expected[@]}"; do
-  if [[ ! -s "$dist_dir/$artifact" ]]; then
-    echo "Missing or empty $platform artifact: $dist_dir/$artifact" >&2
+  if [[ ! -f "$dist_dir/$artifact" || -L "$dist_dir/$artifact" || ! -s "$dist_dir/$artifact" ]]; then
+    echo "Missing, empty, or unsafe regular $platform artifact: $dist_dir/$artifact" >&2
     exit 1
   fi
+  "$repository_root/scripts/check-safe-artifact-path.sh" regular "$dist_dir/$artifact" "$dist_dir"
 done
 
 temporary_root="$(mktemp -d "${TMPDIR:-/tmp}/leafbook-platform-audit.XXXXXX")"
@@ -70,11 +72,15 @@ if [[ -z "$resources_directory" ]]; then
   echo "$archive does not contain an application resources directory." >&2
   exit 1
 fi
+"$repository_root/scripts/check-safe-artifact-path.sh" directory "$resources_directory" "$temporary_root"
+"$repository_root/scripts/check-no-updater-files.sh" "$temporary_root"
 for license_file in LICENSE NOTICE THIRD-PARTY-LICENSES.txt; do
   if [[ ! -s "$resources_directory/licenses/$license_file" ]]; then
     echo "$archive is missing licenses/$license_file." >&2
     exit 1
   fi
+  "$repository_root/scripts/check-safe-artifact-path.sh" regular \
+    "$resources_directory/licenses/$license_file" "$temporary_root"
 done
 grep -q "MarkText Contributors" "$resources_directory/licenses/LICENSE"
 grep -q "independent derivative project" "$resources_directory/licenses/NOTICE"
@@ -84,12 +90,10 @@ if grep -q '^undefined$' "$resources_directory/licenses/THIRD-PARTY-LICENSES.txt
 fi
 
 asar="$resources_directory/app.asar"
+"$repository_root/scripts/check-safe-artifact-path.sh" regular "$asar" "$temporary_root"
 asar_listing="$temporary_root/asar-list.txt"
 pnpm --filter leafbook exec asar list "$asar" > "$asar_listing"
-if grep -qi "electron-updater" "$asar_listing"; then
-  echo "electron-updater is present in $archive." >&2
-  exit 1
-fi
+"$repository_root/scripts/check-asar-listing-no-updater.sh" "$asar_listing"
 pnpm --filter leafbook exec asar extract "$asar" "$temporary_root/asar"
 node - "$temporary_root/asar/package.json" "$version" <<'NODE'
 const fs = require('node:fs')

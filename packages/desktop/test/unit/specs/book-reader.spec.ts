@@ -3,7 +3,8 @@ import fs from 'fs/promises'
 import fsSync from 'fs'
 import os from 'os'
 import path from 'path'
-import { randomUUID } from 'crypto'
+import { createHash, randomUUID } from 'crypto'
+import { execFileSync } from 'child_process'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import type {
@@ -16,6 +17,7 @@ import type {
 } from '@shared/types/bookReader'
 import { adjacentChapter, flattenReadableNodeIds } from '@/book/readerModel'
 import { renderBookMarkdown } from '@/book/renderMarkdown'
+import { generateBookExportHtml } from '@/book/exportBookHtml'
 import {
   PAINT_WAIT_TIMEOUT_MS,
   restoreReadingPosition,
@@ -33,8 +35,11 @@ import {
 const mocks = vi.hoisted(() => ({
   stores: new Map<string, Record<string, unknown>>(),
   selectedPath: '',
+  exportPath: '',
+  confirmOverwrite: true,
   openedExternal: vi.fn(),
   browserWindow: null as Record<string, unknown> | null,
+  webContentsById: new Map<number, Record<string, unknown>>(),
   ipcHandlers: new Map<string, (...args: never[]) => unknown>()
 }))
 
@@ -64,18 +69,31 @@ vi.mock('electron', () => ({
     showOpenDialog: async () => ({
       canceled: !mocks.selectedPath,
       filePaths: mocks.selectedPath ? [mocks.selectedPath] : []
-    })
+    }),
+    showSaveDialog: async () => ({
+      canceled: !mocks.exportPath,
+      filePath: mocks.exportPath || undefined
+    }),
+    showMessageBox: async () => ({ response: mocks.confirmOverwrite ? 1 : 0 })
   },
   ipcMain: {
     handle: (channel: string, handler: (...args: never[]) => unknown) =>
       mocks.ipcHandlers.set(channel, handler)
   },
+  webContents: { fromId: (id: number) => mocks.webContentsById.get(id) },
   shell: { openExternal: mocks.openedExternal }
 }))
 
-import { BookSessionManager } from 'main_renderer/book/sessionManager'
+import {
+  BookSessionManager,
+  type BookSessionManagerTestHooks
+} from 'main_renderer/book/sessionManager'
 import { loadBookFromDirectory, safelyReadBookChapter } from 'main_renderer/book/filesystem'
-import { isTrustedEditorSender, registerBookHandlers } from 'main_renderer/ipc/books'
+import {
+  isTrustedEditorSender,
+  openConfirmedBookExternal,
+  registerBookHandlers
+} from 'main_renderer/ipc/books'
 
 const temporaryDirectories: string[] = []
 const deferredValue = <T>(): {
@@ -103,7 +121,10 @@ const makeBook = async (files: Record<string, string>): Promise<string> => {
 beforeEach(() => {
   mocks.stores.clear()
   mocks.selectedPath = ''
+  mocks.exportPath = ''
+  mocks.confirmOverwrite = true
   mocks.openedExternal.mockReset()
+  mocks.webContentsById.clear()
   mocks.browserWindow = null
   mocks.ipcHandlers.clear()
 })
@@ -195,7 +216,296 @@ describe('book edit decision queue', () => {
   })
 })
 
+describe('book SUMMARY arrangement sessions', () => {
+  it('arranges only an existing SUMMARY and privately refreshes the reader after save', async () => {
+    const root = await makeBook({
+      'SUMMARY.md': '- [One](one.md)\n- [Two](two.md)\n',
+      'one.md': '# One',
+      'two.md': '# Two'
+    })
+    mocks.selectedPath = root
+    const manager = new BookSessionManager('/arrangement-session-user-data')
+    const opened = await manager.openPicker({ sender: { id: 81 } } as never)
+    expect(opened).toMatchObject({ ok: true, value: { navigationSource: 'summary' } })
+    if (!opened.ok) return
+
+    const begun = await manager.beginArrangement(opened.value.sessionId, 81)
+    expect(begun.ok).toBe(true)
+    if (!begun.ok) return
+    const [one, two] = begun.value.nodes
+    const applied = manager.applyArrangement(
+      {
+        arrangementId: begun.value.arrangementId,
+        operation: {
+          type: 'move-before',
+          nodeId: two.nodeId,
+          targetNodeId: one.nodeId
+        }
+      },
+      81
+    )
+    expect(applied).toMatchObject({ ok: true, value: { dirty: true, canUndo: true } })
+    const saved = await manager.saveArrangement(
+      { arrangementId: begun.value.arrangementId, revision: begun.value.revision },
+      81
+    )
+    expect(saved).toMatchObject({
+      ok: true,
+      value: {
+        session: {
+          sessionId: opened.value.sessionId,
+          nodes: [{ title: 'Two' }, { title: 'One' }]
+        }
+      }
+    })
+    expect(await fs.readFile(path.join(root, 'SUMMARY.md'), 'utf8')).toBe(
+      '- [Two](two.md)\n- [One](one.md)\n'
+    )
+    expect(manager.closeArrangement(begun.value.arrangementId, 81)).toMatchObject({
+      ok: false,
+      error: { code: 'arrangement-not-found' }
+    })
+  })
+
+  it('does not create SUMMARY for inferred books and revokes drafts at refresh/owner boundaries', async () => {
+    const inferredRoot = await makeBook({ 'README.md': '# Inferred' })
+    mocks.selectedPath = inferredRoot
+    const manager = new BookSessionManager('/arrangement-boundary-user-data')
+    const inferred = await manager.openPicker({ sender: { id: 82 } } as never)
+    expect(inferred.ok).toBe(true)
+    if (!inferred.ok) return
+    expect(await manager.beginArrangement(inferred.value.sessionId, 82)).toMatchObject({
+      ok: false,
+      error: { code: 'arrangement-read-only' }
+    })
+    await expect(fs.stat(path.join(inferredRoot, 'SUMMARY.md'))).rejects.toThrow()
+
+    const summaryRoot = await makeBook({
+      'SUMMARY.md': '- [One](one.md)\n',
+      'one.md': '# One'
+    })
+    mocks.selectedPath = summaryRoot
+    const arranged = await manager.openPicker({ sender: { id: 83 } } as never)
+    expect(arranged.ok).toBe(true)
+    if (!arranged.ok) return
+    const begun = await manager.beginArrangement(arranged.value.sessionId, 83)
+    expect(begun.ok).toBe(true)
+    if (!begun.ok) return
+    expect(await manager.refresh(arranged.value.sessionId, 83)).toMatchObject({ ok: true })
+    expect(manager.undoArrangement(begun.value.arrangementId, 83)).toMatchObject({
+      ok: false,
+      error: { code: 'arrangement-not-found' }
+    })
+
+    const second = await manager.beginArrangement(arranged.value.sessionId, 83)
+    expect(second.ok).toBe(true)
+    if (!second.ok) return
+    expect(manager.closeSession(arranged.value.sessionId, 83)).toEqual({ ok: true, value: true })
+    expect(manager.closeArrangement(second.value.arrangementId, 83)).toMatchObject({
+      ok: false,
+      error: { code: 'arrangement-not-found' }
+    })
+
+    const reopened = await manager.openLibrary(arranged.value.libraryId, 84)
+    expect(reopened.ok).toBe(true)
+    if (!reopened.ok) return
+    const third = await manager.beginArrangement(reopened.value.sessionId, 84)
+    expect(third.ok).toBe(true)
+    if (!third.ok) return
+    manager.cleanupOwner(84)
+    expect(manager.closeArrangement(third.value.arrangementId, 84)).toMatchObject({
+      ok: false,
+      error: { code: 'arrangement-not-found' }
+    })
+  })
+
+  it('keeps the lease busy through the save-owned private refresh', async () => {
+    const root = await makeBook({
+      'SUMMARY.md': '- [One](one.md)\n- [Two](two.md)\n',
+      'one.md': '# One',
+      'two.md': '# Two'
+    })
+    mocks.selectedPath = root
+    const refreshStarted = deferredValue<void>()
+    const releaseRefresh = deferredValue<void>()
+    let loads = 0
+    const load = async (...args: Parameters<typeof loadBookFromDirectory>) => {
+      loads++
+      if (loads === 2) {
+        refreshStarted.resolve()
+        await releaseRefresh.promise
+      }
+      return loadBookFromDirectory(...args)
+    }
+    const manager = new BookSessionManager('/arrangement-linearization-user-data', load)
+    const opened = await manager.openPicker({ sender: { id: 85 } } as never)
+    expect(opened.ok).toBe(true)
+    if (!opened.ok) return
+    const begun = await manager.beginArrangement(opened.value.sessionId, 85)
+    expect(begun.ok).toBe(true)
+    if (!begun.ok) return
+    const [one, two] = begun.value.nodes
+    const operation = {
+      arrangementId: begun.value.arrangementId,
+      operation: {
+        type: 'move-before' as const,
+        nodeId: two.nodeId,
+        targetNodeId: one.nodeId
+      }
+    }
+    expect(manager.applyArrangement(operation, 85)).toMatchObject({ ok: true })
+    const saving = manager.saveArrangement(
+      { arrangementId: begun.value.arrangementId, revision: begun.value.revision },
+      85
+    )
+    await refreshStarted.promise
+
+    expect(manager.applyArrangement(operation, 85)).toMatchObject({
+      ok: false,
+      error: { code: 'arrangement-conflict' }
+    })
+    expect(
+      await manager.saveArrangement(
+        { arrangementId: begun.value.arrangementId, revision: begun.value.revision },
+        85
+      )
+    ).toMatchObject({ ok: false, error: { code: 'arrangement-conflict' } })
+
+    releaseRefresh.resolve()
+    expect(await saving).toMatchObject({
+      ok: true,
+      value: {
+        session: {
+          nodes: [{ title: 'Two' }, { title: 'One' }]
+        }
+      }
+    })
+    expect(await fs.readFile(path.join(root, 'SUMMARY.md'), 'utf8')).toBe(
+      '- [Two](two.md)\n- [One](one.md)\n'
+    )
+  })
+
+  it('reports committed bytes but revokes the lease when private refresh fails', async () => {
+    const root = await makeBook({
+      'SUMMARY.md': '- [One](one.md)\n- [Two](two.md)\n',
+      'one.md': '# One',
+      'two.md': '# Two'
+    })
+    mocks.selectedPath = root
+    let loads = 0
+    const load = async (...args: Parameters<typeof loadBookFromDirectory>) => {
+      if (++loads === 2) throw new Error('private refresh failed')
+      return loadBookFromDirectory(...args)
+    }
+    const manager = new BookSessionManager('/arrangement-refresh-failure-user-data', load)
+    const opened = await manager.openPicker({ sender: { id: 86 } } as never)
+    expect(opened.ok).toBe(true)
+    if (!opened.ok) return
+    const begun = await manager.beginArrangement(opened.value.sessionId, 86)
+    expect(begun.ok).toBe(true)
+    if (!begun.ok) return
+    const [one, two] = begun.value.nodes
+    manager.applyArrangement(
+      {
+        arrangementId: begun.value.arrangementId,
+        operation: {
+          type: 'move-before',
+          nodeId: two.nodeId,
+          targetNodeId: one.nodeId
+        }
+      },
+      86
+    )
+    expect(
+      await manager.saveArrangement(
+        { arrangementId: begun.value.arrangementId, revision: begun.value.revision },
+        86
+      )
+    ).toMatchObject({ ok: true, value: { session: null } })
+    expect(manager.undoArrangement(begun.value.arrangementId, 86)).toMatchObject({
+      ok: false,
+      error: { code: 'arrangement-not-found' }
+    })
+    expect(await fs.readFile(path.join(root, 'SUMMARY.md'), 'utf8')).toBe(
+      '- [Two](two.md)\n- [One](one.md)\n'
+    )
+  })
+
+  it('cleans a held save when the session object changes immediately after commit', async () => {
+    const root = await makeBook({
+      'SUMMARY.md': '- [One](one.md)\n- [Two](two.md)\n',
+      'one.md': '# One',
+      'two.md': '# Two'
+    })
+    mocks.selectedPath = root
+    const committed = deferredValue<void>()
+    const release = deferredValue<void>()
+    const manager = new BookSessionManager(
+      '/arrangement-session-change-user-data',
+      undefined,
+      undefined,
+      undefined,
+      {
+        afterArrangementSave: async () => {
+          committed.resolve()
+          await release.promise
+        }
+      }
+    )
+    const opened = await manager.openPicker({ sender: { id: 87 } } as never)
+    expect(opened.ok).toBe(true)
+    if (!opened.ok) return
+    const begun = await manager.beginArrangement(opened.value.sessionId, 87)
+    expect(begun.ok).toBe(true)
+    if (!begun.ok) return
+    const [one, two] = begun.value.nodes
+    manager.applyArrangement(
+      {
+        arrangementId: begun.value.arrangementId,
+        operation: {
+          type: 'move-before',
+          nodeId: two.nodeId,
+          targetNodeId: one.nodeId
+        }
+      },
+      87
+    )
+    const saving = manager.saveArrangement(
+      { arrangementId: begun.value.arrangementId, revision: begun.value.revision },
+      87
+    )
+    await committed.promise
+    const refreshed = await manager.refresh(opened.value.sessionId, 87)
+    expect(refreshed).toMatchObject({
+      ok: true,
+      value: { nodes: [{ title: 'Two' }, { title: 'One' }] }
+    })
+    release.resolve()
+    expect(await saving).toMatchObject({ ok: true, value: { session: null } })
+    expect(manager.closeArrangement(begun.value.arrangementId, 87)).toMatchObject({
+      ok: false,
+      error: { code: 'arrangement-not-found' }
+    })
+  })
+})
+
 describe('book IPC trust boundary', () => {
+  it('fails closed for a missing, destroyed, or untrusted Reader external-link owner', async () => {
+    expect(await openConfirmedBookExternal(700, 'https://example.com/')).toBe(false)
+
+    mocks.webContentsById.set(701, { isDestroyed: () => true })
+    expect(await openConfirmedBookExternal(701, 'https://example.com/')).toBe(false)
+
+    mocks.webContentsById.set(702, {
+      id: 702,
+      isDestroyed: () => false,
+      getURL: () => 'file:///index.html?type=settings',
+      once: vi.fn()
+    })
+    expect(await openConfirmedBookExternal(702, 'https://example.com/')).toBe(false)
+    expect(mocks.openedExternal).not.toHaveBeenCalled()
+  })
+
   it('gates bookshelf listing and every book handler behind an editor sender', async () => {
     registerBookHandlers()
     const listHandler = mocks.ipcHandlers.get('lb::books::list')
@@ -227,8 +537,174 @@ describe('book IPC trust boundary', () => {
     expect(
       [...mocks.ipcHandlers.keys()].filter((channel) => channel.startsWith('lb::books::'))
     ).toEqual(
-      expect.arrayContaining(['lb::books::list', 'lb::books::search', 'lb::books::cancel-search'])
+      expect.arrayContaining([
+        'lb::books::list',
+        'lb::books::search',
+        'lb::books::cancel-search',
+        'lb::books::begin-arrangement',
+        'lb::books::apply-arrangement',
+        'lb::books::undo-arrangement',
+        'lb::books::save-arrangement',
+        'lb::books::close-arrangement',
+        'lb::books::begin-export',
+        'lb::books::commit-export',
+        'lb::books::cancel-export',
+        'lb::books::begin-website',
+        'lb::books::commit-website',
+        'lb::books::cancel-website'
+      ])
     )
+  })
+
+  it('rejects malformed arrangement operations and revisions before manager dispatch', async () => {
+    registerBookHandlers()
+    mocks.browserWindow = {
+      restoreBufferId: 'editor-buffer',
+      isDestroyed: () => false
+    }
+    const event = {
+      sender: {
+        id: 93,
+        isDestroyed: () => false,
+        getURL: () => 'file:///index.html?type=editor',
+        once: vi.fn()
+      }
+    }
+    const apply = vi.spyOn(BookSessionManager.prototype, 'applyArrangement')
+    const save = vi.spyOn(BookSessionManager.prototype, 'saveArrangement')
+    const applyHandler = mocks.ipcHandlers.get('lb::books::apply-arrangement')
+    const saveHandler = mocks.ipcHandlers.get('lb::books::save-arrangement')
+    expect(
+      await applyHandler?.(
+        event as never,
+        {
+          arrangementId: 'arrangement',
+          operation: { type: 'move-before', nodeId: 'one' }
+        } as never
+      )
+    ).toMatchObject({ ok: false, error: { code: 'invalid-request' } })
+    expect(
+      await saveHandler?.(
+        event as never,
+        { arrangementId: 'arrangement', revision: '../not-a-revision' } as never
+      )
+    ).toMatchObject({ ok: false, error: { code: 'invalid-request' } })
+    expect(apply).not.toHaveBeenCalled()
+    expect(save).not.toHaveBeenCalled()
+  })
+
+  it('does not dispatch any arrangement handler for an untrusted sender', async () => {
+    registerBookHandlers()
+    const event = {
+      sender: {
+        id: 94,
+        isDestroyed: () => false,
+        getURL: () => 'file:///index.html?type=settings',
+        once: vi.fn()
+      }
+    }
+    const begin = vi.spyOn(BookSessionManager.prototype, 'beginArrangement')
+    const apply = vi.spyOn(BookSessionManager.prototype, 'applyArrangement')
+    const undo = vi.spyOn(BookSessionManager.prototype, 'undoArrangement')
+    const save = vi.spyOn(BookSessionManager.prototype, 'saveArrangement')
+    const close = vi.spyOn(BookSessionManager.prototype, 'closeArrangement')
+    const id = randomUUID()
+    const calls: Array<[string, unknown]> = [
+      ['lb::books::begin-arrangement', id],
+      [
+        'lb::books::apply-arrangement',
+        {
+          arrangementId: id,
+          operation: { type: 'indent', nodeId: id }
+        }
+      ],
+      ['lb::books::undo-arrangement', id],
+      ['lb::books::save-arrangement', { arrangementId: id, revision: 'a'.repeat(64) }],
+      ['lb::books::close-arrangement', id]
+    ]
+    for (const [channel, request] of calls) {
+      expect(
+        await mocks.ipcHandlers.get(channel)?.(event as never, request as never)
+      ).toMatchObject({
+        ok: false,
+        error: { code: 'invalid-request' }
+      })
+    }
+    expect(begin).not.toHaveBeenCalled()
+    expect(apply).not.toHaveBeenCalled()
+    expect(undo).not.toHaveBeenCalled()
+    expect(save).not.toHaveBeenCalled()
+    expect(close).not.toHaveBeenCalled()
+  })
+
+  it('does not dispatch any export handler for an untrusted sender', async () => {
+    registerBookHandlers()
+    const event = {
+      sender: {
+        id: 95,
+        isDestroyed: () => false,
+        getURL: () => 'file:///index.html?type=settings',
+        once: vi.fn()
+      }
+    }
+    const begin = vi.spyOn(BookSessionManager.prototype, 'beginExport')
+    const commit = vi.spyOn(BookSessionManager.prototype, 'commitExport')
+    const cancel = vi.spyOn(BookSessionManager.prototype, 'cancelExport')
+    const id = randomUUID()
+    expect(
+      await mocks.ipcHandlers.get('lb::books::begin-export')?.(event as never, id as never)
+    ).toMatchObject({ ok: false, error: { code: 'invalid-request' } })
+    expect(
+      await mocks.ipcHandlers.get('lb::books::commit-export')?.(
+        event as never,
+        { exportId: id, html: '<!doctype html>' } as never
+      )
+    ).toMatchObject({ ok: false, error: { code: 'invalid-request' } })
+    expect(
+      await mocks.ipcHandlers.get('lb::books::cancel-export')?.(event as never, id as never)
+    ).toMatchObject({ ok: false, error: { code: 'invalid-request' } })
+    expect(begin).not.toHaveBeenCalled()
+    expect(commit).not.toHaveBeenCalled()
+    expect(cancel).not.toHaveBeenCalled()
+  })
+
+  it('rejects malformed, oversized, and untrusted website IPC without manager dispatch', async () => {
+    registerBookHandlers()
+    const begin = vi.spyOn(BookSessionManager.prototype, 'beginWebsite')
+    const commit = vi.spyOn(BookSessionManager.prototype, 'commitWebsite')
+    const cancel = vi.spyOn(BookSessionManager.prototype, 'cancelWebsite')
+    const id = randomUUID()
+    const sender = (url: string) => ({
+      sender: {
+        id: 96,
+        isDestroyed: () => false,
+        getURL: () => url,
+        once: vi.fn()
+      }
+    })
+    const trusted = sender('file:///index.html?type=editor')
+    const untrusted = sender('file:///index.html?type=settings')
+    for (const [channel, request] of [
+      ['lb::books::begin-website', 'short'],
+      ['lb::books::commit-website', { websiteId: id, html: 'x'.repeat(64 * 1024 * 1024 + 1) }],
+      ['lb::books::cancel-website', '../invalid']
+    ] as const) {
+      expect(
+        await mocks.ipcHandlers.get(channel)?.(trusted as never, request as never)
+      ).toMatchObject({ ok: false, error: { code: 'invalid-request' } })
+    }
+    for (const [channel, request] of [
+      ['lb::books::begin-website', id],
+      ['lb::books::commit-website', { websiteId: id, html: '<!doctype html>' }],
+      ['lb::books::cancel-website', id]
+    ] as const) {
+      expect(
+        await mocks.ipcHandlers.get(channel)?.(untrusted as never, request as never)
+      ).toMatchObject({ ok: false, error: { code: 'invalid-request' } })
+    }
+    expect(begin).not.toHaveBeenCalled()
+    expect(commit).not.toHaveBeenCalled()
+    expect(cancel).not.toHaveBeenCalled()
   })
 
   it('contains a renderer destruction race while sending search progress', async () => {
@@ -1703,8 +2179,17 @@ describe('BookSessionManager authorization boundary', () => {
       'README.md': '# Start\n[bad](javascript:alert(1))'
     })
     mocks.selectedPath = root
-    const manager = new BookSessionManager('/links-user-data')
-    const opened = await manager.openPicker({ sender: {} } as never)
+    const manager = new BookSessionManager(
+      '/links-user-data',
+      undefined,
+      undefined,
+      async (ownerId, target) => {
+        expect(ownerId).toBe(71)
+        mocks.openedExternal(target)
+        return true
+      }
+    )
+    const opened = await manager.openPicker({ sender: { id: 71 } } as never)
     expect(opened.ok).toBe(true)
     if (!opened.ok) return
     const [chapter, external] = opened.value.nodes
@@ -1712,13 +2197,36 @@ describe('BookSessionManager authorization boundary', () => {
     expect(external).toBeDefined()
     if (!chapter || !external) return
     expect(
-      await manager.followLink(opened.value.sessionId, chapter.nodeId, 'javascript:alert(1)')
+      await manager.followLink(opened.value.sessionId, chapter.nodeId, 'javascript:alert(1)', 71)
     ).toMatchObject({ ok: false, error: { code: 'unsafe-link' } })
-    expect(await manager.followLink(opened.value.sessionId, external.nodeId, '#')).toEqual({
+    expect(await manager.followLink(opened.value.sessionId, external.nodeId, '#', 71)).toEqual({
       ok: true,
       value: null
     })
     expect(mocks.openedExternal).toHaveBeenCalledWith('https://example.com/docs')
+  })
+
+  it('fails closed when an external-link confirmation is cancelled', async () => {
+    const root = await makeBook({
+      'SUMMARY.md': '- [Website](https://example.com/docs)\n',
+      'README.md': '# Home'
+    })
+    mocks.selectedPath = root
+    const dispatch = vi.fn()
+    const manager = new BookSessionManager(
+      '/cancelled-link-user-data',
+      undefined,
+      undefined,
+      async () => false
+    )
+    const opened = await manager.openPicker({ sender: { id: 72 } } as never)
+    expect(opened.ok).toBe(true)
+    if (!opened.ok || !opened.value.nodes[0]) return
+    expect(
+      await manager.followLink(opened.value.sessionId, opened.value.nodes[0].nodeId, '#', 72)
+    ).toMatchObject({ ok: false, error: { code: 'unsafe-link' } })
+    expect(dispatch).not.toHaveBeenCalled()
+    expect(mocks.openedExternal).not.toHaveBeenCalled()
   })
 
   it('binds sessions to one renderer owner and clears them when that owner is destroyed', async () => {
@@ -2058,6 +2566,1116 @@ describe('BookSessionManager authorization boundary', () => {
     ])
     const libraries = await manager.listLibraries()
     expect(libraries.map((item) => item.libraryId)).toEqual([first.value.libraryId])
+  })
+})
+
+describe('book HTML export lease', () => {
+  it('includes an out-of-SUMMARY root landing once and excludes orphan bodies', async () => {
+    const root = await makeBook({
+      'SUMMARY.md': '- [One](one.md)\n',
+      'README.md': '# Home\n',
+      'one.md': '# One\n',
+      'orphan.md': '# Orphan secret\n'
+    })
+    const destination = await fs.mkdtemp(path.join(os.tmpdir(), 'leafbook-export-landing-'))
+    temporaryDirectories.push(destination)
+    mocks.selectedPath = root
+    mocks.exportPath = path.join(destination, 'book.html')
+    const manager = new BookSessionManager('/export-landing-user-data')
+    const opened = await manager.openPicker({ sender: { id: 200 } } as never)
+    expect(opened).toMatchObject({ ok: true, value: { navigationSource: 'summary' } })
+    if (!opened.ok) return
+    const prepared = await manager.beginExport(
+      opened.value.sessionId,
+      { sender: { id: 200 } } as never,
+      200
+    )
+    expect(prepared.ok).toBe(true)
+    if (!prepared.ok) return
+    expect(prepared.value.landingNodeId).not.toBeNull()
+    expect(prepared.value.documents.map((document) => document.markdown)).toEqual(
+      expect.arrayContaining(['# Home\n', '# One\n'])
+    )
+    expect(JSON.stringify(prepared.value)).not.toContain('Orphan secret')
+    expect(prepared.value.documents).toHaveLength(2)
+    manager.cancelExport(prepared.value.exportId, 200)
+  })
+
+  it('exports an inferred book without requiring SUMMARY', async () => {
+    const root = await makeBook({ 'README.md': '# Home\n', 'chapter.md': '# Chapter\n' })
+    const destination = await fs.mkdtemp(path.join(os.tmpdir(), 'leafbook-export-inferred-'))
+    temporaryDirectories.push(destination)
+    mocks.selectedPath = root
+    mocks.exportPath = path.join(destination, 'book.html')
+    const manager = new BookSessionManager('/export-inferred-user-data')
+    const opened = await manager.openPicker({ sender: { id: 199 } } as never)
+    expect(opened).toMatchObject({ ok: true, value: { navigationSource: 'inferred' } })
+    if (!opened.ok) return
+    const prepared = await manager.beginExport(
+      opened.value.sessionId,
+      { sender: { id: 199 } } as never,
+      199
+    )
+    expect(prepared.ok).toBe(true)
+    if (prepared.ok) manager.cancelExport(prepared.value.exportId, 199)
+  })
+
+  it('freezes an opaque snapshot and atomically commits a validated offline export', async () => {
+    const root = await makeBook({
+      'SUMMARY.md': '- [一](one.md)\n- [一的别名](one.md#标题)\n- [二](two.md)\n',
+      'one.md': '# 标题\n\n[去第二章](two.md#第二章)\n',
+      'two.md': '# 第二章\n\n正文'
+    })
+    const destination = await fs.mkdtemp(path.join(os.tmpdir(), 'leafbook-export-target-'))
+    temporaryDirectories.push(destination)
+    mocks.selectedPath = root
+    mocks.exportPath = path.join(destination, 'book.html')
+    const manager = new BookSessionManager('/export-user-data')
+    const opened = await manager.openPicker({ sender: { id: 201 } } as never)
+    expect(opened.ok).toBe(true)
+    if (!opened.ok) return
+    const prepared = await manager.beginExport(
+      opened.value.sessionId,
+      { sender: { id: 201 } } as never,
+      201
+    )
+    expect(prepared.ok).toBe(true)
+    if (!prepared.ok) return
+    expect(JSON.stringify(prepared.value)).not.toContain(root)
+    expect(prepared.value.documents).toHaveLength(2)
+    expect(prepared.value.documents[0]?.nodeIds).toHaveLength(2)
+    const html = await generateBookExportHtml(prepared.value)
+    const saved = await manager.commitExport({ exportId: prepared.value.exportId, html }, 201)
+    expect(saved).toMatchObject({ ok: true, value: { fileName: 'book.html' } })
+    const written = await fs.readFile(mocks.exportPath, 'utf8')
+    expect(written).toBe(html)
+    expect(written).not.toContain(root)
+    expect(manager.cancelExport(prepared.value.exportId, 201)).toMatchObject({
+      ok: false,
+      error: { code: 'cancelled' }
+    })
+  })
+
+  it('rejects source mutation and canonical source-root destinations', async () => {
+    const root = await makeBook({
+      'SUMMARY.md': '- [One](one.md)\n',
+      'one.md': '# One\n'
+    })
+    const destination = await fs.mkdtemp(path.join(os.tmpdir(), 'leafbook-export-race-'))
+    temporaryDirectories.push(destination)
+    mocks.selectedPath = root
+    const manager = new BookSessionManager('/export-race-user-data')
+    const opened = await manager.openPicker({ sender: { id: 202 } } as never)
+    expect(opened.ok).toBe(true)
+    if (!opened.ok) return
+    mocks.exportPath = path.join(destination, 'book.html')
+    const prepared = await manager.beginExport(
+      opened.value.sessionId,
+      { sender: { id: 202 } } as never,
+      202
+    )
+    expect(prepared.ok).toBe(true)
+    if (!prepared.ok) return
+    await fs.writeFile(path.join(root, 'one.md'), '# Changed\n')
+    const html = await generateBookExportHtml(prepared.value)
+    await expect(
+      manager.commitExport({ exportId: prepared.value.exportId, html }, 202)
+    ).resolves.toMatchObject({ ok: false, error: { code: 'export-source-changed' } })
+
+    if (process.platform !== 'win32') {
+      const link = path.join(destination, 'source-link')
+      await fs.symlink(root, link)
+      mocks.exportPath = path.join(link, 'inside.html')
+      await expect(
+        manager.beginExport(opened.value.sessionId, { sender: { id: 202 } } as never, 202)
+      ).resolves.toMatchObject({ ok: false, error: { code: 'invalid-request' } })
+    }
+  })
+
+  it('rejects overwrite cancellation, symlink/hardlink targets and inode replacement', async () => {
+    const root = await makeBook({ 'one.md': '# One\n' })
+    const destination = await fs.mkdtemp(path.join(os.tmpdir(), 'leafbook-export-target-race-'))
+    temporaryDirectories.push(destination)
+    mocks.selectedPath = root
+    const manager = new BookSessionManager('/export-target-race-user-data')
+    const opened = await manager.openPicker({ sender: { id: 203 } } as never)
+    expect(opened.ok).toBe(true)
+    if (!opened.ok) return
+
+    const target = path.join(destination, 'book.html')
+    await fs.writeFile(target, 'old')
+    mocks.exportPath = target
+    mocks.confirmOverwrite = false
+    await expect(
+      manager.beginExport(opened.value.sessionId, { sender: { id: 203 } } as never, 203)
+    ).resolves.toMatchObject({ ok: false, error: { code: 'cancelled' } })
+
+    mocks.confirmOverwrite = true
+    if (process.platform !== 'win32') {
+      const symlinkTarget = path.join(destination, 'symlink.html')
+      await fs.symlink(target, symlinkTarget)
+      mocks.exportPath = symlinkTarget
+      await expect(
+        manager.beginExport(opened.value.sessionId, { sender: { id: 203 } } as never, 203)
+      ).resolves.toMatchObject({ ok: false, error: { code: 'export-write-failed' } })
+
+      const hardlinkTarget = path.join(destination, 'hardlink.html')
+      await fs.link(target, hardlinkTarget)
+      mocks.exportPath = hardlinkTarget
+      await expect(
+        manager.beginExport(opened.value.sessionId, { sender: { id: 203 } } as never, 203)
+      ).resolves.toMatchObject({ ok: false, error: { code: 'export-write-failed' } })
+      await fs.unlink(hardlinkTarget)
+    }
+
+    mocks.exportPath = target
+    const prepared = await manager.beginExport(
+      opened.value.sessionId,
+      { sender: { id: 203 } } as never,
+      203
+    )
+    expect(prepared.ok).toBe(true)
+    if (!prepared.ok) return
+    await fs.unlink(target)
+    await fs.writeFile(target, 'replacement inode')
+    const html = await generateBookExportHtml(prepared.value)
+    await expect(
+      manager.commitExport({ exportId: prepared.value.exportId, html }, 203)
+    ).resolves.toMatchObject({ ok: false, error: { code: 'export-write-failed' } })
+    expect(await fs.readFile(target, 'utf8')).toBe('replacement inode')
+
+    mocks.exportPath = path.join(destination, 'cancelled.html')
+    const cancelled = await manager.beginExport(
+      opened.value.sessionId,
+      { sender: { id: 203 } } as never,
+      203
+    )
+    expect(cancelled.ok).toBe(true)
+    if (!cancelled.ok) return
+    expect(manager.cancelExport(cancelled.value.exportId, 203)).toEqual({ ok: true, value: true })
+    await expect(
+      manager.commitExport(
+        { exportId: cancelled.value.exportId, html: await generateBookExportHtml(cancelled.value) },
+        203
+      )
+    ).resolves.toMatchObject({ ok: false, error: { code: 'cancelled' } })
+  })
+
+  it('admits only one commit and cancellation or owner cleanup cannot reach rename', async () => {
+    for (const revocation of ['cancel', 'cleanup'] as const) {
+      const root = await makeBook({ 'one.md': '# One\n' })
+      const destination = await fs.mkdtemp(path.join(os.tmpdir(), `leafbook-export-${revocation}-`))
+      temporaryDirectories.push(destination)
+      mocks.selectedPath = root
+      mocks.exportPath = path.join(destination, 'book.html')
+      const reachedTempSync = deferredValue<void>()
+      const releaseTempSync = deferredValue<void>()
+      let tempSyncEntries = 0
+      const manager = new BookSessionManager(
+        `/export-${revocation}-user-data`,
+        loadBookFromDirectory,
+        safelyReadBookChapter,
+        undefined,
+        {
+          afterExportTempSync: async () => {
+            tempSyncEntries++
+            reachedTempSync.resolve()
+            await releaseTempSync.promise
+          }
+        }
+      )
+      const ownerId = revocation === 'cancel' ? 204 : 205
+      const opened = await manager.openPicker({ sender: { id: ownerId } } as never)
+      expect(opened.ok).toBe(true)
+      if (!opened.ok) continue
+      const prepared = await manager.beginExport(
+        opened.value.sessionId,
+        { sender: { id: ownerId } } as never,
+        ownerId
+      )
+      expect(prepared.ok).toBe(true)
+      if (!prepared.ok) continue
+      const html = await generateBookExportHtml(prepared.value)
+      const first = manager.commitExport({ exportId: prepared.value.exportId, html }, ownerId)
+      await reachedTempSync.promise
+      await expect(
+        manager.commitExport({ exportId: prepared.value.exportId, html }, ownerId)
+      ).resolves.toMatchObject({ ok: false, error: { code: 'export-busy' } })
+      expect(tempSyncEntries).toBe(1)
+      if (revocation === 'cancel') {
+        expect(manager.cancelExport(prepared.value.exportId, ownerId)).toEqual({
+          ok: true,
+          value: true
+        })
+      } else {
+        manager.cleanupOwner(ownerId)
+      }
+      releaseTempSync.resolve()
+      await expect(first).resolves.toMatchObject({ ok: false, error: { code: 'cancelled' } })
+      await expect(fs.stat(mocks.exportPath)).rejects.toMatchObject({ code: 'ENOENT' })
+      expect(
+        (await fs.readdir(destination)).filter((name) => name.includes('leafbook-export'))
+      ).toEqual([])
+    }
+  })
+
+  it.each(['before-temp', 'before-rename'] as const)(
+    'fails closed when the canonical parent is redirected %s',
+    async (racePoint) => {
+      if (process.platform === 'win32') return
+      const root = await makeBook({ 'one.md': '# One\n' })
+      const destination = await fs.mkdtemp(path.join(os.tmpdir(), 'leafbook-export-parent-swap-'))
+      const moved = `${destination}-moved`
+      temporaryDirectories.push(destination, moved)
+      mocks.selectedPath = root
+      mocks.exportPath = path.join(destination, 'book.html')
+      let swapped = false
+      const swapParent = async (): Promise<void> => {
+        if (swapped) return
+        swapped = true
+        await fs.rename(destination, moved)
+        await fs.symlink(root, destination)
+      }
+      let hooks: BookSessionManagerTestHooks
+      if (racePoint === 'before-temp') {
+        hooks = {
+          afterExportSourcePass: async (pass) => {
+            if (pass === 1) await swapParent()
+          }
+        }
+      } else {
+        hooks = { beforeExportCommitCritical: swapParent }
+      }
+      const manager = new BookSessionManager(
+        `/export-parent-${racePoint}-user-data`,
+        loadBookFromDirectory,
+        safelyReadBookChapter,
+        undefined,
+        hooks
+      )
+      const opened = await manager.openPicker({ sender: { id: 206 } } as never)
+      expect(opened.ok).toBe(true)
+      if (!opened.ok) return
+      const prepared = await manager.beginExport(
+        opened.value.sessionId,
+        { sender: { id: 206 } } as never,
+        206
+      )
+      expect(prepared.ok).toBe(true)
+      if (!prepared.ok) return
+      const result = await manager.commitExport(
+        { exportId: prepared.value.exportId, html: await generateBookExportHtml(prepared.value) },
+        206
+      )
+      expect(result).toMatchObject({ ok: false, error: { code: 'export-write-failed' } })
+      await expect(fs.stat(path.join(root, 'book.html'))).rejects.toMatchObject({ code: 'ENOENT' })
+      await expect(fs.stat(path.join(moved, 'book.html'))).rejects.toMatchObject({ code: 'ENOENT' })
+    }
+  )
+
+  it('leaves only an empty random temp when the pinned parent is redirected after open', async () => {
+    if (process.platform === 'win32') return
+    const root = await makeBook({ 'one.md': '# One\n' })
+    const destination = await fs.mkdtemp(path.join(os.tmpdir(), 'leafbook-export-open-swap-'))
+    const moved = `${destination}-moved`
+    temporaryDirectories.push(destination, moved)
+    mocks.selectedPath = root
+    mocks.exportPath = path.join(destination, 'book.html')
+    const manager = new BookSessionManager(
+      '/export-open-swap-user-data',
+      loadBookFromDirectory,
+      safelyReadBookChapter,
+      undefined,
+      {
+        afterExportTempOpen: async () => {
+          await fs.rename(destination, moved)
+          await fs.symlink(root, destination)
+        }
+      }
+    )
+    const opened = await manager.openPicker({ sender: { id: 210 } } as never)
+    expect(opened.ok).toBe(true)
+    if (!opened.ok) return
+    const prepared = await manager.beginExport(
+      opened.value.sessionId,
+      { sender: { id: 210 } } as never,
+      210
+    )
+    expect(prepared.ok).toBe(true)
+    if (!prepared.ok) return
+    await expect(
+      manager.commitExport(
+        { exportId: prepared.value.exportId, html: await generateBookExportHtml(prepared.value) },
+        210
+      )
+    ).resolves.toMatchObject({ ok: false, error: { code: 'export-write-failed' } })
+    const residue = (await fs.readdir(moved)).filter((name) => name.startsWith('.leafbook-export-'))
+    expect(residue).toHaveLength(1)
+    expect((await fs.stat(path.join(moved, residue[0] as string))).size).toBe(0)
+    await expect(fs.stat(path.join(root, 'book.html'))).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  it('detects a root swap and a source mutation at the final commit boundary', async () => {
+    for (const race of ['root', 'source'] as const) {
+      const root = await makeBook({ 'one.md': '# One\n' })
+      const destination = await fs.mkdtemp(path.join(os.tmpdir(), `leafbook-export-${race}-late-`))
+      temporaryDirectories.push(destination)
+      mocks.selectedPath = root
+      mocks.exportPath = path.join(destination, 'book.html')
+      const moved = `${root}-moved`
+      if (race === 'root') temporaryDirectories.push(moved)
+      const manager = new BookSessionManager(
+        `/export-${race}-late-user-data`,
+        loadBookFromDirectory,
+        safelyReadBookChapter,
+        undefined,
+        {
+          afterExportSourcePass: async (pass) => {
+            if (pass !== 2) return
+            if (race === 'root') {
+              await fs.rename(root, moved)
+              await fs.mkdir(root)
+              await fs.writeFile(path.join(root, 'one.md'), '# One\n')
+            } else {
+              await fs.writeFile(path.join(root, 'one.md'), '# Changed after pass two\n')
+            }
+          }
+        }
+      )
+      const opened = await manager.openPicker({ sender: { id: 207 } } as never)
+      expect(opened.ok).toBe(true)
+      if (!opened.ok) continue
+      const prepared = await manager.beginExport(
+        opened.value.sessionId,
+        { sender: { id: 207 } } as never,
+        207
+      )
+      expect(prepared.ok).toBe(true)
+      if (!prepared.ok) continue
+      await expect(
+        manager.commitExport(
+          { exportId: prepared.value.exportId, html: await generateBookExportHtml(prepared.value) },
+          207
+        )
+      ).resolves.toMatchObject({
+        ok: false,
+        error: { code: race === 'root' ? 'export-source-changed' : 'export-source-changed' }
+      })
+      await expect(fs.stat(mocks.exportPath)).rejects.toMatchObject({ code: 'ENOENT' })
+    }
+  })
+
+  it.each(['oversized', 'sparse'] as const)(
+    'rejects a late %s regular source before allocating from its declared size',
+    async (replacement) => {
+      const root = await makeBook({ 'one.md': '# One\n' })
+      const destination = await fs.mkdtemp(path.join(os.tmpdir(), 'leafbook-export-large-late-'))
+      temporaryDirectories.push(destination)
+      mocks.selectedPath = root
+      mocks.exportPath = path.join(destination, 'book.html')
+      const sourcePath = path.join(root, 'one.md')
+      const manager = new BookSessionManager(
+        `/export-${replacement}-source-user-data`,
+        loadBookFromDirectory,
+        safelyReadBookChapter,
+        undefined,
+        {
+          afterExportSourcePass: async (pass) => {
+            if (pass !== 2) return
+            const handle = await fs.open(sourcePath, 'w')
+            try {
+              if (replacement === 'sparse') {
+                await handle.truncate(64 * 1024 * 1024)
+              } else {
+                const chunk = Buffer.alloc(64 * 1024, 0x61)
+                for (let index = 0; index < 513; index++) await handle.write(chunk)
+              }
+            } finally {
+              await handle.close()
+            }
+          }
+        }
+      )
+      const opened = await manager.openPicker({ sender: { id: 209 } } as never)
+      expect(opened.ok).toBe(true)
+      if (!opened.ok) return
+      const prepared = await manager.beginExport(
+        opened.value.sessionId,
+        { sender: { id: 209 } } as never,
+        209
+      )
+      expect(prepared.ok).toBe(true)
+      if (!prepared.ok) return
+      const html = await generateBookExportHtml(prepared.value)
+      const allocation = vi.spyOn(Buffer, 'allocUnsafe')
+      const result = await manager.commitExport({ exportId: prepared.value.exportId, html }, 209)
+      expect(result).toMatchObject({
+        ok: false,
+        error: { code: 'export-source-changed' }
+      })
+      expect(
+        allocation.mock.calls.every(([size]) => typeof size === 'number' && size <= 64 * 1024)
+      ).toBe(true)
+      await expect(fs.stat(mocks.exportPath)).rejects.toMatchObject({ code: 'ENOENT' })
+    }
+  )
+
+  it('rejects a late FIFO source without blocking the main thread', async () => {
+    if (process.platform === 'win32') return
+    const root = await makeBook({ 'one.md': '# One\n' })
+    const destination = await fs.mkdtemp(path.join(os.tmpdir(), 'leafbook-export-fifo-source-'))
+    temporaryDirectories.push(destination)
+    mocks.selectedPath = root
+    mocks.exportPath = path.join(destination, 'book.html')
+    const sourcePath = path.join(root, 'one.md')
+    const manager = new BookSessionManager(
+      '/export-fifo-source-user-data',
+      loadBookFromDirectory,
+      safelyReadBookChapter,
+      undefined,
+      {
+        afterExportSourcePass: async (pass) => {
+          if (pass !== 2) return
+          await fs.unlink(sourcePath)
+          execFileSync('mkfifo', [sourcePath])
+        }
+      }
+    )
+    const opened = await manager.openPicker({ sender: { id: 211 } } as never)
+    expect(opened.ok).toBe(true)
+    if (!opened.ok) return
+    const prepared = await manager.beginExport(
+      opened.value.sessionId,
+      { sender: { id: 211 } } as never,
+      211
+    )
+    expect(prepared.ok).toBe(true)
+    if (!prepared.ok) return
+    const started = performance.now()
+    await expect(
+      manager.commitExport(
+        { exportId: prepared.value.exportId, html: await generateBookExportHtml(prepared.value) },
+        211
+      )
+    ).resolves.toMatchObject({ ok: false, error: { code: 'export-source-changed' } })
+    expect(performance.now() - started).toBeLessThan(1_000)
+    await expect(fs.stat(mocks.exportPath)).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  it('rejects a FIFO destination parent at the final pin without blocking', async () => {
+    if (process.platform === 'win32') return
+    const root = await makeBook({ 'one.md': '# One\n' })
+    const destination = await fs.mkdtemp(path.join(os.tmpdir(), 'leafbook-export-fifo-parent-'))
+    const moved = `${destination}-moved`
+    temporaryDirectories.push(destination, moved)
+    mocks.selectedPath = root
+    mocks.exportPath = path.join(destination, 'book.html')
+    const manager = new BookSessionManager(
+      '/export-fifo-parent-user-data',
+      loadBookFromDirectory,
+      safelyReadBookChapter,
+      undefined,
+      {
+        beforeExportParentPin: async () => {
+          await fs.rename(destination, moved)
+          execFileSync('mkfifo', [destination])
+        }
+      }
+    )
+    const opened = await manager.openPicker({ sender: { id: 212 } } as never)
+    expect(opened.ok).toBe(true)
+    if (!opened.ok) return
+    const started = performance.now()
+    await expect(
+      manager.beginExport(opened.value.sessionId, { sender: { id: 212 } } as never, 212)
+    ).resolves.toMatchObject({ ok: false, error: { code: 'export-write-failed' } })
+    expect(performance.now() - started).toBeLessThan(1_000)
+  })
+
+  it('reports committed uncertainty if the parent identity changes after rename', async () => {
+    const root = await makeBook({ 'one.md': '# One\n' })
+    const destination = await fs.mkdtemp(path.join(os.tmpdir(), 'leafbook-export-post-rename-'))
+    const moved = `${destination}-moved`
+    temporaryDirectories.push(destination, moved)
+    mocks.selectedPath = root
+    mocks.exportPath = path.join(destination, 'book.html')
+    const manager = new BookSessionManager(
+      '/export-post-rename-user-data',
+      loadBookFromDirectory,
+      safelyReadBookChapter,
+      undefined,
+      {
+        afterExportRename: () => {
+          fsSync.renameSync(destination, moved)
+          fsSync.mkdirSync(destination)
+        }
+      }
+    )
+    const opened = await manager.openPicker({ sender: { id: 208 } } as never)
+    expect(opened.ok).toBe(true)
+    if (!opened.ok) return
+    const prepared = await manager.beginExport(
+      opened.value.sessionId,
+      { sender: { id: 208 } } as never,
+      208
+    )
+    expect(prepared.ok).toBe(true)
+    if (!prepared.ok) return
+    const result = await manager.commitExport(
+      { exportId: prepared.value.exportId, html: await generateBookExportHtml(prepared.value) },
+      208
+    )
+    expect(result).toMatchObject({
+      ok: false,
+      error: { code: 'export-write-failed', committed: true }
+    })
+    expect(await fs.readFile(path.join(moved, 'book.html'), 'utf8')).toContain('<!doctype html>')
+    await expect(fs.stat(path.join(destination, 'book.html'))).rejects.toMatchObject({
+      code: 'ENOENT'
+    })
+  })
+})
+
+describe('book local website transaction', () => {
+  const generate = async (manager: BookSessionManager, sessionId: string, ownerId: number) => {
+    const prepared = await manager.beginWebsite(
+      sessionId,
+      { sender: { id: ownerId } } as never,
+      ownerId
+    )
+    expect(prepared.ok).toBe(true)
+    if (!prepared.ok) throw new Error(prepared.error.message)
+    const html = await generateBookExportHtml({
+      ...prepared.value,
+      exportId: prepared.value.websiteId
+    })
+    return manager.commitWebsite({ websiteId: prepared.value.websiteId, html }, ownerId)
+  }
+
+  it('creates exactly index and a canonical main-owned manifest in an absent target', async () => {
+    const root = await makeBook({
+      'SUMMARY.md': '- [一](one.md)\n- [别名](one.md#标题)\n- [缺失](missing.md)\n',
+      'one.md': '# 标题\n\n中文正文\n'
+    })
+    const destination = await fs.mkdtemp(path.join(os.tmpdir(), 'leafbook-site-target-'))
+    temporaryDirectories.push(destination)
+    const target = path.join(destination, 'LeafBook-site')
+    mocks.selectedPath = root
+    mocks.exportPath = target
+    const manager = new BookSessionManager('/website-user-data')
+    const opened = await manager.openPicker({ sender: { id: 301 } } as never)
+    expect(opened.ok).toBe(true)
+    if (!opened.ok) return
+    const saved = await generate(manager, opened.value.sessionId, 301)
+    expect(saved).toMatchObject({
+      ok: true,
+      value: {
+        directoryName: 'LeafBook-site',
+        files: ['index.html', 'leafbook-manifest.json']
+      }
+    })
+    expect((await fs.readdir(target)).sort()).toEqual(['index.html', 'leafbook-manifest.json'])
+    const html = await fs.readFile(path.join(target, 'index.html'))
+    const manifestBytes = await fs.readFile(path.join(target, 'leafbook-manifest.json'))
+    const manifest = JSON.parse(manifestBytes.toString())
+    expect(manifest).toEqual({
+      schemaVersion: 1,
+      generator: 'LeafBook',
+      files: [
+        {
+          path: 'index.html',
+          size: html.byteLength,
+          sha256: createHash('sha256').update(html).digest('hex')
+        }
+      ]
+    })
+    expect(html.toString()).toContain('中文正文')
+    expect(html.toString()).not.toContain(root)
+  })
+
+  it('replaces empty and exact-owned targets, but refuses unknown or tampered targets', async () => {
+    const root = await makeBook({ 'SUMMARY.md': '- [One](one.md)\n', 'one.md': '# One\n' })
+    const destination = await fs.mkdtemp(path.join(os.tmpdir(), 'leafbook-site-replace-'))
+    temporaryDirectories.push(destination)
+    mocks.selectedPath = root
+    const manager = new BookSessionManager('/website-replace-user-data')
+    const opened = await manager.openPicker({ sender: { id: 302 } } as never)
+    expect(opened.ok).toBe(true)
+    if (!opened.ok) return
+
+    const empty = path.join(destination, 'empty-site')
+    await fs.mkdir(empty)
+    mocks.exportPath = empty
+    expect(await generate(manager, opened.value.sessionId, 302)).toMatchObject({ ok: true })
+    await fs.writeFile(path.join(root, 'one.md'), '# Changed\n')
+    const refreshed = await manager.refresh(opened.value.sessionId, 302)
+    expect(refreshed.ok).toBe(true)
+    mocks.exportPath = empty
+    expect(await generate(manager, opened.value.sessionId, 302)).toMatchObject({ ok: true })
+    expect(await fs.readFile(path.join(empty, 'index.html'), 'utf8')).toContain('Changed')
+
+    const unknown = path.join(destination, 'unknown-site')
+    await fs.mkdir(unknown)
+    await fs.writeFile(path.join(unknown, 'notes.txt'), 'keep me')
+    mocks.exportPath = unknown
+    expect(
+      await manager.beginWebsite(opened.value.sessionId, { sender: { id: 302 } } as never, 302)
+    ).toMatchObject({ ok: false, error: { code: 'website-unsafe-target' } })
+    expect(await fs.readFile(path.join(unknown, 'notes.txt'), 'utf8')).toBe('keep me')
+
+    await fs.writeFile(path.join(empty, 'index.html'), 'tampered')
+    mocks.exportPath = empty
+    expect(
+      await manager.beginWebsite(opened.value.sessionId, { sender: { id: 302 } } as never, 302)
+    ).toMatchObject({ ok: false, error: { code: 'website-unsafe-target' } })
+  })
+
+  it('refuses symlink, hardlink, and FIFO leaves without dispatching writes', async () => {
+    const root = await makeBook({ 'SUMMARY.md': '- [One](one.md)\n', 'one.md': '# One\n' })
+    const destination = await fs.mkdtemp(path.join(os.tmpdir(), 'leafbook-site-special-'))
+    temporaryDirectories.push(destination)
+    mocks.selectedPath = root
+    const manager = new BookSessionManager('/website-special-user-data')
+    const opened = await manager.openPicker({ sender: { id: 303 } } as never)
+    expect(opened.ok).toBe(true)
+    if (!opened.ok) return
+    for (const kind of ['symlink', 'hardlink', 'fifo'] as const) {
+      const target = path.join(destination, kind)
+      await fs.mkdir(target)
+      const outside = path.join(destination, `${kind}-outside`)
+      await fs.writeFile(outside, 'outside')
+      if (kind === 'symlink') await fs.symlink(outside, path.join(target, 'index.html'))
+      if (kind === 'hardlink') await fs.link(outside, path.join(target, 'index.html'))
+      if (kind === 'fifo') {
+        execFileSync('mkfifo', [path.join(target, 'index.html')])
+      }
+      await fs.writeFile(path.join(target, 'leafbook-manifest.json'), '{}')
+      mocks.exportPath = target
+      expect(
+        await manager.beginWebsite(opened.value.sessionId, { sender: { id: 303 } } as never, 303)
+      ).toMatchObject({ ok: false, error: { code: 'website-unsafe-target' } })
+      expect(await fs.readFile(outside, 'utf8')).toBe('outside')
+    }
+  })
+
+  it.each([
+    ['second rename', false, false],
+    ['rollback', true, false],
+    ['backup cleanup', false, true]
+  ] as const)(
+    'contains deterministic %s failure without deleting an unproven path',
+    async (_label, failRollback, failCleanup) => {
+      const root = await makeBook({
+        'SUMMARY.md': '- [One](one.md)\n',
+        'one.md': '# Original\n'
+      })
+      const destination = await fs.mkdtemp(path.join(os.tmpdir(), 'leafbook-site-failure-'))
+      temporaryDirectories.push(destination)
+      const target = path.join(destination, 'LeafBook-site')
+      mocks.selectedPath = root
+      mocks.exportPath = target
+      const seed = new BookSessionManager(`/website-seed-${randomUUID()}`)
+      const seededSession = await seed.openPicker({ sender: { id: 304 } } as never)
+      expect(seededSession.ok).toBe(true)
+      if (!seededSession.ok) return
+      expect(await generate(seed, seededSession.value.sessionId, 304)).toMatchObject({ ok: true })
+      const oldIndex = await fs.readFile(path.join(target, 'index.html'), 'utf8')
+
+      await fs.writeFile(path.join(root, 'one.md'), '# Replacement\n')
+      let stageRenameCalls = 0
+      const hooks: BookSessionManagerTestHooks = {}
+      if (failCleanup) {
+        hooks.beforeWebsiteBackupCleanup = () => {
+          throw new Error('injected cleanup failure')
+        }
+      } else {
+        hooks.beforeWebsiteStageRename = () => {
+          stageRenameCalls++
+          throw new Error('injected second rename failure')
+        }
+        if (failRollback) {
+          hooks.beforeWebsiteRollback = () => {
+            throw new Error('injected rollback failure')
+          }
+        }
+      }
+      const manager = new BookSessionManager(
+        `/website-failure-${randomUUID()}`,
+        undefined,
+        undefined,
+        undefined,
+        hooks
+      )
+      const opened = await manager.openPicker({ sender: { id: 305 } } as never)
+      expect(opened.ok).toBe(true)
+      if (!opened.ok) return
+      const result = await generate(manager, opened.value.sessionId, 305)
+      if (failCleanup) {
+        expect(result).toMatchObject({
+          ok: false,
+          error: { code: 'website-commit-uncertain', committed: true }
+        })
+        expect(await fs.readFile(path.join(target, 'index.html'), 'utf8')).toContain('Replacement')
+      } else if (failRollback) {
+        expect(result).toMatchObject({
+          ok: false,
+          error: { code: 'website-commit-uncertain', committed: true }
+        })
+        await expect(fs.stat(target)).rejects.toMatchObject({ code: 'ENOENT' })
+        expect(stageRenameCalls).toBe(1)
+      } else {
+        expect(result).toMatchObject({
+          ok: false,
+          error: { code: 'website-write-failed', committed: false }
+        })
+        expect(await fs.readFile(path.join(target, 'index.html'), 'utf8')).toBe(oldIndex)
+      }
+      const leftovers = await fs.readdir(destination)
+      expect(leftovers.filter((name) => name.includes('stage'))).toHaveLength(failRollback ? 1 : 0)
+      if (!failRollback && !failCleanup) {
+        expect(leftovers.filter((name) => name.includes('backup'))).toEqual([])
+      } else {
+        expect(leftovers.filter((name) => name.includes('backup'))).toHaveLength(1)
+      }
+    }
+  )
+
+  it('refuses a staging-directory identity swap and never deletes the replacement', async () => {
+    const root = await makeBook({ 'SUMMARY.md': '- [One](one.md)\n', 'one.md': '# One\n' })
+    const destination = await fs.mkdtemp(path.join(os.tmpdir(), 'leafbook-site-stage-swap-'))
+    temporaryDirectories.push(destination)
+    const target = path.join(destination, 'LeafBook-site')
+    mocks.selectedPath = root
+    mocks.exportPath = target
+    let replacementPath = ''
+    const manager = new BookSessionManager(
+      `/website-stage-swap-${randomUUID()}`,
+      undefined,
+      undefined,
+      undefined,
+      {
+        afterExportTempSync: async (stagePath) => {
+          if (!stagePath) return
+          await fs.rename(stagePath, `${stagePath}-moved`)
+          await fs.mkdir(stagePath)
+          await fs.writeFile(path.join(stagePath, 'attacker.txt'), 'do not delete')
+          replacementPath = stagePath
+        }
+      }
+    )
+    const opened = await manager.openPicker({ sender: { id: 306 } } as never)
+    expect(opened.ok).toBe(true)
+    if (!opened.ok) return
+    expect(await generate(manager, opened.value.sessionId, 306)).toMatchObject({
+      ok: false,
+      error: { code: 'website-write-failed', committed: false }
+    })
+    expect(await fs.readFile(path.join(replacementPath, 'attacker.txt'), 'utf8')).toBe(
+      'do not delete'
+    )
+    await expect(fs.stat(target)).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  it('refuses an exact-owned stage swap immediately before rename and preserves it', async () => {
+    const root = await makeBook({ 'SUMMARY.md': '- [One](one.md)\n', 'one.md': '# One\n' })
+    const destination = await fs.mkdtemp(path.join(os.tmpdir(), 'leafbook-site-stage-critical-'))
+    temporaryDirectories.push(destination)
+    const target = path.join(destination, 'LeafBook-site')
+    mocks.selectedPath = root
+    mocks.exportPath = target
+    let attackerStage = ''
+    let attackerIndexIno = 0n
+    const manager = new BookSessionManager(
+      `/website-stage-critical-${randomUUID()}`,
+      undefined,
+      undefined,
+      undefined,
+      {
+        beforeWebsiteStageRename: (stagePath) => {
+          if (!stagePath) throw new Error('missing stage path')
+          const original = `${stagePath}-original`
+          fsSync.renameSync(stagePath, original)
+          fsSync.mkdirSync(stagePath)
+          fsSync.copyFileSync(path.join(original, 'index.html'), path.join(stagePath, 'index.html'))
+          fsSync.copyFileSync(
+            path.join(original, 'leafbook-manifest.json'),
+            path.join(stagePath, 'leafbook-manifest.json')
+          )
+          attackerStage = stagePath
+          attackerIndexIno = fsSync.lstatSync(path.join(stagePath, 'index.html'), {
+            bigint: true
+          }).ino
+        }
+      }
+    )
+    const opened = await manager.openPicker({ sender: { id: 308 } } as never)
+    expect(opened.ok).toBe(true)
+    if (!opened.ok) return
+    expect(await generate(manager, opened.value.sessionId, 308)).toMatchObject({
+      ok: false,
+      error: { code: 'website-write-failed', committed: false }
+    })
+    expect(fsSync.lstatSync(path.join(attackerStage, 'index.html'), { bigint: true }).ino).toBe(
+      attackerIndexIno
+    )
+    await expect(fs.stat(target)).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  it('reports uncertainty and preserves an exact-owned target swap after rename', async () => {
+    const root = await makeBook({ 'SUMMARY.md': '- [One](one.md)\n', 'one.md': '# One\n' })
+    const destination = await fs.mkdtemp(path.join(os.tmpdir(), 'leafbook-site-target-post-'))
+    temporaryDirectories.push(destination)
+    const target = path.join(destination, 'LeafBook-site')
+    mocks.selectedPath = root
+    mocks.exportPath = target
+    let attackerIndexIno = 0n
+    const manager = new BookSessionManager(
+      `/website-target-post-${randomUUID()}`,
+      undefined,
+      undefined,
+      undefined,
+      {
+        afterWebsiteStageRename: (targetPath) => {
+          if (!targetPath) throw new Error('missing target path')
+          const original = `${targetPath}-original`
+          fsSync.renameSync(targetPath, original)
+          fsSync.mkdirSync(targetPath)
+          fsSync.copyFileSync(
+            path.join(original, 'index.html'),
+            path.join(targetPath, 'index.html')
+          )
+          fsSync.copyFileSync(
+            path.join(original, 'leafbook-manifest.json'),
+            path.join(targetPath, 'leafbook-manifest.json')
+          )
+          attackerIndexIno = fsSync.lstatSync(path.join(targetPath, 'index.html'), {
+            bigint: true
+          }).ino
+        }
+      }
+    )
+    const opened = await manager.openPicker({ sender: { id: 309 } } as never)
+    expect(opened.ok).toBe(true)
+    if (!opened.ok) return
+    expect(await generate(manager, opened.value.sessionId, 309)).toMatchObject({
+      ok: false,
+      error: { code: 'website-commit-uncertain', committed: true }
+    })
+    expect(fsSync.lstatSync(path.join(target, 'index.html'), { bigint: true }).ino).toBe(
+      attackerIndexIno
+    )
+  })
+
+  it('refuses rollback from a swapped exact-owned backup and preserves the attacker', async () => {
+    const root = await makeBook({ 'SUMMARY.md': '- [One](one.md)\n', 'one.md': '# One\n' })
+    const destination = await fs.mkdtemp(path.join(os.tmpdir(), 'leafbook-site-backup-rollback-'))
+    temporaryDirectories.push(destination)
+    const target = path.join(destination, 'LeafBook-site')
+    mocks.selectedPath = root
+    mocks.exportPath = target
+    const seed = new BookSessionManager(`/website-backup-seed-${randomUUID()}`)
+    const seeded = await seed.openPicker({ sender: { id: 310 } } as never)
+    expect(seeded.ok).toBe(true)
+    if (!seeded.ok) return
+    expect(await generate(seed, seeded.value.sessionId, 310)).toMatchObject({ ok: true })
+    let attackerBackup = ''
+    let attackerIndexIno = 0n
+    const manager = new BookSessionManager(
+      `/website-backup-rollback-${randomUUID()}`,
+      undefined,
+      undefined,
+      undefined,
+      {
+        beforeWebsiteStageRename: () => {
+          throw new Error('force rollback')
+        },
+        beforeWebsiteRollback: (backupPath) => {
+          if (!backupPath) throw new Error('missing backup path')
+          const original = `${backupPath}-original`
+          fsSync.renameSync(backupPath, original)
+          fsSync.mkdirSync(backupPath)
+          fsSync.copyFileSync(
+            path.join(original, 'index.html'),
+            path.join(backupPath, 'index.html')
+          )
+          fsSync.copyFileSync(
+            path.join(original, 'leafbook-manifest.json'),
+            path.join(backupPath, 'leafbook-manifest.json')
+          )
+          attackerBackup = backupPath
+          attackerIndexIno = fsSync.lstatSync(path.join(backupPath, 'index.html'), {
+            bigint: true
+          }).ino
+        }
+      }
+    )
+    const opened = await manager.openPicker({ sender: { id: 311 } } as never)
+    expect(opened.ok).toBe(true)
+    if (!opened.ok) return
+    expect(await generate(manager, opened.value.sessionId, 311)).toMatchObject({
+      ok: false,
+      error: { code: 'website-commit-uncertain', committed: true }
+    })
+    expect(fsSync.lstatSync(path.join(attackerBackup, 'index.html'), { bigint: true }).ino).toBe(
+      attackerIndexIno
+    )
+    await expect(fs.stat(target)).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  it('stops cleanup after an exact-owned backup swap and preserves the attacker leaves', async () => {
+    const root = await makeBook({ 'SUMMARY.md': '- [One](one.md)\n', 'one.md': '# One\n' })
+    const destination = await fs.mkdtemp(path.join(os.tmpdir(), 'leafbook-site-backup-cleanup-'))
+    temporaryDirectories.push(destination)
+    const target = path.join(destination, 'LeafBook-site')
+    mocks.selectedPath = root
+    mocks.exportPath = target
+    const seed = new BookSessionManager(`/website-cleanup-seed-${randomUUID()}`)
+    const seeded = await seed.openPicker({ sender: { id: 312 } } as never)
+    expect(seeded.ok).toBe(true)
+    if (!seeded.ok) return
+    expect(await generate(seed, seeded.value.sessionId, 312)).toMatchObject({ ok: true })
+    const attackerSource = path.join(destination, 'attacker-owned')
+    fsSync.mkdirSync(attackerSource)
+    fsSync.copyFileSync(path.join(target, 'index.html'), path.join(attackerSource, 'index.html'))
+    fsSync.copyFileSync(
+      path.join(target, 'leafbook-manifest.json'),
+      path.join(attackerSource, 'leafbook-manifest.json')
+    )
+    const attackerIndexIno = fsSync.lstatSync(path.join(attackerSource, 'index.html'), {
+      bigint: true
+    }).ino
+    let attackerBackup = ''
+    const manager = new BookSessionManager(
+      `/website-backup-cleanup-${randomUUID()}`,
+      undefined,
+      undefined,
+      undefined,
+      {
+        duringWebsiteBackupCleanup: (backupPath) => {
+          if (!backupPath) throw new Error('missing backup path')
+          fsSync.renameSync(backupPath, `${backupPath}-original`)
+          fsSync.renameSync(attackerSource, backupPath)
+          attackerBackup = backupPath
+        }
+      }
+    )
+    const opened = await manager.openPicker({ sender: { id: 313 } } as never)
+    expect(opened.ok).toBe(true)
+    if (!opened.ok) return
+    expect(await generate(manager, opened.value.sessionId, 313)).toMatchObject({
+      ok: true,
+      value: { durabilityUncertain: true }
+    })
+    expect(fsSync.lstatSync(path.join(attackerBackup, 'index.html'), { bigint: true }).ino).toBe(
+      attackerIndexIno
+    )
+    expect(
+      await fs.readFile(path.join(attackerBackup, 'leafbook-manifest.json'), 'utf8')
+    ).toContain('"generator": "LeafBook"')
+  })
+
+  it.each(['index', 'manifest'] as const)(
+    'rechecks a replacement %s leaf after expensive cleanup boundary validation',
+    async (leaf) => {
+      const root = await makeBook({ 'SUMMARY.md': '- [One](one.md)\n', 'one.md': '# One\n' })
+      const destination = await fs.mkdtemp(path.join(os.tmpdir(), 'leafbook-site-leaf-race-'))
+      temporaryDirectories.push(destination)
+      const target = path.join(destination, 'LeafBook-site')
+      mocks.selectedPath = root
+      mocks.exportPath = target
+      const seed = new BookSessionManager(`/website-leaf-seed-${randomUUID()}`)
+      const seeded = await seed.openPicker({ sender: { id: 314 } } as never)
+      expect(seeded.ok).toBe(true)
+      if (!seeded.ok) return
+      expect(await generate(seed, seeded.value.sessionId, 314)).toMatchObject({ ok: true })
+      let backupPath = ''
+      let replacementIno = 0n
+      const replaceLeaf = (directoryPath: string, name: string): void => {
+        const leafPath = path.join(directoryPath, name)
+        const bytes = fsSync.readFileSync(leafPath)
+        fsSync.unlinkSync(leafPath)
+        fsSync.writeFileSync(leafPath, bytes)
+        backupPath = directoryPath
+        replacementIno = fsSync.lstatSync(leafPath, { bigint: true }).ino
+      }
+      const hooks: BookSessionManagerTestHooks = {}
+      if (leaf === 'index') {
+        hooks.beforeWebsiteIndexFinalInspection = (directoryPath) => {
+          if (!directoryPath) throw new Error('missing backup path')
+          replaceLeaf(directoryPath, 'index.html')
+        }
+      } else {
+        hooks.beforeWebsiteManifestFinalInspection = (directoryPath) => {
+          if (!directoryPath) throw new Error('missing backup path')
+          replaceLeaf(directoryPath, 'leafbook-manifest.json')
+        }
+      }
+      const manager = new BookSessionManager(
+        `/website-leaf-race-${randomUUID()}`,
+        undefined,
+        undefined,
+        undefined,
+        hooks
+      )
+      const opened = await manager.openPicker({ sender: { id: 315 } } as never)
+      expect(opened.ok).toBe(true)
+      if (!opened.ok) return
+      expect(await generate(manager, opened.value.sessionId, 315)).toMatchObject({
+        ok: true,
+        value: { durabilityUncertain: true }
+      })
+      const name = leaf === 'index' ? 'index.html' : 'leafbook-manifest.json'
+      expect(fsSync.lstatSync(path.join(backupPath, name), { bigint: true }).ino).toBe(
+        replacementIno
+      )
+    }
+  )
+
+  it('revalidates chapter, SUMMARY, and absent-target state before writing', async () => {
+    for (const mutation of ['chapter', 'summary', 'target'] as const) {
+      const root = await makeBook({
+        'SUMMARY.md': '- [One](one.md)\n',
+        'one.md': '# One\n'
+      })
+      const destination = await fs.mkdtemp(path.join(os.tmpdir(), 'leafbook-site-revalidate-'))
+      temporaryDirectories.push(destination)
+      const target = path.join(destination, `site-${mutation}`)
+      mocks.selectedPath = root
+      mocks.exportPath = target
+      const manager = new BookSessionManager(`/website-revalidate-${randomUUID()}`)
+      const opened = await manager.openPicker({ sender: { id: 307 } } as never)
+      expect(opened.ok).toBe(true)
+      if (!opened.ok) return
+      const prepared = await manager.beginWebsite(
+        opened.value.sessionId,
+        { sender: { id: 307 } } as never,
+        307
+      )
+      expect(prepared.ok).toBe(true)
+      if (!prepared.ok) return
+      if (mutation === 'chapter') await fs.writeFile(path.join(root, 'one.md'), '# Mutated\n')
+      if (mutation === 'summary') {
+        await fs.writeFile(path.join(root, 'SUMMARY.md'), '- [Changed](one.md)\n')
+      }
+      if (mutation === 'target') {
+        await fs.mkdir(target)
+        await fs.writeFile(path.join(target, 'unknown.txt'), 'keep')
+      }
+      const html = await generateBookExportHtml({
+        ...prepared.value,
+        exportId: prepared.value.websiteId
+      })
+      const result = await manager.commitWebsite({ websiteId: prepared.value.websiteId, html }, 307)
+      expect(result).toMatchObject({
+        ok: false,
+        error: {
+          code: mutation === 'target' ? 'website-unsafe-target' : 'website-source-changed'
+        }
+      })
+      if (mutation === 'target') {
+        expect(await fs.readFile(path.join(target, 'unknown.txt'), 'utf8')).toBe('keep')
+      }
+    }
   })
 })
 

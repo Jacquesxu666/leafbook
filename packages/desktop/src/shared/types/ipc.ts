@@ -34,6 +34,16 @@ import type { BufferedState as BufferedStateType } from './bufferedState'
 import type { MenuTemplate, MenuPopupPosition } from './menu'
 import type {
   BookChapterDto,
+  BookArrangementApplyRequestDto,
+  BookArrangementDto,
+  BookArrangementSaveDto,
+  BookArrangementSaveRequestDto,
+  BookExportCommitRequestDto,
+  BookExportSaveDto,
+  BookExportSnapshotDto,
+  BookWebsiteCommitRequestDto,
+  BookWebsiteSaveDto,
+  BookWebsiteSnapshotDto,
   BookEditDto,
   BookEditSaveDto,
   BookEditSaveRequestDto,
@@ -79,6 +89,50 @@ export interface IpcInvokeChannels {
   }
   'lb::books::close-edit': {
     args: [editId: string]
+    ret: BookReaderResult<true>
+  }
+  'lb::books::begin-arrangement': {
+    args: [sessionId: string]
+    ret: BookReaderResult<BookArrangementDto>
+  }
+  'lb::books::apply-arrangement': {
+    args: [request: BookArrangementApplyRequestDto]
+    ret: BookReaderResult<BookArrangementDto>
+  }
+  'lb::books::undo-arrangement': {
+    args: [arrangementId: string]
+    ret: BookReaderResult<BookArrangementDto>
+  }
+  'lb::books::save-arrangement': {
+    args: [request: BookArrangementSaveRequestDto]
+    ret: BookReaderResult<BookArrangementSaveDto>
+  }
+  'lb::books::close-arrangement': {
+    args: [arrangementId: string]
+    ret: BookReaderResult<true>
+  }
+  'lb::books::begin-export': {
+    args: [sessionId: string]
+    ret: BookReaderResult<BookExportSnapshotDto>
+  }
+  'lb::books::commit-export': {
+    args: [request: BookExportCommitRequestDto]
+    ret: BookReaderResult<BookExportSaveDto>
+  }
+  'lb::books::cancel-export': {
+    args: [exportId: string]
+    ret: BookReaderResult<true>
+  }
+  'lb::books::begin-website': {
+    args: [sessionId: string]
+    ret: BookReaderResult<BookWebsiteSnapshotDto>
+  }
+  'lb::books::commit-website': {
+    args: [request: BookWebsiteCommitRequestDto]
+    ret: BookReaderResult<BookWebsiteSaveDto>
+  }
+  'lb::books::cancel-website': {
+    args: [websiteId: string]
     ret: BookReaderResult<true>
   }
   'lb::books::save-reading-position': {

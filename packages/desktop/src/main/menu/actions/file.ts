@@ -1,28 +1,23 @@
 import { rename as fsRename } from 'fs-extra'
 import path from 'path'
-import {
-  BrowserWindow,
-  app,
-  dialog,
-  shell,
-  ipcMain,
-  type IpcMainEvent,
-  type MenuItem
-} from 'electron'
+import { BrowserWindow, app, dialog, ipcMain, type IpcMainEvent, type MenuItem } from 'electron'
 import log from 'electron-log'
 import { isDirectory, isFile, exists } from 'common/filesystem'
-import { MARKDOWN_EXTENSIONS, isDangerousExecutableFile, isMarkdownFile } from 'common/filesystem/paths'
+import { MARKDOWN_EXTENSIONS, isMarkdownFile } from 'common/filesystem/paths'
 import { checkUpdates, userSetting } from './marktext'
 import { showTabBar } from './view'
 import { COMMANDS } from '../../commands'
 import type { CommandManager } from '../../commands'
-import { EXTENSION_HASN, PANDOC_EXTENSIONS, URL_REG } from '../../config'
+import { EXTENSION_HASN, PANDOC_EXTENSIONS } from '../../config'
 import { normalizeAndResolvePath, writeFile } from '../../filesystem'
 import { writeMarkdownFile } from '../../filesystem/markdown'
 import { getPath, getRecommendTitleFromMarkdownString } from '../../utils'
 import pandoc from '../../utils/pandoc'
 import { t } from '../../i18n'
 import type { UnsavedFile } from '@shared/types/files'
+import { isTrustedEditorSender } from '../../ipc/books'
+import { confirmAndOpenExternal } from '../../security/confirmedExternalOpen'
+import { handleFormatLinkClick } from '../../security/formatLinkClick'
 
 type Win = BrowserWindow | null | undefined
 
@@ -84,7 +79,8 @@ interface ExportPayload {
 }
 
 // Handle the export response from renderer process.
-const handleResponseForExport = async(e: IpcMainEvent, payload: ExportPayload): Promise<void> => {
+// eslint-disable-next-line @stylistic/space-before-function-paren -- Prettier compatibility.
+const handleResponseForExport = async (e: IpcMainEvent, payload: ExportPayload): Promise<void> => {
   const { type, content, pathname, title, pageOptions } = payload
   const win = BrowserWindow.fromWebContents(e.sender)
   if (!win) {
@@ -144,7 +140,8 @@ const handleResponseForExport = async(e: IpcMainEvent, payload: ExportPayload): 
   }
 }
 
-const handleResponseForPrint = async(e: IpcMainEvent): Promise<void> => {
+// eslint-disable-next-line @stylistic/space-before-function-paren -- Prettier compatibility.
+const handleResponseForPrint = async (e: IpcMainEvent): Promise<void> => {
   const win = BrowserWindow.fromWebContents(e.sender)
   if (!win) {
     return
@@ -154,7 +151,8 @@ const handleResponseForPrint = async(e: IpcMainEvent): Promise<void> => {
   })
 }
 
-const handleResponseForSave = async(
+// eslint-disable-next-line @stylistic/space-before-function-paren -- Prettier compatibility.
+const handleResponseForSave = async (
   e: IpcMainEvent,
   id: string,
   filename: string,
@@ -224,7 +222,8 @@ const handleResponseForSave = async(
     })
 }
 
-const showUnsavedFilesMessage = async(
+// eslint-disable-next-line @stylistic/space-before-function-paren -- Prettier compatibility.
+const showUnsavedFilesMessage = async (
   win: BrowserWindow,
   files: UnsavedFile[]
 ): Promise<{ needSave: boolean } | null> => {
@@ -265,7 +264,8 @@ const noticePandocNotFound = (win: BrowserWindow): void => {
   })
 }
 
-const openPandocFile = async(windowId: number, pathname: string): Promise<void> => {
+// eslint-disable-next-line @stylistic/space-before-function-paren -- Prettier compatibility.
+const openPandocFile = async (windowId: number, pathname: string): Promise<void> => {
   try {
     const converter = pandoc(pathname, 'markdown')
     const data = await converter()
@@ -298,7 +298,8 @@ ipcMain.on('mt::save-tabs', (e, unsavedFiles: UnsavedFile[]) => {
   ).catch(log.error)
 })
 
-ipcMain.on('mt::save-and-close-tabs', async(e, unsavedFiles: UnsavedFile[]) => {
+// eslint-disable-next-line @stylistic/space-before-function-paren -- Prettier compatibility.
+ipcMain.on('mt::save-and-close-tabs', async (e, unsavedFiles: UnsavedFile[]) => {
   const win = BrowserWindow.fromWebContents(e.sender)
   if (!win) {
     return
@@ -338,7 +339,8 @@ ipcMain.on('mt::save-and-close-tabs', async(e, unsavedFiles: UnsavedFile[]) => {
 
 ipcMain.on(
   'mt::response-file-save-as',
-  async(
+  // eslint-disable-next-line @stylistic/space-before-function-paren -- Prettier compatibility.
+  async (
     e: IpcMainEvent,
     id: string,
     filename: string,
@@ -404,7 +406,8 @@ ipcMain.on(
   }
 )
 
-ipcMain.on('mt::close-window-confirm', async(e, unsavedFiles: UnsavedFile[]) => {
+// eslint-disable-next-line @stylistic/space-before-function-paren -- Prettier compatibility.
+ipcMain.on('mt::close-window-confirm', async (e, unsavedFiles: UnsavedFile[]) => {
   const win = BrowserWindow.fromWebContents(e.sender)
   if (!win) {
     return
@@ -461,7 +464,8 @@ ipcMain.on('mt::response-export', handleResponseForExport as Parameters<typeof i
 
 ipcMain.on('mt::response-print', handleResponseForPrint as Parameters<typeof ipcMain.on>[1])
 
-ipcMain.on('mt::window::drop', async(e, fileList: string[]) => {
+// eslint-disable-next-line @stylistic/space-before-function-paren -- Prettier compatibility.
+ipcMain.on('mt::window::drop', async (e, fileList: string[]) => {
   const win = BrowserWindow.fromWebContents(e.sender)
   if (!win) {
     return
@@ -491,7 +495,8 @@ interface RenamePayload {
   newPathname: string
 }
 
-ipcMain.on('mt::rename', async(e, { id, pathname, newPathname }: RenamePayload) => {
+// eslint-disable-next-line @stylistic/space-before-function-paren -- Prettier compatibility.
+ipcMain.on('mt::rename', async (e, { id, pathname, newPathname }: RenamePayload) => {
   if (pathname === newPathname) return
   const win = BrowserWindow.fromWebContents(e.sender)
   if (!win) {
@@ -534,7 +539,8 @@ ipcMain.on('mt::rename', async(e, { id, pathname, newPathname }: RenamePayload) 
 
 ipcMain.on(
   'mt::response-file-move-to',
-  async(e, { id, pathname }: { id: string; pathname: string }) => {
+  // eslint-disable-next-line @stylistic/space-before-function-paren -- Prettier compatibility.
+  async (e, { id, pathname }: { id: string; pathname: string }) => {
     const win = BrowserWindow.fromWebContents(e.sender)
     if (!win) {
       return
@@ -563,7 +569,8 @@ ipcMain.on(
   }
 )
 
-ipcMain.on('mt::ask-for-open-project-in-sidebar', async(e) => {
+// eslint-disable-next-line @stylistic/space-before-function-paren -- Prettier compatibility.
+ipcMain.on('mt::ask-for-open-project-in-sidebar', async (e) => {
   const win = BrowserWindow.fromWebContents(e.sender)
   if (!win) {
     return
@@ -578,77 +585,19 @@ ipcMain.on('mt::ask-for-open-project-in-sidebar', async(e) => {
   }
 })
 
-interface FormatLinkPayload {
-  data: { href?: string; text?: string }
-  dirname?: string
-}
-
-ipcMain.on('mt::format-link-click', async(e, { data, dirname }: FormatLinkPayload) => {
-  if (!data || (!data.href && !data.text)) {
-    return
-  }
-  const win = BrowserWindow.fromWebContents(e.sender)
-  if (!win) {
-    return
-  }
-
-  const rawUrl = data.href || data.text!
-  const urlCandidate = rawUrl.replace(/^<(.+)>$/, '$1') // Replace any <> CommonMark #489
-  if (urlCandidate === rawUrl) {
-    // No <> found, no spaces should be allowed
-    if (/\s/.test(rawUrl)) {
+ipcMain.on('mt::format-link-click', (event, payload: unknown) => {
+  handleFormatLinkClick(event, payload, {
+    trusted: isTrustedEditorSender,
+    owner: BrowserWindow.fromWebContents,
+    openExternal: confirmAndOpenExternal,
+    invalidSpace: (win) =>
       win.webContents.send('mt::show-notification', {
         title: 'Links cannot contain spaces',
         type: 'error',
         message:
           'Either URI encode: <code>My%20Link.md</code> <br> or wrap it in brackets: <br> <code><./My Link.md></code>. <br> See CommonMark #488 for details.'
       })
-      return
-    }
-  }
-
-  if (URL_REG.test(urlCandidate)) {
-    shell.openExternal(urlCandidate)
-    return
-  } else if (/^[a-z0-9]+:\/\//i.test(urlCandidate)) {
-    // Prevent other URLs.
-    return
-  }
-
-  let pathname = urlCandidate
-  if (dirname && !path.isAbsolute(urlCandidate)) {
-    pathname = path.join(dirname, urlCandidate)
-  }
-
-  if (pathname) {
-    // decodeURIComponent() CommonMark #503, allow percent encoded path names to open files. https://github.com/marktext/marktext/issues/57
-    pathname = path.normalize(decodeURIComponent(pathname))
-    if (isMarkdownFile(pathname)) {
-      const innerWin = BrowserWindow.fromWebContents(e.sender)
-      if (innerWin) {
-        openFileOrFolder(innerWin, pathname)
-      }
-    } else {
-      // A link in an untrusted document could point at a co-located script or
-      // executable; opening it via the OS shell would run code silently (#3575).
-      if (isDangerousExecutableFile(pathname)) {
-        const { response } = await dialog.showMessageBox(win, {
-          type: 'warning',
-          buttons: [t('dialog.cancel'), t('dialog.openAnyway')],
-          defaultId: 0,
-          cancelId: 0,
-          noLink: true,
-          title: t('dialog.unsafeFileTitle'),
-          message: t('dialog.unsafeFileMessage'),
-          detail: t('dialog.unsafeFileDetail', { name: path.basename(pathname) })
-        })
-        if (response !== 1) {
-          return
-        }
-      }
-      shell.openPath(pathname)
-    }
-  }
+  }).catch((error) => log.error('format link click failed:', error))
 })
 
 // --- commands -------------------------------------
@@ -689,7 +638,8 @@ export const exportFile = (win: Win, type: string): void => {
   }
 }
 
-export const importFile = async(win: BrowserWindow | null): Promise<void> => {
+// eslint-disable-next-line @stylistic/space-before-function-paren -- Prettier compatibility.
+export const importFile = async (win: BrowserWindow | null): Promise<void> => {
   if (!win) {
     return
   }
@@ -721,7 +671,8 @@ export const printDocument = (win: Win): void => {
   }
 }
 
-export const openFile = async(win: BrowserWindow | null): Promise<void> => {
+// eslint-disable-next-line @stylistic/space-before-function-paren -- Prettier compatibility.
+export const openFile = async (win: BrowserWindow | null): Promise<void> => {
   if (!win) {
     return
   }
@@ -740,7 +691,8 @@ export const openFile = async(win: BrowserWindow | null): Promise<void> => {
   }
 }
 
-export const openFolder = async(win: BrowserWindow | null): Promise<void> => {
+// eslint-disable-next-line @stylistic/space-before-function-paren -- Prettier compatibility.
+export const openFolder = async (win: BrowserWindow | null): Promise<void> => {
   if (!win) {
     return
   }

@@ -31,6 +31,59 @@ export function getImageInfo(image: HTMLElement): IImageInfo {
 // document directory.
 const ABSOLUTE_LOCAL_REG = /^(?:\/|\\\\|[a-z]:\\|[a-z]:\/).+/i;
 
+export function isSafeLocalResource(source: unknown): boolean {
+    if (typeof source !== 'string' || source.length === 0)
+        return true;
+
+    let decoded = source;
+    for (let index = 0; index < 3; index++) {
+        try {
+            const next = decodeURIComponent(decoded);
+            if (next === decoded)
+                break;
+
+            decoded = next;
+        }
+        catch {
+            return !/^file:/i.test(decoded);
+        }
+    }
+    if (/^[\\/]{2}/.test(decoded))
+        return false;
+
+    if (!/^file:/i.test(decoded))
+        return true;
+
+    try {
+        // WHATWG URL treats backslashes as separators for special schemes.
+        const normalized = decoded.replace(/\\/g, '/');
+        const afterScheme = normalized.slice('file:'.length);
+        // Exactly two separators introduce a non-empty authority. Three
+        // separators are the portable empty-authority absolute-path form.
+        if (afterScheme.startsWith('//') && !afterScheme.startsWith('///'))
+            return false;
+
+        const fileUrl = new URL(normalized);
+        return fileUrl.protocol === 'file:'
+            && !fileUrl.host
+            && !fileUrl.username
+            && !fileUrl.password;
+    }
+    catch {
+        return false;
+    }
+}
+
+export const isNetworkFileSource = (source: unknown): boolean =>
+    !isSafeLocalResource(source);
+
+function localPathToFileUrl(localPath: string): string {
+    const normalized = localPath.replace(/\\/g, '/');
+    return /^[a-z]:\//i.test(normalized)
+        ? `file:///${normalized}`
+        : `file://${normalized}`;
+}
+
 /**
  * Resolve a relative POSIX path against an absolute base directory, mirroring
  * Node's `path.resolve(base, rel)` for the cases `getImageSrc` cares about.
@@ -74,6 +127,9 @@ export function getImageSrc(src: string) {
         = /^https?:\/\/(?:[\w\-.~]+\.[a-z]{2,}|[0-9.]+|localhost|\[[a-f0-9.:]+\])(?::\d{1,5})?\/\S+/i;
     const DATA_URL_REG
         = /^data:image\/[\w+-]+(?:;[\w-]+=[\w-]+|;base64)*,[a-zA-Z0-9+/]+={0,2}$/;
+    if (!isSafeLocalResource(src)) {
+        return { isUnknownType: false, src: '' };
+    }
     const imageExtension = EXT_REG.test(src);
     // An already-`file://` src must not be re-prefixed (avoids `file://file://`).
     const isFileUrl = /^file:\/\//i.test(src);
@@ -86,6 +142,9 @@ export function getImageSrc(src: string) {
         // file) we fall back to the `file://${src}` form.
         const baseUrl
             = typeof window !== 'undefined' ? window.DIRNAME : undefined;
+        if (baseUrl && !isSafeLocalResource(baseUrl)) {
+            return { isUnknownType: false, src: '' };
+        }
         if (isUrl) {
             return {
                 isUnknownType: false,
@@ -95,13 +154,13 @@ export function getImageSrc(src: string) {
         else if (!isAbsoluteLocal && baseUrl) {
             return {
                 isUnknownType: false,
-                src: `file://${resolveRelativePath(baseUrl, src)}`,
+                src: localPathToFileUrl(resolveRelativePath(baseUrl, src)),
             };
         }
         else {
             return {
                 isUnknownType: false,
-                src: `file://${src}`,
+                src: isAbsoluteLocal ? localPathToFileUrl(src) : '',
             };
         }
     }

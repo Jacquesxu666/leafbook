@@ -1,84 +1,90 @@
 # Third Party Notices
 -------------------------------------------------
 
-This file contains all third-party packages that are bundled and shipped with LeafBook.
+This file is a generated production dependency license inventory reported by
+license-checker. Entries retain the package identity and version returned by
+that tool; multiple versions are intentionally preserved.
+
+It is not an SBOM. Package-manager resolution, optional or platform-specific
+paths, bundled assets, and transitive completeness require independent release
+review.
 
 -------------------------------------------------
 # Summary
 -------------------------------------------------
 
-1. @electron-toolkit/preload (MIT)
-2. @electron-toolkit/utils (MIT)
-3. @element-plus/icons-vue (MIT)
-4. @floating-ui/dom (MIT)
-5. @hfelix/electron-localshortcut (MIT)
-6. @intlify/core-base (MIT)
-7. @marktext/file-icons (MIT)
-8. @popperjs/core (MIT)
-9. @vscode/ripgrep (MIT)
-10. arg (MIT)
-11. axios (MIT)
-12. ced ((ISC AND Apache-2.0))
-13. chokidar (MIT)
-14. codemirror (MIT)
-15. command-exists (MIT)
-16. deep-equal (MIT)
-17. dom-autoscroller (MIT)
-18. dompurify ((MPL-2.0 OR Apache-2.0))
-19. dragula (MIT)
-20. electron-log (MIT)
-21. electron-store (MIT)
-22. electron-window-state (MIT)
-23. element-plus (MIT)
-24. element-resize-detector (MIT)
-25. execall (MIT)
-26. fast-diff (Apache-2.0)
-27. flowchart.js (MIT)
-28. font-list (MIT)
-29. fs-extra (MIT)
-30. fuse.js (Apache-2.0)
-31. fuzzaldrin (MIT)
-32. github-markdown-css (MIT)
-33. html-tags (MIT)
-34. iso-639-1 (MIT)
-35. joplin-turndown-plugin-gfm (MIT)
-36. katex (MIT)
-37. keytar (MIT)
-38. lodash (MIT)
-39. marked-highlight (MIT)
-40. marked (MIT)
-41. mermaid (MIT)
-42. mitt (MIT)
-43. ms (MIT)
-44. native-keymap (MIT)
-45. ot-json1 (ISC)
-46. ot-text-unicode (ISC)
-47. pako ((MIT AND Zlib))
-48. pathe (MIT)
-49. pinia (MIT)
-50. plantuml-encoder (MIT)
-51. plist (MIT)
-52. prismjs (MIT)
-53. rxjs (Apache-2.0)
-54. snabbdom-to-html (MIT)
-55. snabbdom (MIT)
-56. snapsvg-cjs (MIT)
-57. turndown (MIT)
-58. underscore (MIT)
-59. vega-embed (BSD-3-Clause)
-60. vega-lite (BSD-3-Clause)
-61. vega (BSD-3-Clause)
-62. vue-i18n (MIT)
-63. vue-router (MIT)
-64. webfontloader (Apache-2.0)
-65. write-file-atomic (ISC)
+1. @electron-toolkit/preload@3.0.2 (MIT)
+2. @electron-toolkit/utils@4.0.0 (MIT)
+3. @element-plus/icons-vue@2.3.2 (MIT)
+4. @floating-ui/dom@1.7.6 (MIT)
+5. @hfelix/electron-localshortcut@4.0.1 (MIT)
+6. @intlify/core-base@11.4.6 (MIT)
+7. @marktext/file-icons@1.0.6 (MIT)
+8. @popperjs/core@2.11.8 (MIT)
+9. @vscode/ripgrep@1.18.0 (MIT)
+10. arg@5.0.2 (MIT)
+11. axios@1.18.0 (MIT)
+12. ced@2.0.0 ((ISC AND Apache-2.0))
+13. chokidar@5.0.0 (MIT)
+14. codemirror@5.65.21 (MIT)
+15. command-exists@1.2.9 (MIT)
+16. deep-equal@2.2.3 (MIT)
+17. dom-autoscroller@2.3.4 (MIT)
+18. dompurify@3.4.11 ((MPL-2.0 OR Apache-2.0))
+19. dragula@3.7.3 (MIT)
+20. electron-log@5.4.4 (MIT)
+21. electron-store@11.0.2 (MIT)
+22. electron-window-state@5.0.3 (MIT)
+23. element-plus@2.14.2 (MIT)
+24. element-resize-detector@1.2.4 (MIT)
+25. execall@3.0.0 (MIT)
+26. fast-diff@1.3.0 (Apache-2.0)
+27. flowchart.js@1.18.0 (MIT)
+28. font-list@2.1.0 (MIT)
+29. fs-extra@11.3.5 (MIT)
+30. fuse.js@7.4.2 (Apache-2.0)
+31. fuzzaldrin@2.1.0 (MIT)
+32. github-markdown-css@5.9.0 (MIT)
+33. html-tags@5.1.0 (MIT)
+34. iso-639-1@3.1.5 (MIT)
+35. joplin-turndown-plugin-gfm@1.0.12 (MIT)
+36. katex@0.17.0 (MIT)
+37. keytar@7.9.0 (MIT)
+38. lodash@4.18.1 (MIT)
+39. marked-highlight@2.2.4 (MIT)
+40. marked@18.0.5 (MIT)
+41. mermaid@11.15.0 (MIT)
+42. mitt@3.0.1 (MIT)
+43. ms@2.1.3 (MIT)
+44. native-keymap@3.3.9 (MIT)
+45. ot-json1@1.0.2 (ISC)
+46. ot-text-unicode@4.0.0 (ISC)
+47. pako@2.1.0 ((MIT AND Zlib))
+48. pathe@2.0.3 (MIT)
+49. pinia@3.0.4 (MIT)
+50. plantuml-encoder@1.4.0 (MIT)
+51. plist@5.0.0 (MIT)
+52. prismjs@1.30.0 (MIT)
+53. rxjs@7.8.2 (Apache-2.0)
+54. snabbdom-to-html@7.1.0 (MIT)
+55. snabbdom@3.6.4 (MIT)
+56. snapsvg-cjs@0.0.6 (MIT)
+57. turndown@7.2.4 (MIT)
+58. underscore@1.13.8 (MIT)
+59. vega-embed@7.1.0 (BSD-3-Clause)
+60. vega-lite@6.4.3 (BSD-3-Clause)
+61. vega@6.2.0 (BSD-3-Clause)
+62. vue-i18n@11.4.6 (MIT)
+63. vue-router@4.6.4 (MIT)
+64. webfontloader@1.6.28 (Apache-2.0)
+65. write-file-atomic@7.0.1 (ISC)
 
 
 -------------------------------------------------
 # Licenses
 -------------------------------------------------
 
-# @electron-toolkit/preload (MIT)
+# @electron-toolkit/preload@3.0.2 (MIT)
 -------------------------------------------------
 MIT License
 
@@ -104,7 +110,7 @@ SOFTWARE.
 
 
 
-# @electron-toolkit/utils (MIT)
+# @electron-toolkit/utils@4.0.0 (MIT)
 -------------------------------------------------
 MIT License
 
@@ -130,7 +136,7 @@ SOFTWARE.
 
 
 
-# @element-plus/icons-vue (MIT)
+# @element-plus/icons-vue@2.3.2 (MIT)
 -------------------------------------------------
 The MIT License (MIT)
 
@@ -156,7 +162,7 @@ SOFTWARE.
 
 
 
-# @floating-ui/dom (MIT)
+# @floating-ui/dom@1.7.6 (MIT)
 -------------------------------------------------
 MIT License
 
@@ -181,7 +187,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 
 
-# @hfelix/electron-localshortcut (MIT)
+# @hfelix/electron-localshortcut@4.0.1 (MIT)
 -------------------------------------------------
 The MIT License (MIT)
 
@@ -210,7 +216,7 @@ OR OTHER DEALINGS IN THE SOFTWARE.
 
 
 
-# @intlify/core-base (MIT)
+# @intlify/core-base@11.4.6 (MIT)
 -------------------------------------------------
 The MIT License (MIT)
 
@@ -235,7 +241,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 
 
-# @marktext/file-icons (MIT)
+# @marktext/file-icons@1.0.6 (MIT)
 -------------------------------------------------
 MIT License
 
@@ -261,7 +267,7 @@ SOFTWARE.
 
 
 
-# @popperjs/core (MIT)
+# @popperjs/core@2.11.8 (MIT)
 -------------------------------------------------
 The MIT License (MIT)
 
@@ -286,7 +292,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 
 
-# @vscode/ripgrep (MIT)
+# @vscode/ripgrep@1.18.0 (MIT)
 -------------------------------------------------
 vscode-ripgrep
 
@@ -304,7 +310,7 @@ THE SOFTWARE IS PROVIDED *AS IS*, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 
 
 
-# arg (MIT)
+# arg@5.0.2 (MIT)
 -------------------------------------------------
 The MIT License (MIT)
 
@@ -330,7 +336,7 @@ SOFTWARE.
 
 
 
-# axios (MIT)
+# axios@1.18.0 (MIT)
 -------------------------------------------------
 # Copyright (c) 2014-present Matt Zabriskie & Collaborators
 
@@ -342,7 +348,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 
 
 
-# ced ((ISC AND Apache-2.0))
+# ced@2.0.0 ((ISC AND Apache-2.0))
 -------------------------------------------------
 This software is licensed under the ISC License:
 
@@ -570,7 +576,7 @@ under the Apache License 2.0:
 
 
 
-# chokidar (MIT)
+# chokidar@5.0.0 (MIT)
 -------------------------------------------------
 The MIT License (MIT)
 
@@ -596,7 +602,7 @@ THE SOFTWARE.
 
 
 
-# codemirror (MIT)
+# codemirror@5.65.21 (MIT)
 -------------------------------------------------
 MIT License
 
@@ -622,7 +628,7 @@ THE SOFTWARE.
 
 
 
-# command-exists (MIT)
+# command-exists@1.2.9 (MIT)
 -------------------------------------------------
 The MIT License (MIT)
 
@@ -648,7 +654,7 @@ SOFTWARE.
 
 
 
-# deep-equal (MIT)
+# deep-equal@2.2.3 (MIT)
 -------------------------------------------------
 MIT License
 
@@ -674,7 +680,7 @@ SOFTWARE.
 
 
 
-# dom-autoscroller (MIT)
+# dom-autoscroller@2.3.4 (MIT)
 -------------------------------------------------
 The MIT License (MIT)
 
@@ -700,7 +706,7 @@ SOFTWARE.
 
 
 
-# dompurify ((MPL-2.0 OR Apache-2.0))
+# dompurify@3.4.11 ((MPL-2.0 OR Apache-2.0))
 -------------------------------------------------
 Apache License
                            Version 2.0, January 2004
@@ -906,7 +912,7 @@ Apache License
 
 
 
-# dragula (MIT)
+# dragula@3.7.3 (MIT)
 -------------------------------------------------
 The MIT License (MIT)
 
@@ -931,7 +937,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 
 
-# electron-log (MIT)
+# electron-log@5.4.4 (MIT)
 -------------------------------------------------
 The MIT License (MIT)
 
@@ -957,7 +963,7 @@ SOFTWARE.
 
 
 
-# electron-store (MIT)
+# electron-store@11.0.2 (MIT)
 -------------------------------------------------
 MIT License
 
@@ -971,7 +977,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 
 
 
-# electron-window-state (MIT)
+# electron-window-state@5.0.3 (MIT)
 -------------------------------------------------
 The MIT License (MIT)
 
@@ -998,7 +1004,7 @@ THE SOFTWARE.
 
 
 
-# element-plus (MIT)
+# element-plus@2.14.2 (MIT)
 -------------------------------------------------
 MIT License
 
@@ -1024,7 +1030,7 @@ SOFTWARE.
 
 
 
-# element-resize-detector (MIT)
+# element-resize-detector@1.2.4 (MIT)
 -------------------------------------------------
 The MIT License (MIT)
 
@@ -1050,7 +1056,7 @@ SOFTWARE.
 
 
 
-# execall (MIT)
+# execall@3.0.0 (MIT)
 -------------------------------------------------
 MIT License
 
@@ -1064,7 +1070,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 
 
 
-# fast-diff (Apache-2.0)
+# fast-diff@1.3.0 (Apache-2.0)
 -------------------------------------------------
 Apache License
                            Version 2.0, January 2004
@@ -1270,7 +1276,7 @@ Apache License
 
 
 
-# flowchart.js (MIT)
+# flowchart.js@1.18.0 (MIT)
 -------------------------------------------------
 The MIT License (MIT)
 
@@ -1296,7 +1302,7 @@ THE SOFTWARE.
 
 
 
-# font-list (MIT)
+# font-list@2.1.0 (MIT)
 -------------------------------------------------
 MIT License
 
@@ -1322,7 +1328,7 @@ SOFTWARE.
 
 
 
-# fs-extra (MIT)
+# fs-extra@11.3.5 (MIT)
 -------------------------------------------------
 (The MIT License)
 
@@ -1342,7 +1348,7 @@ OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHE
 
 
 
-# fuse.js (Apache-2.0)
+# fuse.js@7.4.2 (Apache-2.0)
 -------------------------------------------------
 Apache License
                            Version 2.0, January 2004
@@ -1548,7 +1554,7 @@ Apache License
 
 
 
-# fuzzaldrin (MIT)
+# fuzzaldrin@2.1.0 (MIT)
 -------------------------------------------------
 Copyright (c) 2009-2011 Joshaven Potter <yourtech@gmail.com>
 Copyright (c) 2013 GitHub Inc.
@@ -1574,7 +1580,7 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 
 
-# github-markdown-css (MIT)
+# github-markdown-css@5.9.0 (MIT)
 -------------------------------------------------
 MIT License
 
@@ -1588,7 +1594,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 
 
 
-# html-tags (MIT)
+# html-tags@5.1.0 (MIT)
 -------------------------------------------------
 MIT License
 
@@ -1602,7 +1608,7 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 
 
 
-# iso-639-1 (MIT)
+# iso-639-1@3.1.5 (MIT)
 -------------------------------------------------
 This software is licensed under the MIT License.
 
@@ -1628,7 +1634,7 @@ THE SOFTWARE.
 
 
 
-# joplin-turndown-plugin-gfm (MIT)
+# joplin-turndown-plugin-gfm@1.0.12 (MIT)
 -------------------------------------------------
 MIT License
 
@@ -1654,7 +1660,7 @@ SOFTWARE.
 
 
 
-# katex (MIT)
+# katex@0.17.0 (MIT)
 -------------------------------------------------
 The MIT License (MIT)
 
@@ -1680,7 +1686,7 @@ SOFTWARE.
 
 
 
-# keytar (MIT)
+# keytar@7.9.0 (MIT)
 -------------------------------------------------
 Copyright (c) 2013 GitHub Inc.
 
@@ -1705,7 +1711,7 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 
 
-# lodash (MIT)
+# lodash@4.18.1 (MIT)
 -------------------------------------------------
 Copyright OpenJS Foundation and other contributors <https://openjsf.org/>
 
@@ -1757,7 +1763,7 @@ terms above.
 
 
 
-# marked-highlight (MIT)
+# marked-highlight@2.2.4 (MIT)
 -------------------------------------------------
 MIT License
 
@@ -1783,7 +1789,7 @@ SOFTWARE.
 
 
 
-# marked (MIT)
+# marked@18.0.5 (MIT)
 -------------------------------------------------
 # License information
 
@@ -1832,7 +1838,7 @@ This software is provided by the copyright holders and contributors “as is” 
 
 
 
-# mermaid (MIT)
+# mermaid@11.15.0 (MIT)
 -------------------------------------------------
 The MIT License (MIT)
 
@@ -1858,7 +1864,7 @@ SOFTWARE.
 
 
 
-# mitt (MIT)
+# mitt@3.0.1 (MIT)
 -------------------------------------------------
 MIT License
 
@@ -1884,7 +1890,7 @@ SOFTWARE.
 
 
 
-# ms (MIT)
+# ms@2.1.3 (MIT)
 -------------------------------------------------
 The MIT License (MIT)
 
@@ -1910,7 +1916,7 @@ SOFTWARE.
 
 
 
-# native-keymap (MIT)
+# native-keymap@3.3.9 (MIT)
 -------------------------------------------------
 Copyright (c) Microsoft Corporation
 
@@ -1932,7 +1938,7 @@ OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWA
 
 
 
-# ot-json1 (ISC)
+# ot-json1@1.0.2 (ISC)
 -------------------------------------------------
 # JSON1
 
@@ -2054,7 +2060,7 @@ PERFORMANCE OF THIS SOFTWARE.
 
 
 
-# ot-text-unicode (ISC)
+# ot-text-unicode@4.0.0 (ISC)
 -------------------------------------------------
 # The Plaintext OT Type, with proper unicode positions
 
@@ -2309,7 +2315,7 @@ THE SOFTWARE.
 
 
 
-# pako ((MIT AND Zlib))
+# pako@2.1.0 ((MIT AND Zlib))
 -------------------------------------------------
 (The MIT License)
 
@@ -2335,7 +2341,7 @@ THE SOFTWARE.
 
 
 
-# pathe (MIT)
+# pathe@2.0.3 (MIT)
 -------------------------------------------------
 MIT License
 
@@ -2410,7 +2416,7 @@ DEALINGS IN THE SOFTWARE.
 
 
 
-# pinia (MIT)
+# pinia@3.0.4 (MIT)
 -------------------------------------------------
 The MIT License (MIT)
 
@@ -2436,7 +2442,7 @@ SOFTWARE.
 
 
 
-# plantuml-encoder (MIT)
+# plantuml-encoder@1.4.0 (MIT)
 -------------------------------------------------
 Copyright (C) 2015 by Markus Hedvall
 
@@ -2460,7 +2466,7 @@ THE SOFTWARE.
 
 
 
-# plist (MIT)
+# plist@5.0.0 (MIT)
 -------------------------------------------------
 (The MIT License)
 
@@ -2489,7 +2495,7 @@ OTHER DEALINGS IN THE SOFTWARE.
 
 
 
-# prismjs (MIT)
+# prismjs@1.30.0 (MIT)
 -------------------------------------------------
 MIT LICENSE
 
@@ -2515,7 +2521,7 @@ THE SOFTWARE.
 
 
 
-# rxjs (Apache-2.0)
+# rxjs@7.8.2 (Apache-2.0)
 -------------------------------------------------
 Apache License
                          Version 2.0, January 2004
@@ -2721,7 +2727,7 @@ Apache License
 
 
 
-# snabbdom-to-html (MIT)
+# snabbdom-to-html@7.1.0 (MIT)
 -------------------------------------------------
 # Snabbdom to HTML
 
@@ -2794,7 +2800,7 @@ MIT
 
 
 
-# snabbdom (MIT)
+# snabbdom@3.6.4 (MIT)
 -------------------------------------------------
 The MIT License (MIT)
 
@@ -2820,7 +2826,7 @@ SOFTWARE.
 
 
 
-# snapsvg-cjs (MIT)
+# snapsvg-cjs@0.0.6 (MIT)
 -------------------------------------------------
 # SnapSVG in CommonJS (for Webpack)
 
@@ -2838,7 +2844,7 @@ Now hit `http://localhost:3474/test/test.html` to run SnapSVG's own test suite a
 
 
 
-# turndown (MIT)
+# turndown@7.2.4 (MIT)
 -------------------------------------------------
 MIT License
 
@@ -2864,7 +2870,7 @@ SOFTWARE.
 
 
 
-# underscore (MIT)
+# underscore@1.13.8 (MIT)
 -------------------------------------------------
 Copyright (c) 2009-2022 Jeremy Ashkenas, Julian Gonggrijp, and DocumentCloud and Investigative Reporters & Editors
 
@@ -2891,7 +2897,7 @@ OTHER DEALINGS IN THE SOFTWARE.
 
 
 
-# vega-embed (BSD-3-Clause)
+# vega-embed@7.1.0 (BSD-3-Clause)
 -------------------------------------------------
 Copyright (c) 2015, University of Washington Interactive Data Lab
 All rights reserved.
@@ -2923,7 +2929,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 
 
-# vega-lite (BSD-3-Clause)
+# vega-lite@6.4.3 (BSD-3-Clause)
 -------------------------------------------------
 Copyright (c) 2015, University of Washington Interactive Data Lab.
 All rights reserved.
@@ -2955,7 +2961,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 
 
-# vega (BSD-3-Clause)
+# vega@6.2.0 (BSD-3-Clause)
 -------------------------------------------------
 Copyright (c) 2015-2023, University of Washington Interactive Data Lab
 All rights reserved.
@@ -2987,7 +2993,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 
 
-# vue-i18n (MIT)
+# vue-i18n@11.4.6 (MIT)
 -------------------------------------------------
 The MIT License (MIT)
 
@@ -3012,7 +3018,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 
 
-# vue-router (MIT)
+# vue-router@4.6.4 (MIT)
 -------------------------------------------------
 The MIT License (MIT)
 
@@ -3038,7 +3044,7 @@ SOFTWARE.
 
 
 
-# webfontloader (Apache-2.0)
+# webfontloader@1.6.28 (Apache-2.0)
 -------------------------------------------------
 Apache License
                            Version 2.0, January 2004
@@ -3219,7 +3225,7 @@ Apache License
 
 
 
-# write-file-atomic (ISC)
+# write-file-atomic@7.0.1 (ISC)
 -------------------------------------------------
 Copyright (c) 2015, Rebecca Turner
 

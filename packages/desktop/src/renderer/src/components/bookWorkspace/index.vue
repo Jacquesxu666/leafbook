@@ -74,7 +74,13 @@
 
     <div v-else class="reader">
       <header class="reader-header">
-        <button class="secondary" @click="leaveReader">← Bookshelf</button>
+        <button
+          class="secondary"
+          :disabled="books.arrangementPending || Boolean(books.arrangement) || books.outputPending"
+          @click="leaveReader"
+        >
+          ← Bookshelf
+        </button>
         <div class="reader-title">
           <strong>{{ books.session?.title }}</strong>
           <div class="reading-progress">
@@ -92,6 +98,9 @@
             class="secondary"
             aria-controls="book-search-panel"
             :aria-expanded="searchOpen"
+            :disabled="
+              books.arrangementPending || Boolean(books.arrangement) || books.outputPending
+            "
             @click="toggleSearch"
           >
             Search
@@ -113,14 +122,77 @@
           >
             Outline
           </button>
-          <button class="secondary" :disabled="!books.chapter" @click="books.editCurrentChapter">
+          <button
+            v-if="books.session?.navigationSource === 'summary'"
+            class="secondary"
+            :disabled="
+              books.arrangementPending || Boolean(books.arrangement) || books.outputPending
+            "
+            @click="books.beginArrangement"
+          >
+            {{ books.arrangementPending && !books.arrangement ? 'Opening…' : 'Arrange' }}
+          </button>
+          <button
+            class="secondary"
+            :disabled="
+              books.arrangementPending ||
+              Boolean(books.arrangement) ||
+              books.exportCancelRequested ||
+              books.websitePending
+            "
+            @click="books.exportPending ? books.cancelExport() : books.exportBook()"
+          >
+            {{
+              books.exportCancelRequested
+                ? 'Cancellation requested'
+                : books.exportPending
+                  ? 'Cancel export'
+                  : 'Export…'
+            }}
+          </button>
+          <button
+            class="secondary"
+            :disabled="
+              books.arrangementPending ||
+              Boolean(books.arrangement) ||
+              books.websiteCancelRequested ||
+              books.exportPending
+            "
+            @click="books.websitePending ? books.cancelWebsite() : books.generateWebsite()"
+          >
+            {{
+              books.websiteCancelRequested
+                ? 'Cancellation requested'
+                : books.websitePending
+                  ? 'Cancel website'
+                  : 'Generate Website…'
+            }}
+          </button>
+          <button
+            class="secondary"
+            :disabled="
+              !books.chapter ||
+              books.arrangementPending ||
+              Boolean(books.arrangement) ||
+              books.outputPending
+            "
+            @click="books.editCurrentChapter"
+          >
             Edit
           </button>
-          <button class="secondary" @click="books.refresh">Refresh</button>
+          <button
+            class="secondary"
+            :disabled="
+              books.arrangementPending || Boolean(books.arrangement) || books.outputPending
+            "
+            @click="books.refresh"
+          >
+            Refresh
+          </button>
         </div>
       </header>
       <book-search-panel
-        v-if="searchOpen"
+        v-if="searchOpen && !books.outputPending"
         :query="books.searchQuery"
         :results="books.searchResults"
         :loading="books.searchLoading"
@@ -136,6 +208,26 @@
       <p v-if="books.error" class="error-banner reader-error" role="alert">
         {{ books.error.message }}
       </p>
+      <p v-if="books.exportSuccess" class="state-message export-status" role="status">
+        {{ books.exportSuccess }}
+      </p>
+      <p v-if="books.exportPending" class="state-message export-status" role="status">
+        {{
+          books.exportCancelRequested
+            ? 'Cancellation requested. If the Save dialog is open, close it to finish cancelling.'
+            : 'Preparing export. Cancel is available.'
+        }}
+      </p>
+      <p v-if="books.websiteSuccess" class="state-message export-status" role="status">
+        {{ books.websiteSuccess }}
+      </p>
+      <p v-if="books.websitePending" class="state-message export-status" role="status">
+        {{
+          books.websiteCancelRequested
+            ? 'Cancellation requested. If the Save dialog is open, close it to finish cancelling.'
+            : 'Generating an offline website. Cancel is available.'
+        }}
+      </p>
       <div
         class="reader-grid"
         :class="{ 'without-nav': navCollapsed, 'without-outline': outlineCollapsed }"
@@ -146,37 +238,49 @@
           class="book-navigation"
           aria-label="Book contents"
         >
-          <p class="panel-label">Contents · {{ books.session?.navigationSource }}</p>
-          <button
-            v-if="books.session?.landingNodeId"
-            class="root-landing"
-            :aria-current="
-              books.chapter?.nodeId === books.session.landingNodeId ? 'page' : undefined
-            "
-            @click="books.openNode(books.session.landingNodeId)"
-          >
-            Book home
-          </button>
-          <ul class="book-tree">
-            <book-tree-node
-              v-for="node in books.session?.nodes ?? []"
-              :key="node.nodeId"
-              :node="node"
-              :current-node-id="books.chapter?.nodeId ?? null"
-              @activate="activateNavigationNode"
-            />
-          </ul>
-          <details v-if="books.session?.diagnostics.length" class="diagnostics">
-            <summary>{{ books.session.diagnostics.length }} book notices</summary>
-            <ul>
-              <li
-                v-for="(diagnostic, index) in books.session.diagnostics.slice(0, 20)"
-                :key="`${diagnostic.code}-${index}`"
-              >
-                {{ diagnostic.message }}
-              </li>
+          <book-arrangement-panel
+            v-if="books.arrangement"
+            :arrangement="books.arrangement"
+            :error="books.arrangementError"
+            :busy="books.arrangementPending"
+            :apply-operation="books.applyArrangement"
+            :undo-operation="books.undoArrangement"
+            @save="books.saveArrangement"
+            @cancel="books.closeArrangement"
+          />
+          <template v-else>
+            <p class="panel-label">Contents · {{ books.session?.navigationSource }}</p>
+            <button
+              v-if="books.session?.landingNodeId"
+              class="root-landing"
+              :aria-current="
+                books.chapter?.nodeId === books.session.landingNodeId ? 'page' : undefined
+              "
+              @click="books.openNode(books.session.landingNodeId)"
+            >
+              Book home
+            </button>
+            <ul class="book-tree">
+              <book-tree-node
+                v-for="node in books.session?.nodes ?? []"
+                :key="node.nodeId"
+                :node="node"
+                :current-node-id="books.chapter?.nodeId ?? null"
+                @activate="activateNavigationNode"
+              />
             </ul>
-          </details>
+            <details v-if="books.session?.diagnostics.length" class="diagnostics">
+              <summary>{{ books.session.diagnostics.length }} book notices</summary>
+              <ul>
+                <li
+                  v-for="(diagnostic, index) in books.session.diagnostics.slice(0, 20)"
+                  :key="`${diagnostic.code}-${index}`"
+                >
+                  {{ diagnostic.message }}
+                </li>
+              </ul>
+            </details>
+          </template>
         </nav>
 
         <main
@@ -199,10 +303,28 @@
             />
             <!-- eslint-enable vue/no-v-html -->
             <footer class="chapter-navigation">
-              <button class="secondary" :disabled="!books.previousNodeId" @click="navigatePrevious">
+              <button
+                class="secondary"
+                :disabled="
+                  !books.previousNodeId ||
+                  books.arrangementPending ||
+                  Boolean(books.arrangement) ||
+                  books.outputPending
+                "
+                @click="navigatePrevious"
+              >
                 ← Previous
               </button>
-              <button class="secondary" :disabled="!books.nextNodeId" @click="navigateNext">
+              <button
+                class="secondary"
+                :disabled="
+                  !books.nextNodeId ||
+                  books.arrangementPending ||
+                  Boolean(books.arrangement) ||
+                  books.outputPending
+                "
+                @click="navigateNext"
+              >
                 Next →
               </button>
             </footer>
@@ -243,6 +365,7 @@ import { renderBookMarkdown, type RenderedBookChapter } from '@/book/renderMarkd
 import { restoreReadingPosition, waitForPaint } from '@/book/restoreReadingPosition'
 import BookTreeNode from './BookTreeNode.vue'
 import BookSearchPanel from './BookSearchPanel.vue'
+import BookArrangementPanel from './BookArrangementPanel.vue'
 
 const books = useBooksStore()
 const navCollapsed = ref(false)
@@ -258,6 +381,13 @@ let restoreGeneration = 0
 let restoringPosition = false
 let unregisterReadingPositionProvider: (() => void) | null = null
 let unregisterSearchProgress: (() => void) | null = null
+
+watch(
+  () => books.arrangementPending || books.outputPending,
+  (pending) => {
+    if (pending) searchOpen.value = false
+  }
+)
 
 const currentReadingRatio = (): number => {
   const element = contentElement.value
@@ -414,6 +544,11 @@ const keyboardNavigation = async (event: KeyboardEvent): Promise<void> => {
   if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) {
     return
   }
+  if (event.key === 'Escape' && books.arrangement) {
+    event.preventDefault()
+    await books.closeArrangement()
+    return
+  }
   if (event.key === 'Escape' && searchOpen.value) {
     event.preventDefault()
     await closeSearch()
@@ -423,6 +558,7 @@ const keyboardNavigation = async (event: KeyboardEvent): Promise<void> => {
   if (
     event.key === '/' &&
     books.mode === 'reader' &&
+    !books.outputPending &&
     !target?.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])')
   ) {
     event.preventDefault()
@@ -462,6 +598,7 @@ const leaveReader = async (): Promise<void> => {
   await books.showBookshelf()
 }
 const toggleSearch = (): void => {
+  if (books.outputPending) return
   if (searchOpen.value) closeSearch()
   else searchOpen.value = true
 }
@@ -492,6 +629,9 @@ onMounted(() => {
   window.addEventListener('keydown', keyboardNavigation)
 })
 onBeforeUnmount(() => {
+  books.closeArrangement().catch(() => undefined)
+  books.cancelExport().catch(() => undefined)
+  books.cancelWebsite().catch(() => undefined)
   books.cancelSearch(false)
   books.flushReadingPosition().catch(() => undefined)
   unregisterReadingPositionProvider?.()

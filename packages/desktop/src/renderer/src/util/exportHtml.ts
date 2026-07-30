@@ -1,3 +1,4 @@
+/* eslint-disable @stylistic/space-before-function-paren */
 // Desktop-side styled-HTML export wrapper for the @muyajs/core engine.
 //
 // The new engine (`@muyajs/core`) exposes `MarkdownToHtml(md, muya).generate()`
@@ -89,9 +90,10 @@ const hf = (value: string): string => sanitize(value, EXPORT_DOMPURIFY_CONFIG) a
 
 const createTableHeader = (header: HeaderFooterPart, headerFooterStyled?: boolean): string => {
   const { type, left = '', center = '', right = '' } = header
-  const headerClass = `page-header ${(type === 1 ? 'single' : '') + styledClass(headerFooterStyled)}`
-    .replace(/\s+/g, ' ')
-    .trim()
+  const headerClass =
+    `page-header ${(type === 1 ? 'single' : '') + styledClass(headerFooterStyled)}`
+      .replace(/\s+/g, ' ')
+      .trim()
   return `<thead class="${headerClass}"><tr><th>
   <div class="hf-container">
     <div class="header-content-left">${hf(left)}</div>
@@ -103,9 +105,10 @@ const createTableHeader = (header: HeaderFooterPart, headerFooterStyled?: boolea
 
 const createRealFooter = (footer: HeaderFooterPart, headerFooterStyled?: boolean): string => {
   const { type, left = '', center = '', right = '' } = footer
-  const footerClass = `page-footer ${(type === 1 ? 'single' : '') + styledClass(headerFooterStyled)}`
-    .replace(/\s+/g, ' ')
-    .trim()
+  const footerClass =
+    `page-footer ${(type === 1 ? 'single' : '') + styledClass(headerFooterStyled)}`
+      .replace(/\s+/g, ' ')
+      .trim()
   return `<div class="${footerClass}">
   <div class="hf-container">
     <div class="footer-content-left">${hf(left)}</div>
@@ -129,7 +132,7 @@ const TOC_REG = /^ {0,3}\[TOC\] *$/im
 // engine output, so relative image paths can be rewritten to absolute `file://`
 // URLs. A string rewrite avoids re-serializing the whole article DOM (which
 // holds rendered KaTeX / diagram SVG).
-const IMG_SRC_REG = /(<img\b[^>]*?\ssrc=")([^"]*)(")/gi
+const IMG_TAG_REG = /<img\b[^>]*?\ssrc="([^"]*)"[^>]*>/gi
 
 /**
  * Rewrite relative / absolute-local `<img src>` to absolute `file://` URLs so a
@@ -140,9 +143,12 @@ const IMG_SRC_REG = /(<img\b[^>]*?\ssrc=")([^"]*)(")/gi
  * no-op the second time.
  */
 const rewriteImageSrcs = (html: string): string =>
-  html.replace(IMG_SRC_REG, (match, pre: string, src: string, post: string) => {
+  html.replace(IMG_TAG_REG, (match, src: string) => {
     const resolved = resolveLocalImageSrc(src)
-    return resolved === src ? match : `${pre}${resolved}${post}`
+    if (src && !resolved) {
+      return '<span class="leafbook-image-placeholder" role="img" aria-label="Image unavailable">[Image unavailable]</span>'
+    }
+    return resolved === src ? match : match.replace(`src="${src}"`, `src="${resolved}"`)
   })
 
 // Match the `href="…"` of an <a> tag in the (already sanitized, double-quoted)
@@ -168,7 +174,7 @@ const rewriteAnchorHrefs = (html: string): string =>
  * at the `[TOC]` marker, and — when a header/footer is supplied — wraps the
  * article in the page-container table for paged PDF / print export.
  */
-export const exportStyledHTML = async(
+export const exportStyledHTML = async (
   muya: Muya,
   markdown: string,
   options: ExportStyledHtmlOptions = {}

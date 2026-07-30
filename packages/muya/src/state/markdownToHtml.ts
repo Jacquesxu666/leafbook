@@ -127,9 +127,9 @@ export class MarkdownToHtml {
 
             try {
                 if (functionType === 'plantuml') {
-                    const diagram = render.parse(rawCode, this._muya?.options.plantumlServer);
                     diagramContainer.innerHTML = '';
-                    diagram.insertImgElement(diagramContainer);
+                    diagramContainer.textContent
+                        = 'PlantUML preview is disabled in offline mode.';
                 }
                 else if (functionType === 'flowchart' || functionType === 'sequence') {
                     const diagram = render.parse(rawCode);

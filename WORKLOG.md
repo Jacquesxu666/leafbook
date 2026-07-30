@@ -1766,3 +1766,670 @@
   `editor-input` passes 8/8. All 19 remaining changed paths pass Prettier,
   `git diff --check` passes, and `editorWithTabs/editor.vue` has no diff.
 - Git commit：将随本次提交入库，最终 SHA 见 Git 历史（不推送）。
+
+## 2026-07-29 — Phase 8A lossless SUMMARY arrangement core
+
+- **用户目标**：实现“拖拽编排、导出、发布”路线中的安全第一步，只允许对既有
+  SUMMARY 建立无损草稿和 main-owned 保存能力；不得创建 SUMMARY、移动或重命名
+  章节文件，也不实现 HTML/UI/发布。
+- **实际完成**：
+  - 新增 strict UTF-8 lossless SUMMARY document，保留 BOM、逐行 LF/CRLF、
+    无最终换行、comments、unsupported lines 和 fenced opaque regions；heading
+    为固定容器，list subtree 使用稳定 opaque ID。
+  - 新增纯 subtree reorder/indent/outdent、tabs/spaces reparent 限制、opaque/
+    heading/parent barrier、2 MiB/line/node/depth/operation caps，以及 bounded undo
+    和 DTO preview。
+  - 新增 main-owned arrangement lease，固定 owner/session generation、root、
+    directory/file identity/mode 和 SHA-256；existing SUMMARY only，renderer 不获得
+    path、raw span 或 raw bytes。
+  - 保存采用 exclusive no-follow temp、file fsync、同步 final authority/revision
+    check、rename、directory fsync 和 final bytes verification。External conflict
+    使用一次性 candidate-bound overwrite token；commit 后无法验证会返回
+    `committed: true` 并撤销授权。
+  - SessionManager、typed IPC、preload 和 runtime validators 已接入
+    begin/apply/undo/save/close。Refresh、close、owner teardown 与保存后的 private
+    reader refresh 会撤销旧草稿；inferred book 不会隐式创建 SUMMARY。
+- **修改或创建的文件**：
+  `packages/desktop/src/common/book/summaryDocument.ts`、
+  `packages/desktop/src/main/book/arrangementManager.ts`、common/main exports、
+  `sessionManager.ts`、book IPC/preload/shared types、3 个 book unit spec、
+  `docs/BOOK_ARRANGEMENT.md` 和本日志。
+- **测试及结果**：
+  - Phase 8A 定向单测：3 个文件、121 项通过。
+  - Desktop 全量 unit：56 个文件、956 项通过。
+  - Typecheck：通过；本轮变更的 scoped ESLint：0 error、0 warning（仅工具既有
+    module-type 提示）。
+  - 本轮全部变更文件 Prettier check 和 `git diff --check`：通过。
+- **关键决策**：不能从既有有损 navigation parser 重建 SUMMARY；writer 必须拥有
+  独立 lossless source model。无 final newline 的 EOF 行若会离开末尾则拒绝移动，
+  而不是发明 newline 或拼接逻辑行。Rename 是 commit point，commit-uncertain
+  不得伪装成普通失败或自动重试。
+- **尚未解决的问题**：拖拽/键盘/redo/diff UI、文件移动重命名、live watcher、
+  HTML/PDF、资源复制和任何本地/云端发布均明确延期。
+- **Git commit**：未提交（按用户要求），未推送。
+
+### Phase 8A P1 arrangement hardening
+
+- Trailing blank/comment trivia at EOF or before heading/opaque barriers is no
+  longer included in the preceding movable subtree; mixed-EOL byte-exact
+  fixtures cover all three boundaries.
+- Malformed links and unsafe local targets are opaque sentinel parents,
+  matching the navigation parser's child-boundary semantics. Operations now
+  reject any candidate that reparses as ambiguous, truncated, or over the
+  original depth/work limits; save repeats this validation.
+- Save keeps the arrangement lease busy through its private reader reload and
+  session replacement. A deferred-loader race proves a second apply/save cannot
+  land between commit and refresh or produce a stale returned session.
+- Active drafts are capped at 4 per owner and 32 globally with pre-await
+  reservations. Undo history is capped at 50 snapshots and 8 MiB per lease.
+  The 10,000-operation lifetime count is lease-owned and undo cannot refund it.
+- Overwrite tests restore the exact same external/base/candidate hashes after a
+  successful overwrite and prove the consumed token cannot authorize replay.
+  Current raw byte spans are recalculated after reorder and indent.
+- Final validation remains: targeted 121/121, full unit 956/956, typecheck
+  passed, scoped ESLint has no errors or warnings apart from the repository's
+  existing module-type tool notice. No commit or push was created.
+
+### Phase 8A P1 resource and authorization hardening
+
+- Undo history now stores serialized `Buffer` snapshots and reparses strict
+  UTF-8 on undo. The 8 MiB history counter therefore measures retained bytes
+  instead of estimating complete `SummaryDocument` object graphs.
+- Active current documents have weighted raw-byte/line/public-node budgets per
+  owner and globally. Pending begins reserve worst-case weight before any await;
+  owner cleanup releases both leases and budget. Concurrent and cleanup stress
+  tests cover the accounting.
+- Heading and list nodes jointly consume `maxNodes`; the first valid H1 and
+  empty-heading behavior now match `parseBookSummary`.
+- Overwrite consumption is proven without a stale-base shortcut: an authorized
+  temp write loses a same-inode pre-commit revision race, then the exact
+  external/base/candidate hashes are restored and the old token receives a new
+  conflict token.
+- All five arrangement IPC handlers are individually invoked from an untrusted
+  renderer fixture and none dispatches to `BookSessionManager`.
+- The held-save cleanup `finally` begins before `save(..., true)`. A test swaps
+  the session immediately after a successful commit and proves the early return
+  revokes the held lease. Root-inode replacement and pre-commit temp cleanup are
+  also covered.
+
+### Phase 8A stable-history and retained-budget hardening
+
+- **用户目标**：修复多步 undo 重新按物理位置分配 opaque node ID，以及
+  owner/global 预算未计 undo history 的资源边界；同时校准 pending 转 active
+  的预算转换和 first-H1 混合 heading 层级。
+- **实际完成**：
+  - undo snapshot 现在紧凑保存 serialized bytes 与对应 `Uint32Array` line ID
+    序列；restore 以原 ID 重建 source model，非初始 snapshot 不再改变 heading/list
+    opaque ID。bytes 和 ID metadata 均计入 8 MiB history cap。
+  - owner/global retained budget 统一为 current weighted document 加全部 history
+    bytes/metadata。Apply 在 push history 前检查 prospective retained total；
+    close/revoke/undo/save 清 history 会同步释放预算。
+  - pending-to-active conversion 仅扣当前 begin 自己的 reservation，并继续计入
+    其他 in-flight reservation；实际 document weight 通过检查后才转为 active，
+    避免 active weight 与自己的 reservation 双计。
+  - lossless parser 的 first valid H1 行为与 `parseBookSummary` 对齐：若 H1 前已有
+    H2，保留权威 parser 的 heading stack，后续 H3/H2/list 层级一致。
+- **修改或创建的文件**：
+  `packages/desktop/src/common/book/summaryDocument.ts`、
+  `packages/desktop/src/main/book/arrangementManager.ts`、
+  `packages/desktop/test/unit/specs/book-summary-document.spec.ts`、
+  `packages/desktop/test/unit/specs/book-arrangement-manager.spec.ts`、
+  `docs/BOOK_ARRANGEMENT.md` 和本日志。
+- **测试及结果**：
+  - Phase 8A 定向单测：3 个文件、125/125 通过。
+  - Desktop 全量 unit：56 个文件、960/960 通过。
+  - Typecheck 与 production build：通过；build 仅有既有 CodeMirror dynamic/static
+    import 提示。
+  - 本轮 scoped ESLint：0 error、0 warning，仅工具既有 module-type 提示。
+  - 本轮相关文件 Prettier 与 `git diff --check`：通过。
+- **关键决策**：history cap 和全局资源 cap 必须计算实际保留的 line-ID metadata，
+  而不是只算当前 document 或 serialized Markdown；begin reservation 到 active
+  weight 是原子预算转换，不能忽略其他 pending，也不能同时收取自己的两种权重。
+- **尚未解决的问题**：拖拽/键盘/redo/diff UI、文件移动重命名、HTML/PDF、资源复制
+  和任何本地/云端发布仍明确延期。
+- **Git commit**：未提交（按用户要求），未推送。
+
+## 2026-07-29 — Phase 8A3 SUMMARY arrangement UI
+
+- **用户目标**：在既有 Phase 8A lossless/main-owned 边界上交付显式 Arrange
+  模式，支持拖拽、键盘、移动端按钮、Undo、预览、Save/Cancel 和安全冲突处理；
+  不实现 redo、文件移动重命名、导出或发布。
+- **实际完成**：
+  - Reader 仅为 existing SUMMARY session 显示 Arrange；开始前复用 chapter
+    dirty guard，并 flush search/reading position。
+  - 新增 main DTO 驱动的 roving tree，支持 pointer drag/drop、
+    `Alt+↑/↓/←/→`、逐项 Move/Indent/Outdent 按钮、可见 focus、`aria-live`、
+    fixed heading、dirty/canUndo 和 bounded preview。
+  - Books store 新增独立 arrangement generation，关闭/离开/刷新/unmount 后
+    丢弃 late begin/apply/undo/save；late successful begin 会显式 close。
+  - Save conflict 复用 focus-trapped decision dialog 和一次性 overwrite token；
+    成功后消费 main 返回的 refreshed session，清搜索并保留当前 stable chapter
+    与 reading position。Cancel 只 close lease，不调用 save。
+  - UI 使用 DTO 的 sibling hierarchy 与 `canIndent` section boundary 禁用
+    heading、首尾、跨 parent 和跨 opaque barrier 的 move/drop；main 继续对
+    mixed indentation 等不可由 DTO 完全表达的歧义做最终拒绝。
+- **修改或创建的文件**：
+  `packages/desktop/src/renderer/src/store/books.ts`、
+  `packages/desktop/src/renderer/src/components/bookWorkspace/index.vue`、
+  `BookArrangementPanel.vue`、`BookArrangementNode.vue`、
+  `packages/desktop/src/types/global.d.ts`、
+  `packages/desktop/test/unit/specs/book-arrangement-store.spec.ts`、
+  `packages/desktop/test/e2e/book-reader.spec.ts`、
+  `docs/BOOK_ARRANGEMENT.md` 和本日志。
+- **测试及结果**：
+  - Phase 8A renderer store unit：10/10；A1/A2/UI 三文件定向：48/48；
+    加上 book-reader 的四文件相关门禁合计 135/135，book-reader + store 为 97/97。
+  - Desktop 全量 unit：57 files、970/970。
+  - Electron Arrange E2E：3/3，覆盖 keyboard、drag、button、Undo、save、
+    stable focus/chapter、650px mobile controls、cancel zero-write、ARIA 单 tab stop
+    与 main 拒绝时不误报成功。
+  - Typecheck、production build、scoped ESLint、Prettier 与
+    `git diff --check`：通过；build 仅有既有 CodeMirror chunk 提示，ESLint
+    仅有工具既有 module-type 提示。
+- **关键决策**：Renderer 只提交 opaque node ID 与既有四类 DTO 操作；不复制
+  SUMMARY parser/writer 或持有 raw bytes。Arrange 使用独立 generation，不能与
+  Reader 的普通 async generation 或 editor history 混用。
+- **尚未解决的问题**：redo、filesystem watcher、章节文件移动/重命名、
+  inferred-to-SUMMARY、HTML/PDF、资源复制、本地站点与云发布继续延期。
+- **Git commit**：未提交（按用户要求），未推送。
+
+### Phase 8A3 P2 transition, lease, ARIA, and announcement hardening
+
+- Pending begin and active arrangement now form an exclusive Reader transition:
+  conflicting header/chapter controls are disabled, store navigation/search is
+  guarded, and Edit explicitly invalidates a pending begin. A dispatched begin
+  that resolves after Edit is closed and cannot revive Arrange mode.
+- Fatal save results dispose the shared decision owner and best-effort close the
+  opaque main lease before renderer state drops the ID; repeated read-only
+  failures are covered without accumulating leases.
+- Roving focus now belongs to the actual `treeitem`. Each tree has one
+  `tabindex="0"`; parent expansion and selection/grab state are on that element,
+  while pointer action buttons are removed from the Tab sequence.
+- Apply/undo return an explicit renderer success boolean. Keyboard, pointer
+  buttons, drag/drop, and Undo wait for main plus changed DTO state before
+  announcing success; rejection announces the main error and leaves the draft
+  clean.
+- P2 targeted store unit is 10/10; four related unit files are 135/135.
+  Electron arrangement E2E includes single-tabstop ARIA and a real
+  mixed-indentation main rejection that never emits a false success.
+- Full unit is 57 files and 970/970; typecheck, production build, scoped lint,
+  Prettier, and diff-check pass with only the previously documented tool/build
+  notices.
+- Recursive treeitem keyboard/drag events now stop at the current node, and
+  drop placement uses the row rectangle rather than the full subtree `li`.
+  A heading + nested-parent E2E proves one Alt operation, child drag source
+  preservation, ancestor-safe child drop, and correct parent-row lower-half
+  placement despite expanded children. Arrangement E2E is now 3/3.
+- Treeitem keydown now uses self-only filtering instead of stopping propagation:
+  nested ancestors still cannot repeat the command, while Escape reaches the
+  workspace close handler. Regular and nested dirty drafts close with zero
+  SUMMARY writes; five consecutive reopen/Escape cycles prove leases do not
+  accumulate past the per-owner cap. The final selected Reader E2E gate is 4/4.
+- Git commit: not created; nothing was pushed.
+
+## 2026-07-29 — Phase 8D legacy navigation and OS-shell boundary closure
+
+- User goal: close remaining renderer-reachable external navigation and
+  filesystem shell paths before treating the release boundary as complete.
+- Completed: centralized validated/confirmed HTTP, HTTPS, and mailto opening;
+  required exact trusted Editor ownership for legacy format links; bound Reader
+  external navigation to its live trusted owner and made cancellation/default
+  behavior fail closed; rejected legacy file, UNC, absolute, and relative local
+  links; disabled arbitrary renderer Trash and keyboard-debug `openPath`;
+  added a static allowlist for every remaining direct main-process shell call.
+- Files: `packages/desktop/src/main/security/confirmedExternalOpen.ts`,
+  `packages/desktop/src/main/security/formatLinkClick.ts`, Shell/book/menu/app/
+  keyboard main-process code, security/book unit tests, `docs/BUILD.md`,
+  `docs/RELEASE_GATE.md`, and `WORKLOG.md`.
+- Tests: focused Shell/format-link/direct-shell/book tests 142/142 passed;
+  desktop typecheck passed. Full desktop suite subsequently passed 65 files,
+  1095/1095 tests; Muya passed 212 files and 1449/1449 tests; production build
+  passed with four inherited CodeMirror chunk warnings; the exact six-test
+  source Electron smoke passed 6/6; full ESLint passed with 0 errors and 134
+  inherited warnings; scoped Prettier and `git diff --check` passed.
+- Key decisions: renderer-provided pathnames and dirname values are not
+  capabilities; legacy Editor local-link opening and sidebar Trash stay
+  disabled until main-owned owner-bound capabilities exist. Reader internal
+  chapter links remain main-owned and functional.
+- Unresolved: the compatibility reductions above are explicit; public release
+  remains blocked, and packaged audit/smoke remain NOT RUN.
+- Git commit: not created; nothing was pushed.
+
+## 2026-07-29 — Phase 8D updater-name filesystem-type hardening
+
+- User goal: close the updater audit bypass where a forbidden name could be a
+  symlink or another non-regular filesystem object.
+- Completed:
+  - removed the regular-file predicate while retaining find's default
+    no-follow traversal;
+  - switched match transport to a temporary NUL-delimited stream so unusual
+    legal pathnames cannot hide or split audit evidence;
+  - reject forbidden updater names for regular files, symlinks, directories,
+    FIFOs, devices, or other filesystem types.
+- Files: `scripts/check-no-updater-files.sh`,
+  `release-gate-static.spec.ts`, `docs/BUILD.md`, `WORKLOG.md`.
+- Tests: release-gate static suite 6/6 passed with clean, regular-file,
+  symlink, and directory fixtures; shell syntax passed; full lint completed
+  with 0 errors/135 inherited warnings; scoped formatting and
+  `git diff --check` passed.
+- Unresolved: real packaged audit remains NOT RUN; stale `dist` remains
+  non-evidence.
+- Git commit: not created; nothing was pushed.
+
+## 2026-07-29 — Phase 8D updater artifact audit correction
+
+- User goal: ensure updater metadata cannot hide inside unpacked apps or
+  extracted platform archives.
+- Completed:
+  - added a shared recursive packaged-tree rejection gate for
+    `app-update.yml`, development/latest metadata, blockmaps, and pending
+    updater config;
+  - wired it into unpacked macOS and extracted Windows/Linux audits and widened
+    the release-file scan beyond top-level files;
+  - added clean-tree and malicious internal `app-update.yml` fixture coverage.
+- Files: updater audit scripts, `release-gate-static.spec.ts`, `docs/BUILD.md`,
+  `WORKLOG.md`.
+- Tests: release-gate static suite 6/6 passed: the clean fixture passes and an
+  app-internal updater config fails closed; shell syntax, lint, formatting and
+  diff checks passed. No stale `dist` output is audited or claimed.
+- Unresolved: the real unpacked audit and packaged smoke remain NOT RUN.
+- Git commit: not created; nothing was pushed.
+
+### Phase 8B late-success durability wording
+
+- A successful commit that wins the race against cancellation now preserves
+  `durabilityUncertain`: the status states both that export completed before
+  cancellation and that storage durability could not be confirmed.
+- The existing cancel-vs-commit store fixture already returns
+  `durabilityUncertain: true` and now asserts both facts.
+- Targeted gate passed 3 files and 127/127; full desktop unit passed 58 files
+  and 1000/1000; typecheck, scoped ESLint, Prettier, and `git diff --check`
+  passed with only the existing ESLint module-type notice.
+- Git commit: not created; nothing was pushed.
+
+### Phase 8B authoritative cancellation and unavailable-link hardening
+
+- Body links now require an authorized generated document that is also
+  available. Links to missing chapter bodies become inert broken-link text,
+  matching disabled TOC/no-body semantics.
+- Cancellation during the native Save dialog is honest about Electron's API:
+  it records cancellation but keeps export pending/exclusive and tells the user
+  to close the native dialog. Any late lease is cancelled before exclusivity is
+  released.
+- Commit cancellation waits for both authoritative commit and cancel
+  settlement. A late `ok` is reported as completed before cancellation;
+  `committed: true` becomes a may-have-committed warning; only ordinary stale
+  failures are suppressed.
+- Store fixtures cover begin cancellation remaining pending, late lease
+  disposal, commit ordering, successful-before-cancel and committed-uncertain
+  outcomes. Generator and Electron export fixtures cover links to unavailable
+  bodies.
+- Final targeted gate passed 3 files and 127/127; full desktop unit passed
+  58 files and 1000/1000; typecheck and production build passed with only the
+  four existing CodeMirror warnings; selected offline export Electron E2E
+  passed 1/1; scoped ESLint, Prettier, and `git diff --check` passed with only
+  the existing ESLint module-type notice.
+- Git commit: not created; nothing was pushed.
+
+### Phase 8B nonblocking namespace and product-semantics hardening
+
+- Attacker-controlled source opens now pre-lstat regular files and use
+  `O_NONBLOCK | O_NOFOLLOW` where Node exposes them before matching descriptor
+  identity. Destination parent pinning likewise uses
+  `O_DIRECTORY | O_NOFOLLOW | O_NONBLOCK`, then requires a directory descriptor
+  with the expected inode. Deterministic FIFO source and parent swaps reject in
+  under one second without output or main-thread blocking.
+- Missing chapters now produce disabled TOC text and no body; unresolved
+  fragments are disabled rather than falling back to chapter top. A root
+  landing outside SUMMARY gets one semantic Book home item, group labels use
+  authorized group landings, inferred books remain exportable, and SUMMARY
+  orphans remain excluded.
+- Export becomes explicitly cancellable during begin/generate/commit. The
+  renderer increments its generation, cancels an admitted main lease, ignores
+  late begin/commit results, closes search immediately, and cancels on
+  unmount. Directory durability uncertainty is surfaced as a qualified
+  warning.
+- All three export IPC handlers are enumerated and proven not to dispatch for
+  an untrusted sender.
+- Targeted gate: 3 files, 126/126 passed; full desktop unit: 58 files,
+  999/999 passed; typecheck and production build passed with only the four
+  existing CodeMirror warnings; selected offline export Electron E2E passed
+  1/1; scoped ESLint, Prettier, and `git diff --check` passed with only the
+  existing ESLint module-type notice.
+- Git commit: not created; nothing was pushed.
+
+### Phase 8B bounded final-source and validator hardening
+
+- Final synchronous source verification no longer uses `readFileSync`. Each
+  no-follow descriptor is fstat-limited before allocation, contributes to the
+  32 MiB aggregate, is hashed with a fixed buffer of at most 64 KiB, requires
+  exact reads plus EOF, and repeats identity/size/mode/link/timestamp checks.
+- Pass-two race fixtures replace a previously valid source with both a 33 MiB
+  regular file and a 64 MiB sparse regular file. Both return
+  `export-source-changed`, write no output, and an allocation spy proves no
+  buffer larger than 64 KiB is requested by final verification.
+- The output validator now uses O(1) body state and explicit limits of depth
+  128, 200,000 tags, 32 attributes per tag, and a 64 KiB token. Adversarial
+  depth/tag/attribute/token fixtures reject within the normal unit-test
+  deadline. UTF-8 IPC payload size is checked before validation and accepted
+  payload copying.
+- A post-open parent-redirection seam proves fail-closed cleanup: no final
+  output and no book bytes are written; one empty random temp may remain in the
+  old pinned directory because unlinking through the redirected pathname is
+  intentionally forbidden. A deterministic Browser DOM-repair differential
+  corpus also proves malformed structures repaired by `DOMParser` remain
+  rejected by the custom generator-subset recognizer.
+- Hardened export/Reader unit: 2 files, 103/103 passed; full desktop unit:
+  58 files, 986/986 passed; desktop typecheck and production build passed
+  (only the four existing CodeMirror chunk warnings); selected offline export
+  Electron E2E passed 1/1; scoped ESLint, Prettier, and `git diff --check`
+  passed with only the existing ESLint module-type notice.
+- Git commit: not created; nothing was pushed.
+
+### Phase 8B quote-aware tokenizer boundary
+
+- Tag-end discovery now tracks explicit single- and double-quote state, so a
+  literal `>` inside an allowed quoted attribute remains part of the value.
+  The scan retains the 64 KiB token cap and rejects nested `<`, unterminated
+  quotes, NUL, DEL, and disallowed C0 controls in tags or body text.
+- A generator-to-validator regression preserves
+  `<abbr title="a > b">`, while direct fixtures cover both quote styles and
+  fail-closed unterminated/control inputs.
+- Hardened export/Reader unit: 2 files, 105/105 passed; desktop typecheck
+  passed. Full desktop unit passed 58 files and 988/988; production build
+  passed with only the four existing CodeMirror warnings; selected offline
+  export Electron E2E passed 1/1; scoped ESLint, Prettier, and
+  `git diff --check` passed with only the existing ESLint module-type notice.
+- Git commit: not created; nothing was pushed.
+
+## 2026-07-29 — Phase 8B self-contained HTML book export
+
+- User goal: export a LeafBook Markdown collection as one book-like, offline
+  HTML file with a table of contents and safe internal navigation.
+- Completed:
+  - added a main-owned, bounded begin/commit/cancel export lease with a native
+    Save dialog, outside-source canonical target enforcement, explicit
+    overwrite confirmation, source/SUMMARY revisions, owner/session/root
+    revocation, target inode/link-count checks, no-follow atomic replacement,
+    and durability reporting;
+  - added a pure static generator using the Reader sanitizer, fixed CSP/CSS,
+    nested TOC, one body per physical chapter, missing/media placeholders,
+    Unicode/duplicate-heading namespaces, and internal-link rewriting;
+  - added a strict main-side HTML tokenizer/tag/attribute allowlist;
+  - added typed IPC/preload/global APIs and Reader Export UI with the shared
+    dirty guard, busy-state exclusivity, generation checks, and success/error
+    feedback;
+  - documented the offline/security/consistency contract.
+- Files:
+  - `packages/desktop/src/common/book/exportPolicy.ts`
+  - `packages/desktop/src/main/book/sessionManager.ts`
+  - `packages/desktop/src/main/ipc/books.ts`
+  - `packages/desktop/src/preload/index.ts`
+  - `packages/desktop/src/renderer/src/book/exportBookHtml.ts`
+  - `packages/desktop/src/renderer/src/store/books.ts`
+  - `packages/desktop/src/renderer/src/components/bookWorkspace/index.vue`
+  - `packages/desktop/src/shared/types/bookReader.ts`
+  - `packages/desktop/src/shared/types/ipc.ts`
+  - `packages/desktop/src/types/global.d.ts`
+  - `packages/desktop/test/unit/specs/book-export.spec.ts`
+  - `packages/desktop/test/unit/specs/book-reader.spec.ts`
+  - `packages/desktop/test/e2e/book-reader.spec.ts`
+  - `docs/BOOK_EXPORT.md`
+- Tests:
+  - targeted export/Reader unit: 2 files, 93/93 passed;
+  - full desktop unit: 58 files, 976/976 passed;
+  - desktop typecheck: passed;
+  - production build: passed (only existing CodeMirror chunk warnings);
+  - selected offline HTML Electron E2E: 1/1 passed, including an isolated
+    Electron session request probe, console probe, complete anchor/resource
+    attribute audit, and a successful scoped fragment navigation;
+  - scoped ESLint, Prettier check, and `git diff --check`: passed (only the
+    existing ESLint module-type warning).
+- Key decisions:
+  - did not reuse `exportStyledHTML` because it can introduce absolute
+    `file://` resource URLs;
+  - renderer output is untrusted at commit and must pass the strict main
+    allowlist plus exact fixed shell policy;
+  - external links remain readable but inert so opening the file causes no
+    network navigation or request.
+- Unresolved: none in the Phase 8B single-file HTML scope.
+- Git commit: not created (not requested).
+
+## 2026-07-29 — Phase 8D local release gate
+
+- User goal: harden LeafBook's default renderer/network boundary and establish
+  a truthful, non-publishing local release gate.
+- Completed:
+  - enabled `webSecurity:true` for Editor and Settings; tightened renderer CSP;
+  - denied production renderer HTTP(S)/WS(S) requests, with only the exact
+    loopback Vite host allowed in development and main-owned capabilities kept
+    separate by `webContentsId`;
+  - made remote images fail offline without auto-loading and replaced automatic
+    PlantUML rendering with an inert offline message;
+  - proved ordinary Editor local images still load; preserved the documented
+    Reader/8B/8C media-placeholder contract;
+  - added static product identity, attribution, release-blocker, safe package,
+    and direct-license-claim gates;
+  - added a validate/dry/build macOS command pinned to publish-never,
+    identity-null, notarize-false, signer-auto-discovery-false, and OS-enforced
+    no-network packaging;
+  - added unpacked app identity/license/updater/size audit and isolated packaged
+    smoke commands;
+  - documented local/static/external evidence and all remaining public-release
+    blockers.
+- Files:
+  - renderer security: `packages/desktop/src/main/config.ts`,
+    `packages/desktop/src/main/app/index.ts`,
+    `packages/desktop/src/main/security/rendererNetworkPolicy.ts`,
+    `packages/desktop/src/renderer/index.html`, Muya image/diagram renderers;
+  - gates: root/desktop `package.json`,
+    `scripts/package-mac-unsigned-dir.sh`, `scripts/audit-mac-unpacked.sh`,
+    `scripts/smoke-mac-unpacked.sh`, E2E helper and release/network tests;
+  - metadata/docs: `README.md`, `docs/BUILD.md`, `docs/RELEASE_GATE.md`,
+    third-party notice generator and checked notice.
+- Tests and checks:
+  - renderer policy/static gates: 13/13 passed;
+  - security Electron E2E: 2/2 passed, including Editor local image, Reader
+    placeholders with Chinese/space/`%23`, zero remote server hits, inert
+    PlantUML, and non-executing HTML payloads;
+  - desktop full unit: 61 files, 1033/1033 passed;
+  - Muya full unit: 212 files, 1438/1438 passed;
+  - production build and desktop typecheck: passed;
+  - selected real Electron E2E: 6/6 passed across Editor/Reader network
+    security, Reader navigation, Arrange save/cancel, single-HTML export, and
+    exact two-file website generation;
+  - metadata and direct production dependency license validation: passed.
+  - full ESLint completed with 0 errors and 135 inherited warnings; scoped
+    Prettier and `git diff --check` passed. `app/index.ts` retains unrelated
+    pre-existing Prettier drift and the generated `.txt` notice has no
+    inferred Prettier parser.
+- Offline package result:
+  - validate-only and dry-run passed and printed the exact non-publishing
+    builder arguments;
+  - the network-denied arm64 attempt completed native rebuild and production
+    build, then electron-builder failed closed with
+    `getaddrinfo ENOTFOUND github.com`;
+  - the partial `dist/mac-arm64` tree was not treated as an artifact and was
+    neither audited nor smoke-tested.
+- Key decisions:
+  - no custom filesystem protocol was needed because Editor local `file:`
+    images work with `webSecurity:true`;
+  - no Reader resource IPC was added because that would expand the Phase 4
+    attack surface and violate the established placeholder contract;
+  - the third-party notice now says exactly what it proves: direct production
+    dependencies, not an SBOM or complete transitive provenance.
+- Unresolved:
+  - a complete network-denied macOS package requires the missing local cache;
+  - real Windows/Linux execution, all platform signing/notarization, SBOM,
+    provenance, inherited release-workflow review, and explicit human approval
+    remain release blockers;
+  - the documented 8B/8C syscall-sized P3 pathname races remain.
+- Git commit: not created; nothing was pushed, tagged, signed, notarized, or
+  published.
+
+## 2026-07-29 — Phase 8D smoke selection gate correction
+
+- User goal: make the packaged smoke command select exactly the six release
+  scenarios documented by Phase 8D.
+- Completed:
+  - replaced stale substring grep phrases with one anchored current-title
+    expression covering Editor security, Reader security, Reader navigation,
+    Arrange, HTML export, and website generation;
+  - added a Playwright `--list` preflight that fails unless the collector
+    reports exactly six tests;
+  - added `--source` mode so the selection and execution path can be verified
+    without treating the incomplete packaged app as an artifact.
+- Files: `scripts/smoke-mac-unpacked.sh`, `docs/BUILD.md`, `WORKLOG.md`.
+- Tests: shell syntax passed; Playwright listed the exact expected six titles
+  and source-mode Electron passed 6/6; the five-test fixture failed closed;
+  full lint completed with 0 errors/135 inherited warnings; scoped formatting
+  and `git diff --check` passed.
+- Key decision: packaged and source verification share the same immutable test
+  argument array and selection; source success is not packaged-release
+  evidence.
+- Unresolved: packaged smoke remains NOT RUN until a complete network-denied
+  app package exists.
+- Git commit: not created; nothing was pushed.
+
+## 2026-07-29 — Phase 8B export boundary hardening
+
+- User goal: close the Phase 8B audit findings around concurrent commits,
+  cancellation, destination/root/source races, and permissive output
+  structure validation.
+- Completed:
+  - made export commit single-flight with explicit lease/operation
+    generations and abort checks after every asynchronous hook or filesystem
+    boundary;
+  - pinned the canonical destination parent with an open descriptor, added
+    pre/post parent, root, target and temp inode checks, and avoided pathname
+    cleanup whenever the parent identity is redirected;
+  - added two source revision passes plus a final synchronous descriptor hash
+    pass immediately before rename;
+  - made post-rename identity loss explicit as `committed: true` uncertainty;
+  - tightened the HTML validator to one ordered `html > head + body` document,
+    head-only CSP/style/meta/title, ASCII whitespace parsing, and no non-void
+    self-closing tags;
+  - added deterministic race coverage for concurrent commits, cancel and owner
+    cleanup after temp sync, parent symlink swaps before temp and before
+    rename, root replacement, late source mutation, and post-rename parent
+    replacement.
+- Files:
+  - `packages/desktop/src/main/book/sessionManager.ts`
+  - `packages/desktop/src/common/book/exportPolicy.ts`
+  - `packages/desktop/test/unit/specs/book-reader.spec.ts`
+  - `packages/desktop/test/unit/specs/book-export.spec.ts`
+  - `docs/BOOK_EXPORT.md`
+  - `WORKLOG.md`
+- Tests:
+  - hardened export/Reader unit: 2 files, 98/98 passed;
+  - full desktop unit: 58 files, 981/981 passed;
+  - desktop typecheck and production build: passed (only the four existing
+    CodeMirror chunk warnings);
+  - selected offline HTML Electron E2E: 1/1 passed;
+  - scoped ESLint, Prettier check, and `git diff --check`: passed (only the
+    existing ESLint module-type warning).
+- Key decision: Node exposes no portable fd-relative `openat`/`renameat`.
+  LeafBook therefore pins and verifies the parent descriptor and places all
+  final checks plus `renameSync` in one event-loop turn, but explicitly does
+  not claim protection from a privileged external process racing between the
+  final pathname check and the rename syscall.
+- Unresolved: portable Node APIs cannot close the documented final
+  pathname-check-to-rename syscall race against a hostile local process.
+- Git commit: not created; nothing was pushed.
+
+## 2026-07-29 — Phase 8C Generate Local Website
+
+- User goal: generate a GitBook-like, fully offline local website from a LeafBook Markdown book.
+- Completed: reused the exact Phase 8B HTML renderer/policy; added typed begin/commit/cancel
+  website IPC; main-owned canonical manifest v1; strict absent/empty/owned destination admission;
+  sibling stage/backup directory transaction with bounded pinned file I/O, source/destination
+  revalidation, explicit replacement, rollback, identity-proven cleanup, cancellation and
+  committed/uncertain truth; renderer dirty guard, mutual exclusion, generation control,
+  accessible status and Generate Website action.
+- Security hardening: recorded directory and per-leaf device/inode identities and hashes; added
+  final synchronous session/parent/root/source/target/stage/backup validation before every rename,
+  unlink, and `rmdir`; post-rename target identity checks; identity-bound rollback and per-leaf
+  cleanup that preserves swapped attacker directories.
+- Cleanup ordering: moved expensive source/target checks before the final per-leaf inspection;
+  each `unlink` now follows a fresh `lstat`/`NOFOLLOW` open/`fstat`/hash plus adjacent parent/backup
+  identity check. Deterministic index and manifest replacement-window tests verify replacement
+  inodes survive; the irreducible syscall-sized Node pathname race remains documented as P3.
+- Files: `packages/desktop/src/common/book/websitePolicy.ts`,
+  `packages/desktop/src/main/book/sessionManager.ts`, book IPC/preload/types/store/workspace,
+  website policy/reader/store tests, and `docs/BOOK_WEBSITE.md`.
+- Tests: targeted website/reader/store unit tests 137/137 passed; full unit suite 59 files,
+  1020/1020 passed; typecheck and production build passed; real Electron website E2E 1/1 passed
+  with exact canonical manifest bytes/hash, zero active-content attributes, scoped Chinese alias
+  navigation resolving to its heading, one body per physical document, and isolated `loadFile`
+  offline checks; scoped ESLint, Prettier, and `git diff --check` passed.
+- Key decisions: output is exactly `index.html` plus `leafbook-manifest.json`; local images remain
+  placeholders; no recursive deletion or crash-recovery scanning; filesystem commit is documented
+  as best-effort because Node lacks portable `openat`/`renameat`/atomic directory exchange.
+- Unresolved: none in Phase 8C scope; PDF, server/cloud publishing, assets, and recovery tooling are
+  later phases.
+- Git commit: not created (not requested).
+
+## 2026-07-29 — Phase 8D security boundary and artifact provenance hardening
+
+- User goal: finish the LeafBook release-readiness boundary in sequence,
+  including uploader/Shell IPC, renderer networking, Windows network-file
+  images, artifact audits, packaged-smoke provenance, and accurate dependency
+  inventory wording.
+- Completed:
+  - restricted uploader IPC to trusted Editor owners and main-owned persisted
+    settings; replaced shell execution with fixed `execFile` argument arrays,
+    validated bounded canonical regular image files, and required native
+    confirmation for every PicGo/custom run followed by immediate image and
+    executable re-fstat identity checks;
+  - restricted external targets to confirmed HTTP/HTTPS/mailto URLs, disabled
+    renderer-supplied reveal/openPath operations pending opaque capabilities,
+    and applied the trusted-owner gate to clipboard bridges;
+  - made ownerless renderer-session traffic fail closed, limited development
+    networking to the exact HTTP Vite origin plus matching WS, and rejected
+    raw/encoded/mixed-slash UNC and non-empty-authority `file:` images through
+    one shared local-resource predicate; static print/PDF now validates in an
+    inert template and legacy HTML export emits placeholders before an unsafe
+    image can become a live `src`;
+  - added canonical fixed-dist artifact path checks for symlinks, FIFO/device
+    nodes and containment; applied updater-name audits to unpacked apps,
+    extracted ZIPs, mounted DMGs, platform archives, and release trees; one
+    shared ASAR-listing audit rejects case-insensitive updater runtimes and
+    forbidden updater basenames at any internal path;
+  - added a canonical macOS audit receipt under `dist/audit` binding schema and
+    audit-config versions, bundle realpath/device/inode and identity, plus a
+    canonical sorted complete content-tree manifest: directories and modes,
+    exact in-bundle symlink targets, and every regular file's mode, size and
+    SHA-256, including frameworks/helpers and `app.asar.unpacked`; packaged
+    smoke immediately recomputes exact equality before launching;
+  - regenerated the production dependency license inventory with package
+    versions preserved (including multiple versions) and documented its
+    non-SBOM limitations; documented the inherited `v*` automatic publish
+    workflow as a P1 external blocker requiring protected/manual approval.
+- Files: uploader/Shell/network/image runtime and tests under
+  `packages/desktop` and `packages/muya`; release audit/smoke/receipt helpers
+  under `scripts`; `packages/desktop/build/THIRD-PARTY-LICENSES.txt`;
+  `docs/RELEASE_GATE.md`; `WORKLOG.md`.
+- Tests:
+  - desktop full unit: 65 files, 1095/1095 passed;
+  - Muya full unit: 212 files, 1449/1449 passed;
+  - selected source Electron release smoke: exact 6/6 passed after a six-title
+    Playwright collection preflight;
+  - desktop typecheck and production build passed (four existing CodeMirror
+    chunk warnings only);
+  - full ESLint passed with 0 errors and 134 inherited warnings; final scoped
+    ESLint and Prettier checks, shell syntax, license validation, receipt/path
+    fixtures, and `git diff --check` passed.
+- Key decisions: arbitrary renderer paths are not treated as capabilities;
+  every uploader execution and external navigation require native confirmation;
+  smoke trusts only a fixed audit-produced receipt and recomputes the complete
+  audited content tree; the receipt does not claim to bind xattrs, ACLs,
+  resource forks, or code-signature validity;
+  no release workflow, version, tag, signing, publishing, or dependency changes
+  were authorized.
+- Unresolved: overall public release remains NOT READY. A complete
+  network-denied packaged app and packaged smoke are unavailable because the
+  required local Electron/electron-builder cache is missing; Windows/Linux
+  runtime evidence, signing/notarization, SBOM/provenance, protected manual
+  release approval, and inherited workflow remediation remain external
+  blockers.
+- Git commit: not created; nothing was pushed.

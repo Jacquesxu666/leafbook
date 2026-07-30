@@ -13,6 +13,16 @@ import type {
 import type { MenuTemplate, MenuPopupPosition } from '@shared/types/menu'
 import type { SerializedStat } from '@shared/types/files'
 import type {
+  BookArrangementApplyRequestDto,
+  BookArrangementDto,
+  BookArrangementSaveDto,
+  BookArrangementSaveRequestDto,
+  BookExportCommitRequestDto,
+  BookExportSaveDto,
+  BookExportSnapshotDto,
+  BookWebsiteCommitRequestDto,
+  BookWebsiteSaveDto,
+  BookWebsiteSnapshotDto,
   BookChapterDto,
   BookEditDto,
   BookEditSaveDto,
@@ -120,6 +130,25 @@ declare global {
       saveEdit(request: BookEditSaveRequestDto): Promise<BookReaderResult<BookEditSaveDto>>
       reloadEdit(editId: string): Promise<BookReaderResult<BookEditDto>>
       closeEdit(editId: string): Promise<BookReaderResult<true>>
+      beginArrangement(sessionId: string): Promise<BookReaderResult<BookArrangementDto>>
+      applyArrangement(
+        request: BookArrangementApplyRequestDto
+      ): Promise<BookReaderResult<BookArrangementDto>>
+      undoArrangement(arrangementId: string): Promise<BookReaderResult<BookArrangementDto>>
+      saveArrangement(
+        request: BookArrangementSaveRequestDto
+      ): Promise<BookReaderResult<BookArrangementSaveDto>>
+      closeArrangement(arrangementId: string): Promise<BookReaderResult<true>>
+      beginExport(sessionId: string): Promise<BookReaderResult<BookExportSnapshotDto>>
+      commitExport(
+        request: BookExportCommitRequestDto
+      ): Promise<BookReaderResult<BookExportSaveDto>>
+      cancelExport(exportId: string): Promise<BookReaderResult<true>>
+      beginWebsite(sessionId: string): Promise<BookReaderResult<BookWebsiteSnapshotDto>>
+      commitWebsite(
+        request: BookWebsiteCommitRequestDto
+      ): Promise<BookReaderResult<BookWebsiteSaveDto>>
+      cancelWebsite(websiteId: string): Promise<BookReaderResult<true>>
       saveReadingPosition(
         sessionId: string,
         nodeId: string,

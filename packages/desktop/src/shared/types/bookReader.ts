@@ -22,6 +22,25 @@ export type BookReaderErrorCode =
   | 'edit-mixed-line-endings'
   | 'edit-commit-uncertain'
   | 'edit-write-failed'
+  | 'arrangement-not-found'
+  | 'arrangement-read-only'
+  | 'arrangement-conflict'
+  | 'arrangement-encoding'
+  | 'arrangement-too-large'
+  | 'arrangement-commit-uncertain'
+  | 'arrangement-write-failed'
+  | 'export-busy'
+  | 'export-too-large'
+  | 'export-source-changed'
+  | 'export-invalid-output'
+  | 'export-write-failed'
+  | 'website-busy'
+  | 'website-too-large'
+  | 'website-source-changed'
+  | 'website-invalid-output'
+  | 'website-unsafe-target'
+  | 'website-commit-uncertain'
+  | 'website-write-failed'
 
 export interface BookReaderError {
   code: BookReaderErrorCode
@@ -112,6 +131,115 @@ export interface BookEditSaveDto {
   nodeId: string | null
   readOnly: boolean
   durabilityUncertain: boolean
+}
+
+export interface BookArrangementNodeDto {
+  nodeId: string
+  kind: 'heading' | 'list'
+  title: string
+  depth: number
+  children: BookArrangementNodeDto[]
+  canIndent: boolean
+  canOutdent: boolean
+}
+
+export type BookArrangementOperationDto =
+  | { type: 'move-before'; nodeId: string; targetNodeId: string }
+  | { type: 'move-after'; nodeId: string; targetNodeId: string }
+  | { type: 'indent'; nodeId: string }
+  | { type: 'outdent'; nodeId: string }
+
+export interface BookArrangementDto {
+  arrangementId: string
+  sessionId: string
+  revision: string
+  candidateRevision: string
+  nodes: BookArrangementNodeDto[]
+  dirty: boolean
+  canUndo: boolean
+  preview: {
+    operationCount: number
+    byteLength: number
+  }
+}
+
+export interface BookArrangementApplyRequestDto {
+  arrangementId: string
+  operation: BookArrangementOperationDto
+}
+
+export interface BookArrangementSaveRequestDto {
+  arrangementId: string
+  revision: string
+  overwriteToken?: string
+}
+
+export interface BookArrangementSaveDto {
+  arrangementId: string
+  revision: string
+  session: BookSessionDto | null
+  durabilityUncertain: boolean
+}
+
+export interface BookExportLinkTargetDto {
+  documentId: string
+  fragment: string | null
+}
+
+export interface BookExportDocumentDto {
+  documentId: string
+  nodeIds: string[]
+  title: string
+  markdown: string | null
+  linkTargets: Record<string, BookExportLinkTargetDto>
+}
+
+export interface BookExportSnapshotDto {
+  exportId: string
+  title: string
+  nodes: BookReaderNodeDto[]
+  landingNodeId: string | null
+  navigationTargets: Record<string, { documentId: string; fragment: string | null }>
+  documents: BookExportDocumentDto[]
+}
+
+export interface BookExportCommitRequestDto {
+  exportId: string
+  html: string
+}
+
+export interface BookExportSaveDto {
+  fileName: string
+  byteLength: number
+  durabilityUncertain: boolean
+}
+
+export interface BookWebsiteSnapshotDto extends Omit<BookExportSnapshotDto, 'exportId'> {
+  websiteId: string
+}
+
+export interface BookWebsiteCommitRequestDto {
+  websiteId: string
+  html: string
+}
+
+export interface BookWebsiteSaveDto {
+  directoryName: string
+  files: ['index.html', 'leafbook-manifest.json']
+  byteLength: number
+  durabilityUncertain: boolean
+}
+
+export interface BookWebsiteManifestFileDto {
+  path: 'index.html'
+  size: number
+  sha256: string
+}
+
+export interface BookWebsiteManifestDto {
+  schemaVersion: 1
+  generator: 'LeafBook'
+  files: [BookWebsiteManifestFileDto]
 }
 
 export interface BookLinkNavigationDto {

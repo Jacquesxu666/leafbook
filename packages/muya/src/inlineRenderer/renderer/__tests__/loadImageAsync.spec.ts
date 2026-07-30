@@ -12,6 +12,7 @@ function asRenderer(r: IFakeRenderer | { loadImageMap: Map<string, unknown>; url
 
 vi.mock('../../../utils/image', () => ({
     loadImage: vi.fn(() => new Promise(() => {})), // never resolves; we only test the sync decision
+    isSafeLocalResource: vi.fn(() => true),
 }));
 
 vi.mock('../../../utils/dom', () => ({
@@ -44,7 +45,7 @@ describe('loadImageAsync — failed cache should retry', () => {
     it('returns the cached info when the previous load succeeded', async () => {
         const { loadImage } = await import('../../../utils/image');
         const r = makeRenderer();
-        r.loadImageMap.set('https://example.com/a.png', {
+        r.loadImageMap.set('file:///tmp/a.png', {
             id: 'mu-cached-success',
             isSuccess: true,
             width: 100,
@@ -53,7 +54,7 @@ describe('loadImageAsync — failed cache should retry', () => {
 
         const out = loadImageAsync.call(
             asRenderer(r),
-            { isUnknownType: false, src: 'https://example.com/a.png' },
+            { isUnknownType: false, src: 'file:///tmp/a.png' },
             {},
         );
 
@@ -69,14 +70,14 @@ describe('loadImageAsync — failed cache should retry', () => {
     it('re-triggers loadImage when the previous load failed', async () => {
         const { loadImage } = await import('../../../utils/image');
         const r = makeRenderer();
-        r.loadImageMap.set('https://example.com/b.png', {
+        r.loadImageMap.set('file:///tmp/b.png', {
             id: 'mu-cached-fail',
             isSuccess: false,
         });
 
         const out = loadImageAsync.call(
             asRenderer(r),
-            { isUnknownType: false, src: 'https://example.com/b.png' },
+            { isUnknownType: false, src: 'file:///tmp/b.png' },
             {},
         );
 
@@ -84,7 +85,7 @@ describe('loadImageAsync — failed cache should retry', () => {
         expect(out.id).not.toBe('mu-cached-fail');
         // the loader was invoked again
         expect(loadImage).toHaveBeenCalledTimes(1);
-        expect(loadImage).toHaveBeenCalledWith('https://example.com/b.png', false);
+        expect(loadImage).toHaveBeenCalledWith(expect.stringMatching(/^file:\/\/\/tmp\/b\.png\?/), false);
     });
 
     it('triggers loadImage when nothing is cached', async () => {
@@ -93,7 +94,7 @@ describe('loadImageAsync — failed cache should retry', () => {
 
         loadImageAsync.call(
             asRenderer(r),
-            { isUnknownType: false, src: 'https://example.com/c.png' },
+            { isUnknownType: false, src: 'file:///tmp/c.png' },
             {},
         );
 
@@ -128,17 +129,18 @@ describe('loadImageAsync — local file cache-busting', () => {
         expect(loadedUrl).toMatch(/^file:\/\/\/tmp\/pic\.png\?[^=]+=[^&]+$/);
     });
 
-    it('does NOT touch remote http(s) sources', async () => {
+    it('keeps remote http(s) sources inert in offline mode', async () => {
         const { loadImage } = await import('../../../utils/image');
         const r = makeRenderer();
 
-        loadImageAsync.call(
+        const result = loadImageAsync.call(
             asRenderer(r),
             { isUnknownType: false, src: 'https://example.com/a.png' },
             {},
         );
 
-        expect(loadImage).toHaveBeenCalledWith('https://example.com/a.png', false);
+        expect(loadImage).not.toHaveBeenCalled();
+        expect(result.isSuccess).toBe(false);
     });
 
     it('uses a different URL on each fresh load so a cleared cache refetches from disk', async () => {
@@ -198,7 +200,7 @@ describe('loadImageAsync — small image class on first load', () => {
 
         const { id } = loadImageAsync.call(
             asRenderer(r),
-            { isUnknownType: false, src: 'https://example.com/fresh.png' },
+            { isUnknownType: false, src: 'file:///tmp/fresh.png' },
             {},
         );
 
