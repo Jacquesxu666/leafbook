@@ -675,7 +675,7 @@ function tryHtmlTag(state: ILexState): boolean {
         htmlTo
         && !disallowedHtmlTag.test(htmlTo[3])
         // eslint-disable-next-line no-cond-assign
-        && (attrs = getAttributes(htmlTo[0]))
+        && (attrs = state.options.parseHtmlAttributes === false ? {} : getAttributes(htmlTo[0]))
     ) {
         const tag = htmlTo[3];
         const html = htmlTo[0];

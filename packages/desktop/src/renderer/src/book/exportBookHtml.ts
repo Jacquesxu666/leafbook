@@ -6,6 +6,7 @@ import type {
 } from '@shared/types/bookReader'
 import { renderBookMarkdown } from './renderMarkdown'
 import { BOOK_EXPORT_CSP, BOOK_EXPORT_STYLE } from 'common/book/exportPolicy'
+import { bookFragmentKey } from 'common/book/heading'
 
 const escapeHtml = (value: string): string =>
   value.replace(/[&<>"']/g, (character) => {
@@ -18,14 +19,6 @@ const escapeHtml = (value: string): string =>
     }
     return entities[character] as string
   })
-
-const fragmentKey = (value: string): string =>
-  value
-    .normalize('NFKC')
-    .trim()
-    .toLocaleLowerCase()
-    .replace(/[^\p{Letter}\p{Number}]+/gu, '-')
-    .replace(/^-+|-+$/g, '')
 
 interface GeneratedDocument {
   documentId: string
@@ -51,7 +44,7 @@ const renderNavigation = (
       const document = generated.get(target.documentId)
       const headingId =
         target.fragment && document
-          ? document.headingByFragment.get(fragmentKey(target.fragment))
+          ? document.headingByFragment.get(bookFragmentKey(target.fragment))
           : undefined
       if (document?.available && (!target.fragment || headingId)) {
         const href = headingId ?? chapterAnchor(target.documentId)
@@ -110,7 +103,7 @@ export const generateBookExportHtml = async (snapshot: BookExportSnapshotDto): P
       const id = `leafbook-heading-${source.documentId}-${index + 1}`
       heading.id = id
       for (const candidate of [originalId, text]) {
-        const key = fragmentKey(candidate)
+        const key = bookFragmentKey(candidate)
         if (key && !headingByFragment.has(key)) headingByFragment.set(key, id)
       }
     })
@@ -139,7 +132,7 @@ export const generateBookExportHtml = async (snapshot: BookExportSnapshotDto): P
       const targetDocument = target ? generated.get(target.documentId) : undefined
       const headingId =
         target?.fragment && targetDocument
-          ? targetDocument.headingByFragment.get(fragmentKey(target.fragment))
+          ? targetDocument.headingByFragment.get(bookFragmentKey(target.fragment))
           : undefined
       if (target && targetDocument?.available && (!target.fragment || headingId)) {
         anchor.setAttribute('href', `#${headingId ?? chapterAnchor(targetDocument.documentId)}`)

@@ -17,7 +17,9 @@ import type {
 } from '@shared/types/bookReader'
 import { adjacentChapter, flattenReadableNodeIds } from '@/book/readerModel'
 import { renderBookMarkdown } from '@/book/renderMarkdown'
+import { analyzeAtxH1Headings } from 'leafbook-muya-heading-analyzer'
 import { generateBookExportHtml } from '@/book/exportBookHtml'
+import { bookFragmentKey, validateBookHeadingFragments } from 'common/book/heading'
 import {
   PAINT_WAIT_TIMEOUT_MS,
   restoreReadingPosition,
@@ -213,6 +215,842 @@ describe('book edit decision queue', () => {
     expect(bookEditDecision.title).toBe('Next')
     resolveBookEditDecision(bookEditDecision.requestId, 'cancel')
     await next
+  })
+})
+
+describe('book session LRU', () => {
+  it('keeps direct session Map mutation inside the lifecycle helpers', () => {
+    const sourcePath = [
+      path.resolve(process.cwd(), 'src/main/book/sessionManager.ts'),
+      path.resolve(process.cwd(), 'packages/desktop/src/main/book/sessionManager.ts')
+    ].find((candidate) => fsSync.existsSync(candidate))
+    expect(sourcePath).toBeDefined()
+    if (!sourcePath) return
+
+    const source = fsSync.readFileSync(sourcePath, 'utf8')
+    const helperStart = source.indexOf('  private touchSession(')
+    const helperEnd = source.indexOf('  private ownerGeneration(', helperStart)
+    expect(helperStart).toBeGreaterThan(-1)
+    expect(helperEnd).toBeGreaterThan(helperStart)
+    const helperSource = source.slice(helperStart, helperEnd)
+    const outsideHelpers = `${source.slice(0, helperStart)}${source.slice(helperEnd)}`
+
+    expect(outsideHelpers).not.toMatch(/this\.sessions\.(?:set|delete|clear)\(/)
+    expect(helperSource.match(/this\.sessions\.set\(/g)).toHaveLength(3)
+    expect(helperSource.match(/this\.sessions\.delete\(/g)).toHaveLength(3)
+    expect(helperSource).not.toContain('this.sessions.clear(')
+  })
+
+  it('touches successful access and repeatedly evicts only that owner least-recent session', async () => {
+    const root = await makeBook({ 'chapter.md': '# Chapter\n' })
+    mocks.selectedPath = root
+    const manager = new BookSessionManager('/session-lru-user-data')
+    const ownerId = 68
+    const otherOwnerId = 69
+    const sessions: BookSessionDto[] = []
+
+    for (let index = 0; index < 20; index++) {
+      const opened = await manager.openPicker({ sender: { id: ownerId } } as never)
+      expect(opened.ok).toBe(true)
+      if (!opened.ok) return
+      sessions.push(opened.value)
+    }
+    const other = await manager.openPicker({ sender: { id: otherOwnerId } } as never)
+    expect(other.ok).toBe(true)
+    if (!other.ok) return
+
+    expect(
+      await manager.readChapter(sessions[0].sessionId, sessions[0].nodes[0].nodeId, ownerId)
+    ).toMatchObject({ ok: true })
+    expect((await manager.openPicker({ sender: { id: ownerId } } as never)).ok).toBe(true)
+    expect(manager.closeSession(sessions[1].sessionId, ownerId)).toMatchObject({
+      ok: false,
+      error: { code: 'session-not-found' }
+    })
+    expect(
+      await manager.readChapter(sessions[0].sessionId, sessions[0].nodes[0].nodeId, ownerId)
+    ).toMatchObject({ ok: true })
+
+    expect((await manager.openPicker({ sender: { id: ownerId } } as never)).ok).toBe(true)
+    expect(manager.closeSession(sessions[2].sessionId, ownerId)).toMatchObject({
+      ok: false,
+      error: { code: 'session-not-found' }
+    })
+    expect(
+      await manager.readChapter(other.value.sessionId, other.value.nodes[0].nodeId, otherOwnerId)
+    ).toMatchObject({ ok: true })
+  })
+
+  it('touches an existing session replacement after refresh', async () => {
+    const root = await makeBook({ 'chapter.md': '# Chapter\n' })
+    mocks.selectedPath = root
+    const manager = new BookSessionManager('/session-refresh-lru-user-data')
+    const ownerId = 70
+    const sessions: BookSessionDto[] = []
+
+    for (let index = 0; index < 20; index++) {
+      const opened = await manager.openPicker({ sender: { id: ownerId } } as never)
+      expect(opened.ok).toBe(true)
+      if (!opened.ok) return
+      sessions.push(opened.value)
+    }
+    expect(await manager.refresh(sessions[0].sessionId, ownerId)).toMatchObject({ ok: true })
+    expect((await manager.openPicker({ sender: { id: ownerId } } as never)).ok).toBe(true)
+    expect(manager.closeSession(sessions[1].sessionId, ownerId)).toMatchObject({
+      ok: false,
+      error: { code: 'session-not-found' }
+    })
+    expect(manager.closeSession(sessions[0].sessionId, ownerId)).toEqual({
+      ok: true,
+      value: true
+    })
+  })
+
+  it('revokes the old session exactly once when public refresh publishes its replacement', async () => {
+    const root = await makeBook({ 'chapter.md': '# Chapter\n' })
+    mocks.selectedPath = root
+    const manager = new BookSessionManager('/session-refresh-revoke-user-data')
+    const opened = await manager.openPicker({ sender: { id: 71 } } as never)
+    expect(opened.ok).toBe(true)
+    if (!opened.ok) return
+
+    type SessionInternals = {
+      sessions: Map<string, { generation: number }>
+      revokeSessionLeases: (...args: unknown[]) => void
+    }
+    const internals = manager as unknown as SessionInternals
+    const original = internals.sessions.get(opened.value.sessionId)
+    expect(original).toBeDefined()
+    if (!original) return
+    const revoke = vi.spyOn(internals, 'revokeSessionLeases')
+
+    expect(await manager.refresh(opened.value.sessionId, 71)).toMatchObject({ ok: true })
+    const replacement = internals.sessions.get(opened.value.sessionId)
+    expect(replacement).toBeDefined()
+    expect(replacement).not.toBe(original)
+    expect(revoke).toHaveBeenCalledOnce()
+    expect(revoke.mock.calls[0]?.[1]).toBe(original)
+    expect(revoke.mock.calls.some((call) => call[1] === replacement)).toBe(false)
+  })
+
+  it.each([
+    {
+      operation: 'read',
+      files: { 'README.md': '# One\n' },
+      run: (
+        manager: BookSessionManager,
+        opened: BookSessionDto,
+        ownerId: number
+      ): Promise<BookReaderResult<unknown>> =>
+        manager.readChapter(opened.sessionId, opened.entryNodeId, ownerId)
+    },
+    {
+      operation: 'edit',
+      files: { 'SUMMARY.md': '- [One](README.md)\n', 'README.md': '# One\n' },
+      run: (
+        manager: BookSessionManager,
+        opened: BookSessionDto,
+        ownerId: number
+      ): Promise<BookReaderResult<unknown>> =>
+        manager.beginEdit(opened.sessionId, opened.nodes[0].nodeId, ownerId)
+    },
+    {
+      operation: 'arrange',
+      files: { 'SUMMARY.md': '- [One](README.md)\n', 'README.md': '# One\n' },
+      run: (
+        manager: BookSessionManager,
+        opened: BookSessionDto,
+        ownerId: number
+      ): Promise<BookReaderResult<unknown>> => manager.beginArrangement(opened.sessionId, ownerId)
+    },
+    {
+      operation: 'prepare',
+      files: { 'manuscript.md': '# One\n\n# Two\n' },
+      run: (
+        manager: BookSessionManager,
+        opened: BookSessionDto,
+        ownerId: number
+      ): Promise<BookReaderResult<unknown>> => manager.beginPreparation(opened.sessionId, ownerId)
+    },
+    {
+      operation: 'export',
+      files: { 'README.md': '# One\n' },
+      run: (
+        manager: BookSessionManager,
+        opened: BookSessionDto,
+        ownerId: number
+      ): Promise<BookReaderResult<unknown>> =>
+        manager.beginExport(opened.sessionId, { sender: { id: ownerId } } as never, ownerId)
+    },
+    {
+      operation: 'search',
+      files: { 'README.md': '# One\n' },
+      run: (
+        manager: BookSessionManager,
+        opened: BookSessionDto,
+        ownerId: number
+      ): Promise<BookReaderResult<unknown>> =>
+        manager.search(
+          opened.sessionId,
+          { searchId: randomUUID(), query: 'One', limit: 10 },
+          ownerId
+        )
+    },
+    {
+      operation: 'link navigation',
+      files: { 'README.md': '# One\n' },
+      run: (
+        manager: BookSessionManager,
+        opened: BookSessionDto,
+        ownerId: number
+      ): Promise<BookReaderResult<unknown>> =>
+        manager.followLink(opened.sessionId, opened.entryNodeId, '#one', ownerId)
+    }
+  ])(
+    'fails $operation acquisition closed while the exact session refresh is pending',
+    async ({ files, run }) => {
+      const root = await makeBook(files as unknown as Record<string, string>)
+      const reached = deferredValue<void>()
+      const release = deferredValue<void>()
+      let loads = 0
+      const loader: typeof loadBookFromDirectory = async (rootPath, options) => {
+        const result = await loadBookFromDirectory(rootPath, options)
+        loads++
+        if (loads > 1) {
+          reached.resolve()
+          await release.promise
+        }
+        return result
+      }
+      mocks.selectedPath = root
+      const ownerId = 79
+      const manager = new BookSessionManager('/session-refresh-freeze-user-data', loader)
+      const opened = await manager.openPicker({ sender: { id: ownerId } } as never)
+      expect(opened.ok).toBe(true)
+      if (!opened.ok || !opened.value.entryNodeId) return
+
+      const refreshing = manager.refresh(opened.value.sessionId, ownerId)
+      await reached.promise
+      await expect(run(manager, opened.value, ownerId)).resolves.toMatchObject({
+        ok: false,
+        error: { code: 'session-not-found' }
+      })
+      release.resolve()
+      await expect(refreshing).resolves.toMatchObject({ ok: true })
+    }
+  )
+
+  it.each(['success', 'scan-failure'] as const)(
+    'clears the atomic refresh freeze after %s without reviving old leases',
+    async (outcome) => {
+      const root = await makeBook({
+        'SUMMARY.md': '- [One](README.md)\n',
+        'README.md': '# One\n'
+      })
+      const reached = deferredValue<void>()
+      const release = deferredValue<void>()
+      let loads = 0
+      const loader: typeof loadBookFromDirectory = async (rootPath, options) => {
+        const result = await loadBookFromDirectory(rootPath, options)
+        loads++
+        if (loads === 1) return result
+        reached.resolve()
+        await release.promise
+        if (outcome === 'success') return result
+        return {
+          book: result.book,
+          diagnostics: [
+            {
+              code: 'scan-root-error',
+              severity: 'error',
+              message: 'The book root could not be scanned.'
+            }
+          ]
+        }
+      }
+      mocks.selectedPath = root
+      const ownerId = 80
+      const manager = new BookSessionManager(
+        `/session-refresh-${outcome}-recovery-user-data`,
+        loader
+      )
+      const opened = await manager.openPicker({ sender: { id: ownerId } } as never)
+      expect(opened.ok).toBe(true)
+      if (!opened.ok || !opened.value.nodes[0]) return
+      const edit = await manager.beginEdit(
+        opened.value.sessionId,
+        opened.value.nodes[0].nodeId,
+        ownerId
+      )
+      expect(edit.ok).toBe(true)
+      if (!edit.ok) return
+
+      const refreshing = manager.refresh(opened.value.sessionId, ownerId)
+      await reached.promise
+      expect(await manager.reloadEdit(edit.value.editId, ownerId)).toMatchObject({
+        ok: false,
+        error: { code: 'edit-not-found' }
+      })
+      release.resolve()
+      await expect(refreshing).resolves.toMatchObject({
+        ok: outcome === 'success',
+        ...(outcome === 'success' ? {} : { error: { code: 'book-unavailable' } })
+      })
+      await expect(
+        manager.readChapter(opened.value.sessionId, opened.value.nodes[0].nodeId, ownerId)
+      ).resolves.toMatchObject({ ok: true })
+      expect(await manager.reloadEdit(edit.value.editId, ownerId)).toMatchObject({
+        ok: false,
+        error: { code: 'edit-not-found' }
+      })
+    }
+  )
+
+  it('shares repeated refresh, rejects the wrong owner, and leaves another owner unfrozen', async () => {
+    const root = await makeBook({ 'README.md': '# One\n' })
+    const reached = deferredValue<void>()
+    const release = deferredValue<void>()
+    let loads = 0
+    const loader: typeof loadBookFromDirectory = async (rootPath, options) => {
+      const result = await loadBookFromDirectory(rootPath, options)
+      loads++
+      if (loads === 3) {
+        reached.resolve()
+        await release.promise
+      }
+      return result
+    }
+    mocks.selectedPath = root
+    const manager = new BookSessionManager('/session-refresh-owner-isolation-user-data', loader)
+    const first = await manager.openPicker({ sender: { id: 81 } } as never)
+    const other = await manager.openPicker({ sender: { id: 82 } } as never)
+    expect(first.ok && other.ok).toBe(true)
+    if (!first.ok || !first.value.entryNodeId || !other.ok || !other.value.entryNodeId) return
+
+    const initial = manager.refresh(first.value.sessionId, 81)
+    await reached.promise
+    const repeated = manager.refresh(first.value.sessionId, 81)
+    await expect(manager.refresh(first.value.sessionId, 82)).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'session-not-found' }
+    })
+    await expect(
+      manager.readChapter(other.value.sessionId, other.value.entryNodeId, 82)
+    ).resolves.toMatchObject({ ok: true })
+    release.resolve()
+    const [initialResult, repeatedResult] = await Promise.all([initial, repeated])
+    expect(initialResult).toMatchObject({ ok: true })
+    expect(repeatedResult).toEqual(initialResult)
+    expect(loads).toBe(3)
+  })
+
+  it('lets owner close the frozen session and prevents a late refresh replacement', async () => {
+    const root = await makeBook({ 'README.md': '# One\n' })
+    const reached = deferredValue<void>()
+    const release = deferredValue<void>()
+    let loads = 0
+    const loader: typeof loadBookFromDirectory = async (rootPath, options) => {
+      const result = await loadBookFromDirectory(rootPath, options)
+      loads++
+      if (loads > 1) {
+        reached.resolve()
+        await release.promise
+      }
+      return result
+    }
+    mocks.selectedPath = root
+    const ownerId = 83
+    const manager = new BookSessionManager('/session-refresh-close-user-data', loader)
+    const opened = await manager.openPicker({ sender: { id: ownerId } } as never)
+    expect(opened.ok).toBe(true)
+    if (!opened.ok) return
+
+    const refreshing = manager.refresh(opened.value.sessionId, ownerId)
+    await reached.promise
+    expect(manager.closeSession(opened.value.sessionId, ownerId)).toEqual({
+      ok: true,
+      value: true
+    })
+    release.resolve()
+    await expect(refreshing).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'session-not-found' }
+    })
+    expect(manager.closeSession(opened.value.sessionId, ownerId)).toMatchObject({
+      ok: false,
+      error: { code: 'session-not-found' }
+    })
+  })
+
+  it.each(['close', 'remove', 'cleanup', 'capacity'] as const)(
+    'routes %s removal through one idempotent session revocation',
+    async (boundary) => {
+      const root = await makeBook({ 'chapter.md': '# Chapter\n' })
+      mocks.selectedPath = root
+      const ownerId = 72
+      const manager = new BookSessionManager(`/session-${boundary}-lifecycle-user-data`)
+      const opened = await manager.openPicker({ sender: { id: ownerId } } as never)
+      expect(opened.ok).toBe(true)
+      if (!opened.ok) return
+
+      type SessionInternals = {
+        revokeSessionLeases: (...args: unknown[]) => void
+      }
+      const internals = manager as unknown as SessionInternals
+      const revoke = vi.spyOn(internals, 'revokeSessionLeases')
+      if (boundary === 'close') {
+        expect(manager.closeSession(opened.value.sessionId, ownerId)).toEqual({
+          ok: true,
+          value: true
+        })
+        expect(manager.closeSession(opened.value.sessionId, ownerId)).toMatchObject({
+          ok: false,
+          error: { code: 'session-not-found' }
+        })
+      } else if (boundary === 'remove') {
+        expect(await manager.removeLibrary(opened.value.libraryId)).toEqual({
+          ok: true,
+          value: true
+        })
+        expect(await manager.removeLibrary(opened.value.libraryId)).toMatchObject({
+          ok: false,
+          error: { code: 'library-not-found' }
+        })
+      } else if (boundary === 'cleanup') {
+        manager.cleanupOwner(ownerId)
+        manager.cleanupOwner(ownerId)
+      } else {
+        for (let index = 0; index < 20; index++) {
+          expect((await manager.openPicker({ sender: { id: ownerId } } as never)).ok).toBe(true)
+        }
+      }
+      expect(revoke.mock.calls.filter((call) => call[0] === opened.value.sessionId)).toHaveLength(1)
+      expect(manager.closeSession(opened.value.sessionId, ownerId)).toMatchObject({
+        ok: false,
+        error: { code: 'session-not-found' }
+      })
+    }
+  )
+
+  it('rebinds repeated edits and removeLibrary revokes the current sessions across owners', async () => {
+    const root = await makeBook({
+      'SUMMARY.md': '- [Start](README.md)\n',
+      'README.md': '# Start\nOriginal\n'
+    })
+    mocks.selectedPath = root
+    const manager = new BookSessionManager('/session-edit-remove-user-data')
+    const first = await manager.openPicker({ sender: { id: 73 } } as never)
+    expect(first.ok).toBe(true)
+    if (!first.ok || !first.value.nodes[0]) return
+    const other = await manager.openLibrary(first.value.libraryId, 74)
+    expect(other.ok).toBe(true)
+    if (!other.ok || !other.value.nodes[0]) return
+    const edit = await manager.beginEdit(first.value.sessionId, first.value.nodes[0].nodeId, 73)
+    const otherEdit = await manager.beginEdit(
+      other.value.sessionId,
+      other.value.nodes[0].nodeId,
+      74
+    )
+    expect(edit.ok && otherEdit.ok).toBe(true)
+    if (!edit.ok || !otherEdit.ok) return
+
+    type SessionInternals = {
+      sessions: Map<string, object>
+      revokeSessionLeases: (...args: unknown[]) => void
+    }
+    const internals = manager as unknown as SessionInternals
+    const revoke = vi.spyOn(internals, 'revokeSessionLeases')
+    let revision = edit.value.revision
+    for (const body of ['First save', 'Second save']) {
+      const previous = internals.sessions.get(first.value.sessionId)
+      const saved = await manager.saveEdit(
+        {
+          editId: edit.value.editId,
+          revision,
+          markdown: `# Start\n${body}\n`
+        },
+        73
+      )
+      expect(saved).toMatchObject({
+        ok: true,
+        value: {
+          editId: edit.value.editId,
+          session: { sessionId: first.value.sessionId },
+          readOnly: false
+        }
+      })
+      if (!saved.ok) return
+      revision = saved.value.revision
+      const current = internals.sessions.get(first.value.sessionId)
+      expect(current).toBeDefined()
+      expect(current).not.toBe(previous)
+      expect(revoke.mock.calls.at(-1)?.[1]).toBe(previous)
+      expect(revoke.mock.calls.some((call) => call[1] === current)).toBe(false)
+      expect(await manager.reloadEdit(edit.value.editId, 73)).toMatchObject({
+        ok: true,
+        value: { revision }
+      })
+    }
+
+    expect(await manager.removeLibrary(first.value.libraryId)).toEqual({ ok: true, value: true })
+    expect(await manager.reloadEdit(edit.value.editId, 73)).toMatchObject({
+      ok: false,
+      error: { code: 'edit-not-found' }
+    })
+    expect(await manager.reloadEdit(otherEdit.value.editId, 74)).toMatchObject({
+      ok: false,
+      error: { code: 'edit-not-found' }
+    })
+    expect(manager.closeSession(first.value.sessionId, 73)).toMatchObject({
+      ok: false,
+      error: { code: 'session-not-found' }
+    })
+    expect(manager.closeSession(other.value.sessionId, 74)).toMatchObject({
+      ok: false,
+      error: { code: 'session-not-found' }
+    })
+  })
+})
+
+describe('book preparation sessions', () => {
+  it('creates SUMMARY from an explicit inferred source and privately refreshes the session', async () => {
+    const root = await makeBook({
+      'manuscript.md': '# First chapter\n\nBody\n\n# Second chapter\n'
+    })
+    mocks.selectedPath = root
+    const manager = new BookSessionManager('/preparation-session-user-data')
+    const opened = await manager.openPicker({ sender: { id: 71 } } as never)
+    expect(opened).toMatchObject({ ok: true, value: { navigationSource: 'inferred' } })
+    if (!opened.ok) return
+    const begun = await manager.beginPreparation(opened.value.sessionId, 71)
+    expect(begun).toMatchObject({
+      ok: true,
+      value: { requiresSelection: true, candidates: [{ title: 'First chapter' }] }
+    })
+    if (!begun.ok) return
+    const selected = await manager.selectPreparationSource(
+      begun.value.preparationId,
+      begun.value.candidates[0].nodeId,
+      71
+    )
+    expect(selected).toMatchObject({
+      ok: true,
+      value: {
+        requiresSelection: false,
+        chapters: [{ title: 'First chapter' }, { title: 'Second chapter' }]
+      }
+    })
+    if (!selected.ok || !selected.value.revision) return
+    const saved = await manager.commitPreparation(
+      { preparationId: selected.value.preparationId, revision: selected.value.revision },
+      71
+    )
+    expect(saved).toMatchObject({
+      ok: true,
+      value: {
+        committed: true,
+        durabilityUncertain: false,
+        sourceNodeId: expect.any(String),
+        session: {
+          sessionId: opened.value.sessionId,
+          navigationSource: 'summary',
+          nodes: [{ title: 'First chapter' }, { title: 'Second chapter' }]
+        }
+      }
+    })
+    expect(await fs.readFile(path.join(root, 'manuscript.md'), 'utf8')).toContain('Body')
+    expect(await fs.readFile(path.join(root, 'SUMMARY.md'), 'utf8')).toContain(
+      'manuscript.md#first-chapter'
+    )
+    expect(manager.closePreparation(selected.value.preparationId, 71)).toMatchObject({
+      ok: false,
+      error: { code: 'preparation-not-found' }
+    })
+  })
+
+  it('is unavailable for summary books and revokes previews at refresh and owner cleanup', async () => {
+    const summaryRoot = await makeBook({
+      'SUMMARY.md': '- [One](one.md)\n',
+      'one.md': '# One'
+    })
+    mocks.selectedPath = summaryRoot
+    const manager = new BookSessionManager('/preparation-boundary-user-data')
+    const summary = await manager.openPicker({ sender: { id: 72 } } as never)
+    if (!summary.ok) return
+    expect(await manager.beginPreparation(summary.value.sessionId, 72)).toMatchObject({
+      ok: false,
+      error: { code: 'preparation-not-available' }
+    })
+
+    const inferredRoot = await makeBook({ 'book.md': '# One\n\n# Two\n' })
+    mocks.selectedPath = inferredRoot
+    const inferred = await manager.openPicker({ sender: { id: 73 } } as never)
+    if (!inferred.ok) return
+    const begun = await manager.beginPreparation(inferred.value.sessionId, 73)
+    if (!begun.ok) return
+    await manager.refresh(inferred.value.sessionId, 73)
+    expect(manager.closePreparation(begun.value.preparationId, 73)).toMatchObject({
+      ok: false,
+      error: { code: 'preparation-not-found' }
+    })
+
+    const second = await manager.beginPreparation(inferred.value.sessionId, 73)
+    if (!second.ok) return
+    manager.cleanupOwner(73)
+    expect(manager.closePreparation(second.value.preparationId, 73)).toMatchObject({
+      ok: false,
+      error: { code: 'preparation-not-found' }
+    })
+  })
+
+  it('revokes preparation leases in per-owner LRU order and restores only that owner capacity', async () => {
+    const root = await makeBook({ 'manuscript.md': '# One\n\n# Two\n' })
+    mocks.selectedPath = root
+    const manager = new BookSessionManager('/preparation-lru-user-data')
+    const ownerId = 74
+    const otherOwnerId = 75
+    const opened: BookSessionDto[] = []
+    const preparationIds: string[] = []
+
+    for (let index = 0; index < 4; index++) {
+      const result = await manager.openPicker({ sender: { id: ownerId } } as never)
+      expect(result.ok).toBe(true)
+      if (!result.ok) return
+      opened.push(result.value)
+      const begun = await manager.beginPreparation(result.value.sessionId, ownerId)
+      expect(begun.ok).toBe(true)
+      if (!begun.ok) return
+      preparationIds.push(begun.value.preparationId)
+    }
+    const otherSession = await manager.openPicker({ sender: { id: otherOwnerId } } as never)
+    expect(otherSession.ok).toBe(true)
+    if (!otherSession.ok) return
+    const otherPreparation = await manager.beginPreparation(
+      otherSession.value.sessionId,
+      otherOwnerId
+    )
+    expect(otherPreparation.ok).toBe(true)
+    if (!otherPreparation.ok) return
+
+    for (let index = 4; index < 21; index++) {
+      const result = await manager.openPicker({ sender: { id: ownerId } } as never)
+      expect(result.ok).toBe(true)
+      if (!result.ok) return
+      opened.push(result.value)
+    }
+    expect(manager.closePreparation(preparationIds[0], ownerId)).toMatchObject({
+      ok: false,
+      error: { code: 'preparation-not-found' }
+    })
+    expect(manager.closePreparation(otherPreparation.value.preparationId, otherOwnerId)).toEqual({
+      ok: true,
+      value: true
+    })
+    const isolatedPreparation = await manager.beginPreparation(
+      otherSession.value.sessionId,
+      otherOwnerId
+    )
+    expect(isolatedPreparation.ok).toBe(true)
+    if (!isolatedPreparation.ok) return
+
+    const replacement = await manager.beginPreparation(opened.at(-1)?.sessionId, ownerId)
+    expect(replacement.ok).toBe(true)
+    if (!replacement.ok) return
+    const next = await manager.openPicker({ sender: { id: ownerId } } as never)
+    expect(next.ok).toBe(true)
+    expect(manager.closePreparation(preparationIds[1], ownerId)).toMatchObject({
+      ok: false,
+      error: { code: 'preparation-not-found' }
+    })
+    expect(manager.closePreparation(preparationIds[2], ownerId)).toEqual({
+      ok: true,
+      value: true
+    })
+    expect(manager.closePreparation(preparationIds[3], ownerId)).toEqual({
+      ok: true,
+      value: true
+    })
+    expect(manager.closePreparation(replacement.value.preparationId, ownerId)).toEqual({
+      ok: true,
+      value: true
+    })
+    manager.cleanupOwner(ownerId)
+    expect(manager.closePreparation(isolatedPreparation.value.preparationId, otherOwnerId)).toEqual(
+      {
+        ok: true,
+        value: true
+      }
+    )
+  })
+
+  it('does not let a late automatic begin revive or clear a newer preparation after eviction', async () => {
+    const root = await makeBook({})
+    await fs.writeFile(path.join(root, `${path.basename(root)}.md`), '# One\n\n# Two\n')
+    mocks.selectedPath = root
+    const reached = deferredValue<void>()
+    const release = deferredValue<void>()
+    let holdRead = true
+    const hooks: BookSessionManagerTestHooks = {
+      beforePreparationRead: async () => {
+        if (!holdRead) return
+        reached.resolve()
+        await release.promise
+      }
+    }
+    const manager = new BookSessionManager(
+      '/preparation-late-begin-user-data',
+      undefined,
+      undefined,
+      undefined,
+      hooks
+    )
+    const ownerId = 76
+    const oldest = await manager.openPicker({ sender: { id: ownerId } } as never)
+    expect(oldest.ok).toBe(true)
+    if (!oldest.ok) return
+    const lateBegin = manager.beginPreparation(oldest.value.sessionId, ownerId)
+    await reached.promise
+
+    let newest = oldest.value
+    for (let index = 0; index < 20; index++) {
+      const opened = await manager.openPicker({ sender: { id: ownerId } } as never)
+      expect(opened.ok).toBe(true)
+      if (!opened.ok) return
+      newest = opened.value
+    }
+    holdRead = false
+    const current = await manager.beginPreparation(newest.sessionId, ownerId)
+    expect(current.ok).toBe(true)
+    if (!current.ok) return
+    release.resolve()
+    await expect(lateBegin).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'preparation-not-found' }
+    })
+    expect(manager.closePreparation(current.value.preparationId, ownerId)).toEqual({
+      ok: true,
+      value: true
+    })
+  })
+
+  it('does not let a late selection revive or clear a newer preparation after eviction', async () => {
+    const root = await makeBook({ 'manuscript.md': '# One\n\n# Two\n' })
+    mocks.selectedPath = root
+    const reached = deferredValue<void>()
+    const release = deferredValue<void>()
+    let holdRead = true
+    const manager = new BookSessionManager(
+      '/preparation-late-select-user-data',
+      undefined,
+      undefined,
+      undefined,
+      {
+        beforePreparationRead: async () => {
+          if (!holdRead) return
+          reached.resolve()
+          await release.promise
+        }
+      }
+    )
+    const ownerId = 77
+    const oldest = await manager.openPicker({ sender: { id: ownerId } } as never)
+    expect(oldest.ok).toBe(true)
+    if (!oldest.ok) return
+    const begun = await manager.beginPreparation(oldest.value.sessionId, ownerId)
+    expect(begun.ok).toBe(true)
+    if (!begun.ok) return
+    const lateSelect = manager.selectPreparationSource(
+      begun.value.preparationId,
+      begun.value.candidates[0].nodeId,
+      ownerId
+    )
+    await reached.promise
+
+    let newest = oldest.value
+    for (let index = 0; index < 20; index++) {
+      const opened = await manager.openPicker({ sender: { id: ownerId } } as never)
+      expect(opened.ok).toBe(true)
+      if (!opened.ok) return
+      newest = opened.value
+    }
+    holdRead = false
+    const current = await manager.beginPreparation(newest.sessionId, ownerId)
+    expect(current.ok).toBe(true)
+    if (!current.ok) return
+    release.resolve()
+    await expect(lateSelect).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'preparation-not-found' }
+    })
+    expect(manager.closePreparation(current.value.preparationId, ownerId)).toEqual({
+      ok: true,
+      value: true
+    })
+  })
+
+  it('does not let a late commit publish or clear a newer preparation after eviction', async () => {
+    const root = await makeBook({ 'manuscript.md': '# One\n\n# Two\n' })
+    mocks.selectedPath = root
+    const reached = deferredValue<void>()
+    const release = deferredValue<void>()
+    let holdCommit = true
+    const manager = new BookSessionManager(
+      '/preparation-late-commit-user-data',
+      undefined,
+      undefined,
+      undefined,
+      {
+        beforePreparationCommitOpen: async () => {
+          if (!holdCommit) return
+          reached.resolve()
+          await release.promise
+        }
+      }
+    )
+    const ownerId = 78
+    const oldest = await manager.openPicker({ sender: { id: ownerId } } as never)
+    expect(oldest.ok).toBe(true)
+    if (!oldest.ok) return
+    const begun = await manager.beginPreparation(oldest.value.sessionId, ownerId)
+    expect(begun.ok).toBe(true)
+    if (!begun.ok) return
+    const selected = await manager.selectPreparationSource(
+      begun.value.preparationId,
+      begun.value.candidates[0].nodeId,
+      ownerId
+    )
+    expect(selected.ok).toBe(true)
+    if (!selected.ok || !selected.value.revision) return
+    const lateCommit = manager.commitPreparation(
+      {
+        preparationId: selected.value.preparationId,
+        revision: selected.value.revision
+      },
+      ownerId
+    )
+    await reached.promise
+
+    let newest = oldest.value
+    for (let index = 0; index < 20; index++) {
+      const opened = await manager.openPicker({ sender: { id: ownerId } } as never)
+      expect(opened.ok).toBe(true)
+      if (!opened.ok) return
+      newest = opened.value
+    }
+    holdCommit = false
+    const current = await manager.beginPreparation(newest.sessionId, ownerId)
+    expect(current.ok).toBe(true)
+    if (!current.ok) return
+    release.resolve()
+    await expect(lateCommit).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'preparation-not-found' }
+    })
+    await expect(fs.stat(path.join(root, 'SUMMARY.md'))).rejects.toThrow()
+    expect(manager.closePreparation(current.value.preparationId, ownerId)).toEqual({
+      ok: true,
+      value: true
+    })
   })
 })
 
@@ -634,6 +1472,69 @@ describe('book IPC trust boundary', () => {
     expect(apply).not.toHaveBeenCalled()
     expect(undo).not.toHaveBeenCalled()
     expect(save).not.toHaveBeenCalled()
+    expect(close).not.toHaveBeenCalled()
+  })
+
+  it('rejects malformed and untrusted preparation IPC without manager dispatch', async () => {
+    registerBookHandlers()
+    const trusted = {
+      sender: {
+        id: 941,
+        isDestroyed: () => false,
+        getURL: () => 'file:///index.html?type=editor',
+        once: vi.fn()
+      }
+    }
+    mocks.browserWindow = {
+      restoreBufferId: 'editor-buffer',
+      isDestroyed: () => false
+    }
+    const select = vi.spyOn(BookSessionManager.prototype, 'selectPreparationSource')
+    const commit = vi.spyOn(BookSessionManager.prototype, 'commitPreparation')
+    expect(
+      await mocks.ipcHandlers.get('lb::books::select-preparation-source')?.(
+        trusted as never,
+        '../lease' as never,
+        '' as never
+      )
+    ).toMatchObject({ ok: false, error: { code: 'invalid-request' } })
+    expect(
+      await mocks.ipcHandlers.get('lb::books::commit-preparation')?.(
+        trusted as never,
+        { preparationId: randomUUID(), revision: 'not-a-hash' } as never
+      )
+    ).toMatchObject({ ok: false, error: { code: 'invalid-request' } })
+    expect(select).not.toHaveBeenCalled()
+    expect(commit).not.toHaveBeenCalled()
+
+    mocks.browserWindow = {
+      restoreBufferId: 'settings-buffer',
+      isDestroyed: () => false
+    }
+    const untrusted = {
+      sender: {
+        id: 942,
+        isDestroyed: () => false,
+        getURL: () => 'file:///index.html?type=settings',
+        once: vi.fn()
+      }
+    }
+    const begin = vi.spyOn(BookSessionManager.prototype, 'beginPreparation')
+    const close = vi.spyOn(BookSessionManager.prototype, 'closePreparation')
+    const id = randomUUID()
+    for (const [channel, args] of [
+      ['lb::books::begin-preparation', [id]],
+      ['lb::books::select-preparation-source', [id, id]],
+      ['lb::books::commit-preparation', [{ preparationId: id, revision: 'a'.repeat(64) }]],
+      ['lb::books::close-preparation', [id]]
+    ] as const) {
+      expect(
+        await mocks.ipcHandlers.get(channel)?.(untrusted as never, ...(args as unknown as never[]))
+      ).toMatchObject({ ok: false, error: { code: 'invalid-request' } })
+    }
+    expect(begin).not.toHaveBeenCalled()
+    expect(select).not.toHaveBeenCalled()
+    expect(commit).not.toHaveBeenCalled()
     expect(close).not.toHaveBeenCalled()
   })
 
@@ -3755,6 +4656,71 @@ A -> B
     expect([...document.querySelectorAll('h1')].map((heading) => heading.id)).toEqual(ids)
     for (const id of ids) expect(document.getElementById(id)?.id).toBe(id)
   })
+
+  it('keeps semantic heading identity aligned before image placeholders mutate the body', async () => {
+    const markdown = [
+      '# ![Logo](local.png) **Final**',
+      'Setext title',
+      '============',
+      '# [Linked *title*](chapter.md) &amp; Héllo，世界',
+      '# ![Remote](https://example.invalid/image.png) `Code`',
+      '<h1><img src="raw.png" alt="Raw"> HTML</h1>',
+      '# Repeat',
+      '# Repeat'
+    ].join('\n\n')
+    const analyzed = analyzeAtxH1Headings(markdown)
+    expect(analyzed.ok).toBe(true)
+    if (!analyzed.ok) return
+
+    const rendered = await renderBookMarkdown(markdown)
+    const titles = analyzed.headings.map((heading) => heading.title)
+    const fragments = titles.map(bookFragmentKey)
+    expect(titles).toEqual([
+      'Logo Final',
+      'Linked title & Héllo，世界',
+      'Remote Code',
+      'Repeat',
+      'Repeat'
+    ])
+    expect(rendered.outline.map(({ text }) => text)).toEqual([
+      titles[0],
+      titles[1],
+      titles[2],
+      'Raw HTML',
+      titles[3],
+      titles[4]
+    ])
+    expect(rendered.outline.filter((_, index) => [0, 1, 2, 4, 5].includes(index))).toMatchObject(
+      titles.map((text, index) => ({ text, fragment: fragments[index] }))
+    )
+    expect(rendered.outline.map(({ id }) => id)).toEqual([
+      fragments[0],
+      fragments[1],
+      fragments[2],
+      'raw-html',
+      fragments[3],
+      `${fragments[4]}-2`
+    ])
+    expect(validateBookHeadingFragments(titles)).toMatchObject({
+      ok: false,
+      error: 'duplicate-fragment',
+      index: 4
+    })
+    const renderedDocument = new DOMParser().parseFromString(rendered.html, 'text/html')
+    const renderedHeadings = [...renderedDocument.querySelectorAll('h1')]
+    expect(renderedHeadings[0].textContent).toBe(
+      '[Local image unavailable in this reader version: Logo] Final'
+    )
+    expect(renderedHeadings[2].textContent).toBe(
+      '[Local image unavailable in this reader version: Remote] Code'
+    )
+    expect(renderedHeadings[3].textContent).toBe(
+      '[Local image unavailable in this reader version: Raw] HTML'
+    )
+    expect(rendered.html).toContain('Setext title')
+    expect(renderedDocument.querySelectorAll('.leafbook-media-placeholder')).toHaveLength(3)
+    expect(rendered.outline[0].id).not.toContain('local-image-unavailable')
+  })
 })
 
 describe('book store async generations', () => {
@@ -3831,7 +4797,7 @@ describe('book store async generations', () => {
     expect(store.loading).toBe(false)
   })
 
-  it('serializes opening a node behind a deferred refresh and uses the refreshed session', async () => {
+  it('blocks opening a node during refresh instead of replaying it against the replacement', async () => {
     setActivePinia(createPinia())
     const pendingRefresh = deferred<BookReaderResult<BookSessionDto>>()
     const refreshed = {
@@ -3872,9 +4838,91 @@ describe('book store async generations', () => {
     await refreshing
     await opening
     expect(store.session?.title).toBe('Refreshed')
-    expect(readChapter).toHaveBeenCalledTimes(1)
-    expect(readChapter).toHaveBeenCalledWith('stable-session-id', 'stable-node-id-0001')
-    expect(store.chapter?.nodeId).toBe('stable-node-id-0001')
+    expect(readChapter).not.toHaveBeenCalled()
+    expect(store.chapter).toBeNull()
+  })
+
+  it('blocks every current-book IPC entrypoint while renderer refresh is pending', async () => {
+    vi.useFakeTimers()
+    try {
+      setActivePinia(createPinia())
+      const pendingRefresh = deferred<BookReaderResult<BookSessionDto>>()
+      const refreshed = {
+        ...sessionDto('stable-session-id', 'Refreshed'),
+        navigationSource: 'summary' as const,
+        nodes: [
+          {
+            nodeId: 'stable-node-id-0001',
+            type: 'chapter' as const,
+            title: 'Chapter',
+            children: []
+          }
+        ]
+      }
+      const books = {
+        refresh: vi.fn(() => pendingRefresh.promise),
+        readChapter: vi.fn(),
+        followLink: vi.fn(),
+        beginEdit: vi.fn(),
+        beginArrangement: vi.fn(),
+        beginPreparation: vi.fn(),
+        beginExport: vi.fn(),
+        beginWebsite: vi.fn(),
+        search: vi.fn(),
+        cancelSearch: vi.fn().mockResolvedValue({ ok: true, value: true })
+      }
+      Object.defineProperty(window, 'electron', {
+        configurable: true,
+        value: { books }
+      })
+      const store = useBooksStore()
+      store.session = refreshed
+      store.chapter = {
+        nodeId: 'stable-node-id-0001',
+        title: 'Chapter',
+        markdown: '# Chapter',
+        fragment: null,
+        readingPosition: 0,
+        hasReadingPosition: false
+      }
+      store.mode = 'reader'
+
+      const refreshing = store.refresh()
+      expect(store.refreshing).toBe(true)
+      await Promise.all([
+        store.openNode('stable-node-id-0001'),
+        store.activateNode(refreshed.nodes[0]),
+        store.followLink('#chapter'),
+        store.editCurrentChapter(),
+        store.beginArrangement(),
+        store.exportBook(),
+        store.generateWebsite(),
+        store.previous(),
+        store.next()
+      ])
+      store.scheduleSearch('chapter')
+      store.session = { ...refreshed, navigationSource: 'inferred' }
+      await store.beginPreparation()
+      await vi.advanceTimersByTimeAsync(500)
+
+      for (const method of [
+        books.readChapter,
+        books.followLink,
+        books.beginEdit,
+        books.beginArrangement,
+        books.beginPreparation,
+        books.beginExport,
+        books.beginWebsite,
+        books.search
+      ]) {
+        expect(method).not.toHaveBeenCalled()
+      }
+      pendingRefresh.resolve({ ok: true, value: refreshed })
+      await refreshing
+      expect(store.refreshing).toBe(false)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('debounces searches, cancels the prior request and ignores its stale result', async () => {

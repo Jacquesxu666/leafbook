@@ -102,3 +102,20 @@ declare module '@muyajs/core' {
     all: number
   }
 }
+
+declare module 'leafbook-muya-heading-analyzer' {
+  export interface IAtxH1Heading {
+    ordinal: number
+    line: number
+    title: string
+  }
+
+  export type IAtxH1AnalysisResult =
+    | { ok: true; headings: IAtxH1Heading[] }
+    | { ok: false; error: 'source-too-large' | 'heading-limit' | 'line-limit' }
+
+  export function analyzeAtxH1Headings(
+    markdown: string,
+    limits?: { maxBytes?: number; maxHeadings?: number; maxLines?: number }
+  ): IAtxH1AnalysisResult
+}

@@ -30,9 +30,13 @@ spawning Playwright, forces trace/screenshot/video and AI error-context DOM
 capture off, and routes Playwright's output directory below that root. It
 never forwards child stdout or stderr: each stream is consumed into a bounded
 private buffer and discarded without being written anywhere. Successful public
-output is exactly
-`RC_HARNESS_PASS product_ready=false adaptation_gaps=2 code=0`: this is a
-robustness-harness pass, not book-product acceptance. Signal handlers are
+output is exactly `RC_HARNESS_PASS product_ready=false visual_fidelity=false
+content_adaptation_gaps=1 release_matrix_ready=false
+accepted_p3_boundaries=crash_partial_create,same_user_syscall_path_boundary,unicode_casefold_pin_drift
+book_structure_ready=true code=0`: this accepts the real-book preparation
+structure covered below. It is not full product acceptance: the release matrix
+is not ready, inline-SVG remains one known content-adaptation gap, and the
+explicit P3 boundaries remain accepted rather than resolved. Signal handlers are
 installed before runner-root creation and retained through all private cleanup;
 a repeated signal escalates child termination, and a signal at any time forces
 a non-PASS after cleanup. Its deterministic privacy and cleanup checks are:
@@ -41,6 +45,7 @@ a non-PASS after cleanup. Its deterministic privacy and cleanup checks are:
 node scripts/run-real-book-rc.mjs --self-test-child-failure
 node scripts/run-real-book-rc.mjs --self-test-private-child-failure
 node scripts/run-real-book-rc.mjs --self-test-direct-bypass
+node scripts/run-real-book-rc.mjs --self-test-broad-root
 node scripts/run-real-book-rc.mjs --self-test-signal-cleanup
 node scripts/run-real-book-rc.mjs --self-test-pre-root-signal
 ```
@@ -117,21 +122,26 @@ Track A opens the unchanged copy using inferred navigation. It verifies:
 - zero remote HTTP(S) requests;
 - safe Phase 8B HTML and Phase 8C two-file website outputs.
 
-The nested README chosen as the inferred landing and the presentation of the
-main manuscript as one physical chapter are the two **expected adaptation
-gaps**, not passes. Phase 9C needs an explicit product decision between
-chapter-per-file source structure and virtual heading chapters. Inline SVG is
-currently stripped. That is safe, but remains a visual-fidelity observation.
+The inferred view still demonstrates why preparation is useful: its landing
+and physical-file navigation do not expose the manuscript headings as chapters.
+Inline SVG is currently stripped. That is safe and remains a visual-fidelity
+observation, but it does not block the preparation workflow.
 
-Track B creates a minimal `SUMMARY.md` only in the copy. Its 34 generated labels
-refer to fragment aliases in the same physical manuscript. It verifies the
+Track B uses the actual **Prepare Book** UI and main-process preparation API.
+The isolated copy root is chosen so its basename uniquely matches the
+manuscript stem, exercising automatic source selection. It first previews all
+34 headings and cancels, proving zero write, then reopens preparation and
+creates `SUMMARY.md`. The source manuscript digest must remain unchanged and
+the only new copied-book path is `SUMMARY.md`. Its generated links refer to
+fragment aliases in the same physical manuscript. It verifies the
 first, middle, and last alias by private heading ordinal, active navigation
 state, and actual target visibility (including bottom-clamped last-heading
 scroll); it also verifies search and reading-position persistence from a
 previously empty profile across a new Electron process. The ratio sampled
 immediately before close must be near the intended 47%, and the restored ratio
 must be within 5 percentage points of that private sample. Outputs must contain
-one physical body and all 34 generated navigation aliases.
+one physical body and all 34 generated navigation aliases. No manual test code
+writes the generated SUMMARY.
 
 Arrangement checks cover reorder, Undo, Cancel exact zero-write, and Save. Save
 must change the copied SUMMARY bytes and digest. A complete private manifest
@@ -139,9 +149,8 @@ taken immediately before Save proves every other copied path, type, size, and
 file digest is exactly unchanged, including Markdown, documentation, and
 assets. The original manuscript is never split or edited.
 
-If first/middle/last fragment navigation cannot resolve reliably, the harness
-must fail with sanitized evidence. That is a Phase 9C product-design input, not
-permission to patch production navigation from this RC suite.
+If preparation or first/middle/last fragment navigation cannot resolve
+reliably, the harness fails with sanitized evidence.
 
 ## Privacy contract
 

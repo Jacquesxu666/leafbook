@@ -29,6 +29,15 @@ export type BookReaderErrorCode =
   | 'arrangement-too-large'
   | 'arrangement-commit-uncertain'
   | 'arrangement-write-failed'
+  | 'preparation-not-found'
+  | 'preparation-not-available'
+  | 'preparation-source-required'
+  | 'preparation-source-changed'
+  | 'preparation-too-large'
+  | 'preparation-invalid-headings'
+  | 'preparation-conflict'
+  | 'preparation-commit-uncertain'
+  | 'preparation-write-failed'
   | 'export-busy'
   | 'export-too-large'
   | 'export-source-changed'
@@ -178,6 +187,44 @@ export interface BookArrangementSaveDto {
   arrangementId: string
   revision: string
   session: BookSessionDto | null
+  durabilityUncertain: boolean
+}
+
+export interface BookPreparationCandidateDto {
+  nodeId: string
+  title: string
+  displayLabel: string
+}
+
+export interface BookPreparationChapterDto {
+  ordinal: number
+  line: number
+  title: string
+  fragment: string
+}
+
+export interface BookPreparationDto {
+  preparationId: string
+  sessionId: string
+  revision: string | null
+  sourceNodeId: string | null
+  sourceTitle: string | null
+  candidates: BookPreparationCandidateDto[]
+  chapters: BookPreparationChapterDto[]
+  summaryPreview: string | null
+  requiresSelection: boolean
+}
+
+export interface BookPreparationCommitRequestDto {
+  preparationId: string
+  revision: string
+}
+
+export interface BookPreparationSaveDto {
+  preparationId: string
+  sourceNodeId: string | null
+  session: BookSessionDto | null
+  committed: boolean
   durabilityUncertain: boolean
 }
 

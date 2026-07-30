@@ -676,17 +676,6 @@ const h1Headings = (markdown: string): string[] => {
   return headings
 }
 
-const fragmentKey = (value: string): string =>
-  value
-    .normalize('NFKC')
-    .trim()
-    .toLocaleLowerCase()
-    .replace(/[^\p{Letter}\p{Number}]+/gu, '-')
-    .replace(/^-+|-+$/g, '')
-
-const summaryDestination = (fileName: string, heading: string): string =>
-  `${encodeURIComponent(fileName)}#${encodeURIComponent(fragmentKey(heading))}`
-
 const openBook = async (
   app: Awaited<ReturnType<typeof launchElectron>>['app'],
   root: string,
@@ -786,8 +775,12 @@ test.describe('opt-in real-book release candidate', () => {
       const runnerRoot = await validateRunnerAuthorization()
       const sourceRoot = await validateSourceRoot(sourceRootFromEnvironment)
       const before = await manifest(sourceRoot)
+      const mainMarkdown = await selectMainMarkdown(sourceRoot)
       const temporary = await createValidatedTempRoot(runnerRoot)
-      const copiedRoot = path.join(temporary.root, 'source-copy')
+      const copiedRoot = path.join(
+        temporary.root,
+        path.basename(mainMarkdown, path.extname(mainMarkdown))
+      )
       const outputRoot = path.join(temporary.root, 'output')
       const userDataRoot = path.join(temporary.root, 'userData')
       let sourceUnchanged = false
@@ -830,8 +823,9 @@ test.describe('opt-in real-book release candidate', () => {
         expect(copied.files).toBeGreaterThan(0)
         await fs.mkdir(outputRoot)
         await fs.mkdir(userDataRoot)
-        const mainMarkdown = await selectMainMarkdown(copiedRoot)
         const mainPath = path.join(copiedRoot, mainMarkdown)
+        const summaryPath = path.join(copiedRoot, 'SUMMARY.md')
+        let summaryInitial = Buffer.alloc(0)
         const manuscriptBefore = await hashFile(mainPath)
         const markdown = await fs.readFile(mainPath, 'utf8')
         const headings = h1Headings(markdown)
@@ -979,6 +973,48 @@ test.describe('opt-in real-book release candidate', () => {
         )
         expect(rcEnvironmentKeyCount).toBe(0)
         expect((await getRendererErrors(launched.app)).length).toBe(0)
+
+        await expect
+          .poll(() =>
+            fs.stat(summaryPath).then(
+              () => true,
+              () => false
+            )
+          )
+          .toBe(false)
+        await launched.page.getByRole('button', { name: 'Prepare Book' }).click()
+        let preparationPanel = launched.page.locator('.preparation-panel')
+        await expect(preparationPanel).toBeVisible()
+        await expect(preparationPanel.getByText('34 chapters found')).toBeVisible()
+        await expect(preparationPanel.locator('.sr-only[aria-live="polite"]')).toHaveCount(1)
+        await expect(preparationPanel.locator('.sr-only[aria-live="polite"]')).toContainText(
+          '34 chapters ready'
+        )
+        await preparationPanel.getByRole('button', { name: 'Cancel' }).click()
+        await expect(preparationPanel).toHaveCount(0)
+        await expect
+          .poll(() =>
+            fs.stat(summaryPath).then(
+              () => true,
+              () => false
+            )
+          )
+          .toBe(false)
+        expect((await hashFile(mainPath)).equals(manuscriptBefore)).toBe(true)
+
+        await launched.page.getByRole('button', { name: 'Prepare Book' }).click()
+        preparationPanel = launched.page.locator('.preparation-panel')
+        await expect(preparationPanel.getByText('34 chapters found')).toBeVisible()
+        await expect(preparationPanel.locator('.sr-only[aria-live="polite"]')).toHaveCount(1)
+        await expect(preparationPanel.locator('.sr-only[aria-live="polite"]')).toContainText(
+          '34 chapters ready'
+        )
+        await preparationPanel.getByRole('button', { name: 'Create SUMMARY.md' }).click()
+        await expect(preparationPanel).toHaveCount(0)
+        await expect(launched.page.getByRole('button', { name: 'Arrange' })).toBeEnabled()
+        summaryInitial = await fs.readFile(summaryPath)
+        expect(summaryInitial.byteLength).toBeGreaterThan(0)
+        expect((await hashFile(mainPath)).equals(manuscriptBefore)).toBe(true)
         await launched.app.close()
         activeApp = null
 
@@ -989,18 +1025,6 @@ test.describe('opt-in real-book release candidate', () => {
         )
         expect(manuscriptUnchangedAfterInferredTrack).toBe(true)
 
-        const summary = `${headings
-          .map(
-            (heading, index) =>
-              `- [RC chapter ${String(index + 1).padStart(2, '0')}](${summaryDestination(
-                mainMarkdown,
-                heading
-              )})`
-          )
-          .join('\n')}\n`
-        const summaryPath = path.join(copiedRoot, 'SUMMARY.md')
-        await fs.writeFile(summaryPath, summary, { flag: 'wx' })
-        const summaryInitial = await fs.readFile(summaryPath)
         const structuredHtml = path.join(outputRoot, 'structured.html')
         const structuredWebsite = path.join(outputRoot, 'structured-site')
         const secondProfile = path.join(temporary.root, 'userData-structured')
@@ -1143,7 +1167,10 @@ test.describe('opt-in real-book release candidate', () => {
         const structuredOutput = await fs.readFile(structuredHtml, 'utf8')
         const structuredChapterCount = (structuredOutput.match(/class="leafbook-chapter"/g) ?? [])
           .length
-        const structuredAliasCount = new Set(structuredOutput.match(/RC chapter \d{2}/g) ?? []).size
+        const structuredNavigation = structuredOutput.match(
+          /<nav class="leafbook-toc"[\s\S]*?<\/nav>/
+        )?.[0]
+        const structuredAliasCount = (structuredNavigation?.match(/<a\b/g) ?? []).length
         expect(structuredChapterCount).toBe(1)
         expect(structuredAliasCount).toBe(34)
         const structuredSiteHtml = await fs.readFile(
@@ -1153,9 +1180,10 @@ test.describe('opt-in real-book release candidate', () => {
         const structuredSiteChapterCount = (
           structuredSiteHtml.match(/class="leafbook-chapter"/g) ?? []
         ).length
-        const structuredSiteAliasCount = new Set(
-          structuredSiteHtml.match(/RC chapter \d{2}/g) ?? []
-        ).size
+        const structuredSiteNavigation = structuredSiteHtml.match(
+          /<nav class="leafbook-toc"[\s\S]*?<\/nav>/
+        )?.[0]
+        const structuredSiteAliasCount = (structuredSiteNavigation?.match(/<a\b/g) ?? []).length
         expect(structuredSiteChapterCount).toBe(1)
         expect(structuredSiteAliasCount).toBe(34)
         expect((await getRendererErrors(structured.app)).length).toBe(0)

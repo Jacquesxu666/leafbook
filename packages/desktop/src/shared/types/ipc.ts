@@ -38,6 +38,9 @@ import type {
   BookArrangementDto,
   BookArrangementSaveDto,
   BookArrangementSaveRequestDto,
+  BookPreparationCommitRequestDto,
+  BookPreparationDto,
+  BookPreparationSaveDto,
   BookExportCommitRequestDto,
   BookExportSaveDto,
   BookExportSnapshotDto,
@@ -109,6 +112,22 @@ export interface IpcInvokeChannels {
   }
   'lb::books::close-arrangement': {
     args: [arrangementId: string]
+    ret: BookReaderResult<true>
+  }
+  'lb::books::begin-preparation': {
+    args: [sessionId: string]
+    ret: BookReaderResult<BookPreparationDto>
+  }
+  'lb::books::select-preparation-source': {
+    args: [preparationId: string, sourceNodeId: string]
+    ret: BookReaderResult<BookPreparationDto>
+  }
+  'lb::books::commit-preparation': {
+    args: [request: BookPreparationCommitRequestDto]
+    ret: BookReaderResult<BookPreparationSaveDto>
+  }
+  'lb::books::close-preparation': {
+    args: [preparationId: string]
     ret: BookReaderResult<true>
   }
   'lb::books::begin-export': {

@@ -4,6 +4,7 @@ import { defineStore } from 'pinia'
 import type {
   BookArrangementDto,
   BookArrangementOperationDto,
+  BookPreparationDto,
   BookChapterDto,
   BookReaderError,
   BookReaderNodeDto,
@@ -21,6 +22,8 @@ import bus from '@/bus'
 const SAVE_DEBOUNCE_MS = 2_000
 const SAVE_EPSILON = 0.002
 const SEARCH_DEBOUNCE_MS = 200
+const PREPARATION_REFRESH_REQUIRED =
+  'SUMMARY may have been created. Inspect the book folder, then refresh before preparing again.'
 
 interface PendingReadingPosition {
   sessionId: string
@@ -45,6 +48,16 @@ export const useBooksStore = defineStore('books', () => {
   const arrangement = ref<BookArrangementDto | null>(null)
   const arrangementError = ref<BookReaderError | null>(null)
   const arrangementPending = ref(false)
+  const preparation = ref<BookPreparationDto | null>(null)
+  const preparationError = ref<BookReaderError | null>(null)
+  const preparationPending = ref(false)
+  const preparationStatus = ref<string | null>(null)
+  const preparationRetryBlockedSessionId = ref<string | null>(null)
+  const preparationRetryBlocked = computed(
+    () =>
+      preparationRetryBlockedSessionId.value !== null &&
+      preparationRetryBlockedSessionId.value === session.value?.sessionId
+  )
   const exportPending = ref(false)
   const exportCancelRequested = ref(false)
   const exportError = ref<BookReaderError | null>(null)
@@ -56,7 +69,9 @@ export const useBooksStore = defineStore('books', () => {
   const outputPending = computed(() => exportPending.value || websitePending.value)
   const pending = ref(new Set<number>())
   const loading = computed(() => pending.value.size > 0)
+  const refreshing = ref(false)
   let generation = 0
+  let sessionVerificationGeneration = 0
   let operation = 0
   let refreshInFlight: Promise<void> | null = null
   let readingPositionProvider: (() => number | null) | null = null
@@ -73,6 +88,7 @@ export const useBooksStore = defineStore('books', () => {
     () =>
       mode.value === 'reader' &&
       !loading.value &&
+      !refreshing.value &&
       !restoringReadingPosition.value &&
       Boolean(session.value && chapter.value)
   )
@@ -88,12 +104,47 @@ export const useBooksStore = defineStore('books', () => {
   let searchGeneration = 0
   let activeSearch: { sessionId: string; searchId: string } | null = null
   let arrangementGeneration = 0
+  let preparationGeneration = 0
   let exportGeneration = 0
   let activeExportId: string | null = null
   let exportCancelSettlement: Promise<void> | null = null
   let websiteGeneration = 0
   let activeWebsiteId: string | null = null
   let websiteCancelSettlement: Promise<void> | null = null
+
+  const clearPreparationMessages = (): void => {
+    preparationError.value = null
+    preparationStatus.value = preparationRetryBlocked.value ? PREPARATION_REFRESH_REQUIRED : null
+  }
+
+  const clearOutputMessages = (): void => {
+    exportError.value = null
+    exportSuccess.value = null
+    websiteError.value = null
+    websiteSuccess.value = null
+  }
+
+  const clearPreparationForOutput = (): void => {
+    preparationError.value = null
+    preparationStatus.value = null
+    error.value = null
+  }
+
+  const clearTransientOperationFeedback = (): void => {
+    clearOutputMessages()
+    preparationError.value = null
+    preparationStatus.value = null
+    if (!preparationRetryBlocked.value) error.value = null
+  }
+
+  const markPreparationCommittedUncertain = (failure: BookReaderError, sessionId: string): void => {
+    error.value = failure
+    preparationRetryBlockedSessionId.value = sessionId
+    preparationStatus.value = PREPARATION_REFRESH_REQUIRED
+    if (saveTimer) clearTimeout(saveTimer)
+    saveTimer = null
+    pendingSave = null
+  }
 
   const arrangementOwner = (id: string, token: number) => ({
     tabId: `book-arrangement:${id}`,
@@ -121,14 +172,245 @@ export const useBooksStore = defineStore('books', () => {
       bus.emit('lb::prepare-return-to-book', resolve)
     })
 
+  const closePreparation = async (): Promise<void> => {
+    const currentPreparation = preparation.value
+    preparationGeneration += 1
+    preparation.value = null
+    preparationError.value = null
+    preparationPending.value = false
+    if (!currentPreparation) return
+    try {
+      await window.electron.books.closePreparation(currentPreparation.preparationId)
+    } catch {
+      // Main also revokes the lease with its owning session.
+    }
+  }
+
+  const beginPreparation = async (): Promise<void> => {
+    const sessionSnapshot = session.value
+    if (
+      mode.value !== 'reader' ||
+      !sessionSnapshot ||
+      refreshing.value ||
+      sessionSnapshot.navigationSource !== 'inferred' ||
+      preparationPending.value ||
+      preparation.value ||
+      preparationRetryBlocked.value ||
+      arrangementPending.value ||
+      arrangement.value ||
+      outputPending.value
+    ) {
+      return
+    }
+    const token = ++preparationGeneration
+    preparationPending.value = true
+    preparationError.value = null
+    preparationStatus.value = null
+    error.value = null
+    clearOutputMessages()
+    await cancelSearch(true)
+    if (token !== preparationGeneration) return
+    if (!(await prepareBookTabs())) {
+      if (token === preparationGeneration) preparationPending.value = false
+      return
+    }
+    if (
+      token !== preparationGeneration ||
+      mode.value !== 'reader' ||
+      session.value?.sessionId !== sessionSnapshot.sessionId ||
+      session.value.navigationSource !== 'inferred'
+    ) {
+      if (token === preparationGeneration) preparationPending.value = false
+      return
+    }
+    await flushReadingPosition()
+    try {
+      const result = await window.electron.books.beginPreparation(sessionSnapshot.sessionId)
+      if (
+        token !== preparationGeneration ||
+        mode.value !== 'reader' ||
+        session.value?.sessionId !== sessionSnapshot.sessionId
+      ) {
+        if (result.ok) {
+          await window.electron.books.closePreparation(result.value.preparationId)
+        }
+        return
+      }
+      if (!result.ok) {
+        preparationError.value = result.error
+        error.value = result.error
+        return
+      }
+      preparation.value = result.value
+    } catch {
+      if (
+        token === preparationGeneration &&
+        mode.value === 'reader' &&
+        session.value?.sessionId === sessionSnapshot.sessionId
+      ) {
+        const failure = unexpectedError()
+        preparationError.value = failure
+        error.value = failure
+      }
+    } finally {
+      if (token === preparationGeneration) preparationPending.value = false
+    }
+  }
+
+  const selectPreparationSource = async (sourceNodeId: string): Promise<void> => {
+    const currentPreparation = preparation.value
+    if (!currentPreparation || refreshing.value || preparationPending.value || !sourceNodeId) return
+    const token = preparationGeneration
+    preparationPending.value = true
+    preparationError.value = null
+    error.value = null
+    clearOutputMessages()
+    try {
+      const result = await window.electron.books.selectPreparationSource(
+        currentPreparation.preparationId,
+        sourceNodeId
+      )
+      if (
+        token !== preparationGeneration ||
+        preparation.value?.preparationId !== currentPreparation.preparationId
+      ) {
+        await window.electron.books
+          .closePreparation(
+            result.ok ? result.value.preparationId : currentPreparation.preparationId
+          )
+          .catch(() => undefined)
+        return
+      }
+      if (!result.ok) {
+        preparationError.value = result.error
+        return
+      }
+      preparation.value = result.value
+    } catch {
+      if (token === preparationGeneration) preparationError.value = unexpectedError()
+    } finally {
+      if (token === preparationGeneration) preparationPending.value = false
+    }
+  }
+
+  const commitPreparation = async (): Promise<void> => {
+    const currentPreparation = preparation.value
+    const currentSession = session.value
+    if (
+      !currentPreparation ||
+      !currentPreparation.revision ||
+      !currentSession ||
+      refreshing.value ||
+      preparationPending.value
+    ) {
+      return
+    }
+    const token = preparationGeneration
+    const readerGeneration = generation
+    const verificationGeneration = sessionVerificationGeneration
+    const priorFragment = chapter.value?.fragment ?? null
+    preparationPending.value = true
+    preparationError.value = null
+    error.value = null
+    clearOutputMessages()
+    await cancelSearch(true)
+    try {
+      const result = await window.electron.books.commitPreparation({
+        preparationId: currentPreparation.preparationId,
+        revision: currentPreparation.revision
+      })
+      if (
+        token !== preparationGeneration ||
+        session.value?.sessionId !== currentSession.sessionId
+      ) {
+        await window.electron.books
+          .closePreparation(currentPreparation.preparationId)
+          .catch(() => undefined)
+        const originalSessionStillActive =
+          mode.value === 'reader' && session.value?.sessionId === currentSession.sessionId
+        const originalClosedPreparationStillCurrent =
+          originalSessionStillActive &&
+          generation === readerGeneration &&
+          preparationGeneration === token + 1 &&
+          preparation.value === null
+        if (result.ok) {
+          if (originalClosedPreparationStillCurrent) {
+            preparationStatus.value = result.value.durabilityUncertain
+              ? 'SUMMARY was created after preparation closed, but durable storage confirmation was unavailable.'
+              : 'SUMMARY was created after preparation closed.'
+          }
+        } else if (
+          result.error.committed &&
+          originalSessionStillActive &&
+          sessionVerificationGeneration === verificationGeneration
+        ) {
+          preparationRetryBlockedSessionId.value = currentSession.sessionId
+          if (originalClosedPreparationStillCurrent) {
+            markPreparationCommittedUncertain(result.error, currentSession.sessionId)
+          }
+        }
+        return
+      }
+      if (!result.ok) {
+        preparationError.value = result.error
+        error.value = result.error
+        if (result.error.committed) {
+          markPreparationCommittedUncertain(result.error, currentSession.sessionId)
+          preparationPending.value = false
+          preparation.value = null
+          preparationGeneration += 1
+        }
+        return
+      }
+      preparationPending.value = false
+      preparation.value = null
+      preparationRetryBlockedSessionId.value = null
+      preparationGeneration += 1
+      preparationStatus.value = result.value.durabilityUncertain
+        ? 'SUMMARY was created, but durable storage confirmation was unavailable.'
+        : 'SUMMARY was created. Arrange mode is now available.'
+      if (!result.value.session) return
+      const nextSession = result.value.session
+      session.value = nextSession
+      chapter.value = null
+      searchQuery.value = ''
+      searchResults.value = []
+      searchIndexStatus.value = null
+      const target =
+        result.value.sourceNodeId ?? nextSession.resumeNodeId ?? nextSession.entryNodeId
+      if (target) {
+        const { token: navigationToken, operationId } = start()
+        try {
+          await readNode(
+            nextSession,
+            target,
+            navigationToken,
+            'explicit',
+            priorFragment ?? currentPreparation.chapters[0]?.fragment ?? null
+          )
+        } finally {
+          finish(operationId)
+        }
+      }
+    } catch {
+      if (token === preparationGeneration) preparationError.value = unexpectedError()
+    } finally {
+      if (token === preparationGeneration) preparationPending.value = false
+    }
+  }
+
   const beginArrangement = async (): Promise<void> => {
     const sessionSnapshot = session.value
     if (
       mode.value !== 'reader' ||
       !sessionSnapshot ||
+      refreshing.value ||
       sessionSnapshot.navigationSource !== 'summary' ||
       arrangementPending.value ||
       arrangement.value ||
+      preparationPending.value ||
+      preparation.value ||
+      preparationRetryBlocked.value ||
       outputPending.value
     ) {
       return
@@ -136,6 +418,7 @@ export const useBooksStore = defineStore('books', () => {
     const token = ++arrangementGeneration
     arrangementPending.value = true
     arrangementError.value = null
+    clearTransientOperationFeedback()
     await cancelSearch(true)
     if (token !== arrangementGeneration) return
     if (!(await prepareBookTabs())) {
@@ -189,8 +472,12 @@ export const useBooksStore = defineStore('books', () => {
     if (
       mode.value !== 'reader' ||
       !initialSession ||
+      refreshing.value ||
       arrangementPending.value ||
       arrangement.value ||
+      preparationPending.value ||
+      preparation.value ||
+      preparationRetryBlocked.value ||
       outputPending.value
     ) {
       return
@@ -201,6 +488,9 @@ export const useBooksStore = defineStore('books', () => {
     exportCancelSettlement = null
     exportError.value = null
     exportSuccess.value = null
+    websiteError.value = null
+    websiteSuccess.value = null
+    clearPreparationForOutput()
     let exportId: string | null = null
     await cancelSearch(true)
     try {
@@ -307,8 +597,12 @@ export const useBooksStore = defineStore('books', () => {
     if (
       mode.value !== 'reader' ||
       !initialSession ||
+      refreshing.value ||
       arrangementPending.value ||
       arrangement.value ||
+      preparationPending.value ||
+      preparation.value ||
+      preparationRetryBlocked.value ||
       outputPending.value
     ) {
       return
@@ -319,6 +613,9 @@ export const useBooksStore = defineStore('books', () => {
     websiteCancelSettlement = null
     websiteError.value = null
     websiteSuccess.value = null
+    exportError.value = null
+    exportSuccess.value = null
+    clearPreparationForOutput()
     let websiteId: string | null = null
     await cancelSearch(true)
     try {
@@ -425,7 +722,7 @@ export const useBooksStore = defineStore('books', () => {
     operationRequest: BookArrangementOperationDto
   ): Promise<boolean> => {
     const currentArrangement = arrangement.value
-    if (!currentArrangement || arrangementPending.value) return false
+    if (!currentArrangement || refreshing.value || arrangementPending.value) return false
     const token = arrangementGeneration
     arrangementPending.value = true
     arrangementError.value = null
@@ -456,7 +753,7 @@ export const useBooksStore = defineStore('books', () => {
 
   const undoArrangement = async (): Promise<boolean> => {
     const currentArrangement = arrangement.value
-    if (!currentArrangement?.canUndo || arrangementPending.value) return false
+    if (!currentArrangement?.canUndo || refreshing.value || arrangementPending.value) return false
     const token = arrangementGeneration
     arrangementPending.value = true
     arrangementError.value = null
@@ -575,7 +872,7 @@ export const useBooksStore = defineStore('books', () => {
 
   const saveArrangement = async (): Promise<void> => {
     const currentArrangement = arrangement.value
-    if (!currentArrangement?.dirty || arrangementPending.value) return
+    if (!currentArrangement?.dirty || refreshing.value || arrangementPending.value) return
     const token = arrangementGeneration
     arrangementPending.value = true
     arrangementError.value = null
@@ -619,7 +916,15 @@ export const useBooksStore = defineStore('books', () => {
 
   const runSearch = async (query: string, token: number): Promise<void> => {
     const sessionSnapshot = session.value
-    if (!sessionSnapshot || mode.value !== 'reader' || token !== searchGeneration) return
+    if (
+      !sessionSnapshot ||
+      refreshing.value ||
+      mode.value !== 'reader' ||
+      token !== searchGeneration ||
+      preparationRetryBlocked.value
+    ) {
+      return
+    }
     const searchId = crypto.randomUUID()
     const prior = activeSearch
     activeSearch = { sessionId: sessionSnapshot.sessionId, searchId }
@@ -635,7 +940,8 @@ export const useBooksStore = defineStore('books', () => {
       if (
         token !== searchGeneration ||
         activeSearch?.searchId !== searchId ||
-        session.value?.sessionId !== sessionSnapshot.sessionId
+        session.value?.sessionId !== sessionSnapshot.sessionId ||
+        preparationRetryBlocked.value
       ) {
         return
       }
@@ -659,7 +965,15 @@ export const useBooksStore = defineStore('books', () => {
   }
 
   const scheduleSearch = (query: string): void => {
-    if (outputPending.value) return
+    if (
+      outputPending.value ||
+      refreshing.value ||
+      preparationPending.value ||
+      preparation.value ||
+      preparationRetryBlocked.value
+    ) {
+      return
+    }
     if (arrangementPending.value || arrangement.value) return
     searchQuery.value = query
     clearSearchTimer()
@@ -687,6 +1001,8 @@ export const useBooksStore = defineStore('books', () => {
 
   const handleSearchProgress = (progress: BookSearchProgressDto): void => {
     if (
+      !refreshing.value &&
+      !preparationRetryBlocked.value &&
       activeSearch?.searchId === progress.searchId &&
       activeSearch.sessionId === session.value?.sessionId
     ) {
@@ -763,6 +1079,11 @@ export const useBooksStore = defineStore('books', () => {
   }
 
   const startPersisting = (): void => {
+    if (preparationRetryBlocked.value) {
+      clearSaveTimer()
+      pendingSave = null
+      return
+    }
     if (saveInFlight || !pendingSave) return
     const request = pendingSave
     pendingSave = null
@@ -816,11 +1137,20 @@ export const useBooksStore = defineStore('books', () => {
   const queueReadingPosition = (
     ratio: number,
     debounce: boolean,
-    origin: PendingReadingPosition['origin'] = 'user'
+    origin: PendingReadingPosition['origin'] = 'user',
+    allowWhileRefreshing: boolean = false
   ): void => {
     const currentSession = session.value
     const currentChapter = chapter.value
-    if (!currentSession || !currentChapter || !Number.isFinite(ratio) || ratio < 0 || ratio > 1) {
+    if (
+      (refreshing.value && !allowWhileRefreshing) ||
+      preparationRetryBlocked.value ||
+      !currentSession ||
+      !currentChapter ||
+      !Number.isFinite(ratio) ||
+      ratio < 0 ||
+      ratio > 1
+    ) {
       return
     }
     const request = {
@@ -852,7 +1182,9 @@ export const useBooksStore = defineStore('books', () => {
     if (
       mode.value !== 'reader' ||
       loading.value ||
+      refreshing.value ||
       restoringReadingPosition.value ||
+      preparationRetryBlocked.value ||
       !session.value ||
       !chapter.value ||
       !Number.isFinite(ratio) ||
@@ -900,7 +1232,9 @@ export const useBooksStore = defineStore('books', () => {
       return
     }
     applyLiveProgress(ratio)
-    if (persist) queueReadingPosition(ratio, true, 'programmatic')
+    if (persist && !refreshing.value && !preparationRetryBlocked.value) {
+      queueReadingPosition(ratio, true, 'programmatic')
+    }
     resolveRestoration?.()
     resolveRestoration = null
     restorationInFlight = null
@@ -914,9 +1248,15 @@ export const useBooksStore = defineStore('books', () => {
     restorationInFlight = null
   }
 
-  const flushReadingPosition = async (): Promise<void> => {
+  const flushReadingPosition = async (allowWhileRefreshing: boolean = false): Promise<void> => {
     const activeRestoration = restorationInFlight
     if (activeRestoration) await activeRestoration
+    if (preparationRetryBlocked.value) {
+      clearSaveTimer()
+      pendingSave = null
+      if (saveInFlight) await saveInFlight
+      return
+    }
     // A scroll event is the authoritative latest user intent. Only sample the
     // DOM provider when no reported position is already waiting; this avoids a
     // late layout/fragment scroll replacing a newer explicit user scroll.
@@ -925,7 +1265,7 @@ export const useBooksStore = defineStore('books', () => {
       if (provided !== null && provided !== undefined) {
         if (Number.isFinite(provided) && provided >= 0 && provided <= 1) {
           applyLiveProgress(provided)
-          queueReadingPosition(provided, false)
+          queueReadingPosition(provided, false, 'user', allowWhileRefreshing)
         }
       }
     }
@@ -994,10 +1334,14 @@ export const useBooksStore = defineStore('books', () => {
   const showBookshelf = async (): Promise<void> => {
     if (outputPending.value) return
     if (arrangement.value || arrangementPending.value) await closeArrangement()
+    if (preparation.value || preparationPending.value) await closePreparation()
     cancelSearch(true)
     await flushReadingPosition()
     const { token, operationId } = start()
     const oldSession = session.value
+    preparationRetryBlockedSessionId.value = null
+    sessionVerificationGeneration += 1
+    clearPreparationMessages()
     mode.value = 'bookshelf'
     session.value = null
     chapter.value = null
@@ -1025,6 +1369,9 @@ export const useBooksStore = defineStore('books', () => {
         return
       }
     }
+    preparationRetryBlockedSessionId.value = null
+    sessionVerificationGeneration += 1
+    clearPreparationMessages()
     session.value = value
     chapter.value = null
     mode.value = 'reader'
@@ -1034,8 +1381,10 @@ export const useBooksStore = defineStore('books', () => {
   }
 
   const openPicker = async (): Promise<void> => {
-    if (outputPending.value) return
+    if (refreshing.value || outputPending.value) return
+    clearPreparationMessages()
     if (arrangement.value || arrangementPending.value) await closeArrangement()
+    if (preparation.value || preparationPending.value) await closePreparation()
     cancelSearch(true)
     const oldSession = session.value
     const { token, operationId } = start()
@@ -1059,8 +1408,10 @@ export const useBooksStore = defineStore('books', () => {
   }
 
   const openLibrary = async (libraryId: string): Promise<void> => {
-    if (outputPending.value) return
+    if (refreshing.value || outputPending.value) return
+    clearPreparationMessages()
     if (arrangement.value || arrangementPending.value) await closeArrangement()
+    if (preparation.value || preparationPending.value) await closePreparation()
     cancelSearch(true)
     const oldSession = session.value
     const { token, operationId } = start()
@@ -1084,8 +1435,17 @@ export const useBooksStore = defineStore('books', () => {
   }
 
   const openNode = async (nodeId: string, fragmentOverride?: string | null): Promise<void> => {
-    if (arrangementPending.value || arrangement.value || outputPending.value) return
-    if (refreshInFlight) await refreshInFlight
+    if (
+      arrangementPending.value ||
+      arrangement.value ||
+      refreshing.value ||
+      preparationPending.value ||
+      preparation.value ||
+      preparationRetryBlocked.value ||
+      outputPending.value
+    ) {
+      return
+    }
     await flushReadingPosition()
     const sessionSnapshot = session.value
     if (!sessionSnapshot) return
@@ -1098,7 +1458,17 @@ export const useBooksStore = defineStore('books', () => {
   }
 
   const activateNode = async (node: BookReaderNodeDto): Promise<void> => {
-    if (arrangementPending.value || arrangement.value || outputPending.value) return
+    if (
+      arrangementPending.value ||
+      arrangement.value ||
+      refreshing.value ||
+      preparationPending.value ||
+      preparation.value ||
+      preparationRetryBlocked.value ||
+      outputPending.value
+    ) {
+      return
+    }
     if (node.type === 'chapter') return openNode(node.nodeId)
     if (node.type === 'group' && node.landingNodeId) return openNode(node.landingNodeId)
     if (node.type !== 'external' || !session.value) return
@@ -1120,7 +1490,15 @@ export const useBooksStore = defineStore('books', () => {
   }
 
   const followLink = async (href: string): Promise<void> => {
-    if (outputPending.value) return
+    if (
+      outputPending.value ||
+      refreshing.value ||
+      preparationPending.value ||
+      preparation.value ||
+      preparationRetryBlocked.value
+    ) {
+      return
+    }
     if (arrangementPending.value || arrangement.value) return
     await flushReadingPosition()
     const sessionSnapshot = session.value
@@ -1155,14 +1533,16 @@ export const useBooksStore = defineStore('books', () => {
   }
 
   const saveReadingPosition = async (chapterProgress: number): Promise<void> => {
+    if (refreshing.value || preparationRetryBlocked.value) return
     reportReadingPosition(chapterProgress)
     await flushReadingPosition()
   }
 
   const performRefresh = async (): Promise<void> => {
     if (arrangement.value || arrangementPending.value) await closeArrangement()
+    if (preparation.value || preparationPending.value) await closePreparation()
     cancelSearch(true)
-    await flushReadingPosition()
+    await flushReadingPosition(true)
     const sessionSnapshot = session.value
     if (!sessionSnapshot) return
     const priorNodeId = chapter.value?.nodeId ?? null
@@ -1175,6 +1555,9 @@ export const useBooksStore = defineStore('books', () => {
         return
       }
       session.value = result.value
+      preparationRetryBlockedSessionId.value = null
+      sessionVerificationGeneration += 1
+      clearPreparationMessages()
       chapter.value = null
       const readable = new Set(
         flattenReadableNodeIds(result.value.nodes, result.value.landingNodeId)
@@ -1191,14 +1574,20 @@ export const useBooksStore = defineStore('books', () => {
     }
   }
   const refresh = async (): Promise<void> => {
-    if (outputPending.value) return
+    if (outputPending.value || preparationPending.value || preparation.value) return
     if (refreshInFlight) return refreshInFlight
+    clearTransientOperationFeedback()
+    refreshing.value = true
     const refreshOperation = performRefresh()
     refreshInFlight = refreshOperation
     try {
       await refreshOperation
     } finally {
       if (refreshInFlight === refreshOperation) refreshInFlight = null
+      refreshing.value = false
+      if (preparationRetryBlocked.value && !preparationStatus.value) {
+        preparationStatus.value = PREPARATION_REFRESH_REQUIRED
+      }
     }
   }
 
@@ -1226,16 +1615,45 @@ export const useBooksStore = defineStore('books', () => {
   }
 
   const previous = async (): Promise<void> => {
-    if (arrangementPending.value || arrangement.value || outputPending.value) return
+    if (
+      arrangementPending.value ||
+      arrangement.value ||
+      refreshing.value ||
+      preparationPending.value ||
+      preparation.value ||
+      preparationRetryBlocked.value ||
+      outputPending.value
+    ) {
+      return
+    }
     if (previousNodeId.value) await openNode(previousNodeId.value)
   }
   const next = async (): Promise<void> => {
-    if (arrangementPending.value || arrangement.value || outputPending.value) return
+    if (
+      arrangementPending.value ||
+      arrangement.value ||
+      refreshing.value ||
+      preparationPending.value ||
+      preparation.value ||
+      preparationRetryBlocked.value ||
+      outputPending.value
+    ) {
+      return
+    }
     if (nextNodeId.value) await openNode(nextNodeId.value)
   }
   const editCurrentChapter = async (): Promise<void> => {
-    if (outputPending.value) return
+    if (
+      outputPending.value ||
+      refreshing.value ||
+      preparationPending.value ||
+      preparation.value ||
+      preparationRetryBlocked.value
+    ) {
+      return
+    }
     if (arrangement.value || arrangementPending.value) await closeArrangement()
+    if (preparation.value || preparationPending.value) await closePreparation()
     await cancelSearch(true)
     await flushReadingPosition()
     const sessionSnapshot = session.value
@@ -1273,8 +1691,12 @@ export const useBooksStore = defineStore('books', () => {
     if (!error.value && session.value) mode.value = 'reader'
   }
   const showEditor = async (): Promise<void> => {
-    if (outputPending.value) return
+    if (outputPending.value || preparationPending.value || preparation.value) return
+    preparationRetryBlockedSessionId.value = null
+    sessionVerificationGeneration += 1
+    clearPreparationMessages()
     if (arrangement.value || arrangementPending.value) await closeArrangement()
+    if (preparation.value || preparationPending.value) await closePreparation()
     cancelSearch(true)
     await flushReadingPosition()
     const { token, operationId } = start()
@@ -1295,6 +1717,7 @@ export const useBooksStore = defineStore('books', () => {
     result: BookSearchResultDto,
     fragment: string | null
   ): Promise<void> => {
+    if (refreshing.value || preparationRetryBlocked.value) return
     await flushReadingPosition()
     await cancelSearch(false)
     await openNode(result.nodeId, fragment)
@@ -1306,10 +1729,16 @@ export const useBooksStore = defineStore('books', () => {
     session,
     chapter,
     loading,
+    refreshing,
     error,
     arrangement,
     arrangementError,
     arrangementPending,
+    preparation,
+    preparationError,
+    preparationPending,
+    preparationStatus,
+    preparationRetryBlocked,
     exportPending,
     exportCancelRequested,
     exportError,
@@ -1344,6 +1773,7 @@ export const useBooksStore = defineStore('books', () => {
     flushReadingPosition,
     registerReadingPositionProvider,
     scheduleSearch,
+    clearTransientOperationFeedback,
     cancelSearch,
     handleSearchProgress,
     openSearchResult,
@@ -1354,6 +1784,10 @@ export const useBooksStore = defineStore('books', () => {
     undoArrangement,
     saveArrangement,
     closeArrangement,
+    beginPreparation,
+    selectPreparationSource,
+    commitPreparation,
+    closePreparation,
     exportBook,
     cancelExport,
     generateWebsite,

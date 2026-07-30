@@ -356,10 +356,13 @@ const report = (result) => {
     process.exitCode = 1
     return
   }
+  const acceptedBoundaries =
+    'accepted_p3_boundaries=crash_partial_create,same_user_syscall_path_boundary,unicode_casefold_pin_drift'
+  const releaseTruth = `product_ready=false visual_fidelity=false content_adaptation_gaps=1 release_matrix_ready=false ${acceptedBoundaries}`
   process.stdout.write(
     result.code === 0
-      ? 'RC_HARNESS_PASS product_ready=false adaptation_gaps=2 code=0\n'
-      : `RC_HARNESS_FAIL product_ready=false adaptation_gaps=2 code=${result.code}\n`
+      ? `RC_HARNESS_PASS ${releaseTruth} book_structure_ready=true code=0\n`
+      : `RC_HARNESS_FAIL ${releaseTruth} book_structure_ready=false code=${result.code}\n`
   )
   process.exitCode = result.code
 }
@@ -376,7 +379,9 @@ execution
   .then((result) => {
     releaseSignalHandlers()
     if (result.skipped) {
-      process.stdout.write('RC_HARNESS_SKIP product_ready=false adaptation_gaps=2 code=0\n')
+      process.stdout.write(
+        'RC_HARNESS_SKIP product_ready=false visual_fidelity=false content_adaptation_gaps=1 release_matrix_ready=false accepted_p3_boundaries=crash_partial_create,same_user_syscall_path_boundary,unicode_casefold_pin_drift book_structure_ready=false code=0\n'
+      )
       return
     }
     if (process.argv.includes('--internal-self-test-pre-root-signal')) {
@@ -388,6 +393,8 @@ execution
   })
   .catch(() => {
     releaseSignalHandlers()
-    process.stderr.write('RC_HARNESS_FAIL product_ready=false adaptation_gaps=2 code=1\n')
+    process.stderr.write(
+      'RC_HARNESS_FAIL product_ready=false visual_fidelity=false content_adaptation_gaps=1 release_matrix_ready=false accepted_p3_boundaries=crash_partial_create,same_user_syscall_path_boundary,unicode_casefold_pin_drift book_structure_ready=false code=1\n'
+    )
     process.exitCode = 1
   })

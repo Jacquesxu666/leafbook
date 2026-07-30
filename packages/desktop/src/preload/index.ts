@@ -20,6 +20,7 @@ import type {
 import type {
   BookArrangementApplyRequestDto,
   BookArrangementSaveRequestDto,
+  BookPreparationCommitRequestDto,
   BookExportCommitRequestDto,
   BookWebsiteCommitRequestDto,
   BookEditSaveRequestDto,
@@ -257,6 +258,13 @@ const booksAPI = {
     invoke('lb::books::save-arrangement', request),
   closeArrangement: (arrangementId: string) =>
     invoke('lb::books::close-arrangement', arrangementId),
+  beginPreparation: (sessionId: string) => invoke('lb::books::begin-preparation', sessionId),
+  selectPreparationSource: (preparationId: string, sourceNodeId: string) =>
+    invoke('lb::books::select-preparation-source', preparationId, sourceNodeId),
+  commitPreparation: (request: BookPreparationCommitRequestDto) =>
+    invoke('lb::books::commit-preparation', request),
+  closePreparation: (preparationId: string) =>
+    invoke('lb::books::close-preparation', preparationId),
   beginExport: (sessionId: string) => invoke('lb::books::begin-export', sessionId),
   commitExport: (request: BookExportCommitRequestDto) =>
     invoke('lb::books::commit-export', request),

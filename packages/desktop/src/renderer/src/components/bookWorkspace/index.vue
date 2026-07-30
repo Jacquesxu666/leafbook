@@ -75,8 +75,15 @@
     <div v-else class="reader">
       <header class="reader-header">
         <button
+          ref="leaveButton"
           class="secondary"
-          :disabled="books.arrangementPending || Boolean(books.arrangement) || books.outputPending"
+          :disabled="
+            books.arrangementPending ||
+            Boolean(books.arrangement) ||
+            books.preparationPending ||
+            Boolean(books.preparation) ||
+            books.outputPending
+          "
           @click="leaveReader"
         >
           ← Bookshelf
@@ -99,7 +106,20 @@
             aria-controls="book-search-panel"
             :aria-expanded="searchOpen"
             :disabled="
-              books.arrangementPending || Boolean(books.arrangement) || books.outputPending
+              books.refreshing ||
+              books.arrangementPending ||
+              Boolean(books.arrangement) ||
+              books.preparationPending ||
+              Boolean(books.preparation) ||
+              books.preparationRetryBlocked ||
+              books.outputPending
+            "
+            :aria-describedby="
+              books.refreshing
+                ? 'book-refresh-in-progress'
+                : books.preparationRetryBlocked
+                  ? 'book-preparation-refresh-required'
+                  : undefined
             "
             @click="toggleSearch"
           >
@@ -110,7 +130,9 @@
             class="secondary"
             aria-controls="book-contents"
             :aria-expanded="!navCollapsed"
-            @click="navCollapsed = !navCollapsed"
+            :disabled="localNavigationFrozen"
+            :aria-describedby="localFreezeDescriptionId"
+            @click="toggleContents"
           >
             Contents
           </button>
@@ -118,27 +140,81 @@
             class="secondary outline-toggle"
             aria-controls="chapter-outline"
             :aria-expanded="!outlineCollapsed"
-            @click="outlineCollapsed = !outlineCollapsed"
+            :disabled="localNavigationFrozen"
+            :aria-describedby="localFreezeDescriptionId"
+            @click="toggleOutline"
           >
             Outline
           </button>
           <button
             v-if="books.session?.navigationSource === 'summary'"
+            ref="arrangeButton"
             class="secondary"
             :disabled="
-              books.arrangementPending || Boolean(books.arrangement) || books.outputPending
+              books.refreshing ||
+              books.arrangementPending ||
+              Boolean(books.arrangement) ||
+              books.preparationRetryBlocked ||
+              books.outputPending
+            "
+            :aria-describedby="
+              books.refreshing
+                ? 'book-refresh-in-progress'
+                : books.preparationRetryBlocked
+                  ? 'book-preparation-refresh-required'
+                  : undefined
             "
             @click="books.beginArrangement"
           >
             {{ books.arrangementPending && !books.arrangement ? 'Opening…' : 'Arrange' }}
           </button>
           <button
+            v-if="books.session?.navigationSource === 'inferred'"
+            ref="prepareButton"
             class="secondary"
             :disabled="
+              books.refreshing ||
+              books.preparationPending ||
+              Boolean(books.preparation) ||
+              books.preparationRetryBlocked ||
               books.arrangementPending ||
               Boolean(books.arrangement) ||
+              books.outputPending
+            "
+            :title="
+              books.preparationRetryBlocked
+                ? 'Inspect the book folder, then refresh before preparing again.'
+                : undefined
+            "
+            :aria-describedby="
+              books.refreshing
+                ? 'book-refresh-in-progress'
+                : books.preparationRetryBlocked
+                  ? 'book-preparation-refresh-required'
+                  : undefined
+            "
+            @click="openPreparation"
+          >
+            {{ books.preparationPending && !books.preparation ? 'Preparing…' : 'Prepare Book' }}
+          </button>
+          <button
+            class="secondary"
+            :disabled="
+              books.refreshing ||
+              books.arrangementPending ||
+              Boolean(books.arrangement) ||
+              books.preparationPending ||
+              Boolean(books.preparation) ||
+              books.preparationRetryBlocked ||
               books.exportCancelRequested ||
               books.websitePending
+            "
+            :aria-describedby="
+              books.refreshing
+                ? 'book-refresh-in-progress'
+                : books.preparationRetryBlocked
+                  ? 'book-preparation-refresh-required'
+                  : undefined
             "
             @click="books.exportPending ? books.cancelExport() : books.exportBook()"
           >
@@ -153,10 +229,21 @@
           <button
             class="secondary"
             :disabled="
+              books.refreshing ||
               books.arrangementPending ||
               Boolean(books.arrangement) ||
+              books.preparationPending ||
+              Boolean(books.preparation) ||
+              books.preparationRetryBlocked ||
               books.websiteCancelRequested ||
               books.exportPending
+            "
+            :aria-describedby="
+              books.refreshing
+                ? 'book-refresh-in-progress'
+                : books.preparationRetryBlocked
+                  ? 'book-preparation-refresh-required'
+                  : undefined
             "
             @click="books.websitePending ? books.cancelWebsite() : books.generateWebsite()"
           >
@@ -172,22 +259,40 @@
             class="secondary"
             :disabled="
               !books.chapter ||
+              books.refreshing ||
               books.arrangementPending ||
               Boolean(books.arrangement) ||
+              books.preparationPending ||
+              Boolean(books.preparation) ||
+              books.preparationRetryBlocked ||
               books.outputPending
+            "
+            :aria-describedby="
+              books.refreshing
+                ? 'book-refresh-in-progress'
+                : books.preparationRetryBlocked
+                  ? 'book-preparation-refresh-required'
+                  : undefined
             "
             @click="books.editCurrentChapter"
           >
             Edit
           </button>
           <button
+            ref="refreshButton"
             class="secondary"
             :disabled="
-              books.arrangementPending || Boolean(books.arrangement) || books.outputPending
+              books.refreshing ||
+              books.arrangementPending ||
+              Boolean(books.arrangement) ||
+              books.preparationPending ||
+              Boolean(books.preparation) ||
+              books.outputPending
             "
+            :aria-describedby="books.refreshing ? 'book-refresh-in-progress' : undefined"
             @click="books.refresh"
           >
-            Refresh
+            {{ books.refreshing ? 'Refreshing…' : 'Refresh' }}
           </button>
         </div>
       </header>
@@ -205,7 +310,16 @@
         @activate="activateSearchResult"
         @close="closeSearch"
       />
-      <p v-if="books.error" class="error-banner reader-error" role="alert">
+      <p
+        v-if="
+          books.error &&
+          !books.preparationRetryBlocked &&
+          !books.preparationStatus &&
+          !(books.preparation && books.preparationError)
+        "
+        class="error-banner reader-error"
+        role="alert"
+      >
         {{ books.error.message }}
       </p>
       <p v-if="books.exportSuccess" class="state-message export-status" role="status">
@@ -228,6 +342,29 @@
             : 'Generating an offline website. Cancel is available.'
         }}
       </p>
+      <p
+        v-if="books.refreshing"
+        id="book-refresh-in-progress"
+        class="state-message export-status"
+        role="status"
+      >
+        Refreshing this book. Current book actions are unavailable until refresh finishes.
+      </p>
+      <p
+        v-if="books.preparationStatus && !books.refreshing"
+        :id="books.preparationRetryBlocked ? 'book-preparation-refresh-required' : undefined"
+        class="state-message export-status"
+        role="status"
+      >
+        {{ books.preparationStatus }}
+      </p>
+      <p
+        v-if="books.preparationRetryBlocked && !books.preparationStatus && !books.refreshing"
+        id="book-preparation-refresh-required"
+        class="state-message export-status"
+      >
+        SUMMARY may have been created. Inspect the book folder, then refresh before preparing again.
+      </p>
       <div
         class="reader-grid"
         :class="{ 'without-nav': navCollapsed, 'without-outline': outlineCollapsed }"
@@ -248,6 +385,15 @@
             @save="books.saveArrangement"
             @cancel="books.closeArrangement"
           />
+          <book-preparation-panel
+            v-else-if="books.preparation"
+            :preparation="books.preparation"
+            :error="books.preparationError"
+            :busy="books.preparationPending"
+            @select="books.selectPreparationSource"
+            @create="commitPreparation"
+            @cancel="closePreparation"
+          />
           <template v-else>
             <p class="panel-label">Contents · {{ books.session?.navigationSource }}</p>
             <button
@@ -255,6 +401,14 @@
               class="root-landing"
               :aria-current="
                 books.chapter?.nodeId === books.session.landingNodeId ? 'page' : undefined
+              "
+              :disabled="books.refreshing || books.preparationRetryBlocked"
+              :aria-describedby="
+                books.refreshing
+                  ? 'book-refresh-in-progress'
+                  : books.preparationRetryBlocked
+                    ? 'book-preparation-refresh-required'
+                    : undefined
               "
               @click="books.openNode(books.session.landingNodeId)"
             >
@@ -266,6 +420,14 @@
                 :key="node.nodeId"
                 :node="node"
                 :current-node-id="books.chapter?.nodeId ?? null"
+                :disabled="books.refreshing || books.preparationRetryBlocked"
+                :described-by="
+                  books.refreshing
+                    ? 'book-refresh-in-progress'
+                    : books.preparationRetryBlocked
+                      ? 'book-preparation-refresh-required'
+                      : undefined
+                "
                 @activate="activateNavigationNode"
               />
             </ul>
@@ -288,17 +450,22 @@
           class="book-content"
           tabindex="-1"
           :aria-busy="!books.readingPositionReady"
+          :aria-describedby="books.refreshing ? 'book-refresh-in-progress' : undefined"
           :data-reading-ready="books.readingPositionReady ? 'true' : 'false'"
           @scroll.passive="handleReaderScroll"
         >
-          <p v-if="books.loading" class="state-message" role="status">Loading chapter…</p>
+          <p v-if="books.loading && !books.refreshing" class="state-message" role="status">
+            Loading chapter…
+          </p>
           <div v-else-if="books.chapter" class="chapter-wrap">
             <!-- Sanitized by renderBookMarkdown immediately before assignment. -->
             <!-- eslint-disable vue/no-v-html -->
             <article
               class="leafbook-markdown markdown-body"
+              @pointerdown="handleContentPointerdown"
               @click="handleContentClick"
               @keydown="handleContentKeydown"
+              @focusin="handleContentFocusin"
               v-html="rendered.html"
             />
             <!-- eslint-enable vue/no-v-html -->
@@ -307,9 +474,20 @@
                 class="secondary"
                 :disabled="
                   !books.previousNodeId ||
+                  books.refreshing ||
                   books.arrangementPending ||
                   Boolean(books.arrangement) ||
+                  books.preparationPending ||
+                  Boolean(books.preparation) ||
+                  books.preparationRetryBlocked ||
                   books.outputPending
+                "
+                :aria-describedby="
+                  books.refreshing
+                    ? 'book-refresh-in-progress'
+                    : books.preparationRetryBlocked
+                      ? 'book-preparation-refresh-required'
+                      : undefined
                 "
                 @click="navigatePrevious"
               >
@@ -319,9 +497,20 @@
                 class="secondary"
                 :disabled="
                   !books.nextNodeId ||
+                  books.refreshing ||
                   books.arrangementPending ||
                   Boolean(books.arrangement) ||
+                  books.preparationPending ||
+                  Boolean(books.preparation) ||
+                  books.preparationRetryBlocked ||
                   books.outputPending
+                "
+                :aria-describedby="
+                  books.refreshing
+                    ? 'book-refresh-in-progress'
+                    : books.preparationRetryBlocked
+                      ? 'book-preparation-refresh-required'
+                      : undefined
                 "
                 @click="navigateNext"
               >
@@ -348,7 +537,12 @@
             :key="item.id"
             href="#"
             :style="{ paddingLeft: `${Math.max(0, item.level - 1) * 10}px` }"
-            @click.prevent="scrollToHeading(item.id)"
+            :aria-disabled="localNavigationFrozen ? 'true' : undefined"
+            :aria-describedby="localFreezeDescriptionId"
+            :tabindex="localNavigationFrozen ? -1 : undefined"
+            @click="activateOutline($event, item.id)"
+            @keydown.enter="activateOutline($event, item.id)"
+            @keydown.space="activateOutline($event, item.id)"
             >{{ item.text }}</a
           >
         </aside>
@@ -358,23 +552,45 @@
 </template>
 
 <script setup lang="ts">
-import { nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import type { BookReaderNodeDto, BookSearchResultDto } from '@shared/types/bookReader'
 import { useBooksStore } from '@/store/books'
 import { renderBookMarkdown, type RenderedBookChapter } from '@/book/renderMarkdown'
 import { restoreReadingPosition, waitForPaint } from '@/book/restoreReadingPosition'
+import { bookFragmentKey } from 'common/book/heading'
 import BookTreeNode from './BookTreeNode.vue'
 import BookSearchPanel from './BookSearchPanel.vue'
 import BookArrangementPanel from './BookArrangementPanel.vue'
+import BookPreparationPanel from './BookPreparationPanel.vue'
+import { focusAfterBookPreparation } from './bookPreparationFocus'
+import {
+  blockFrozenBookAnchorInteraction,
+  createBookContentAnchorFreeze,
+  redirectFrozenBookAnchorFocus,
+  renderedBookAnchorAt
+} from './bookContentAnchorFreeze'
 
 const books = useBooksStore()
 const navCollapsed = ref(false)
 const outlineCollapsed = ref(false)
 const contentElement = ref<HTMLElement | null>(null)
+const leaveButton = ref<HTMLButtonElement | null>(null)
 const contentsButton = ref<HTMLButtonElement | null>(null)
+const prepareButton = ref<HTMLButtonElement | null>(null)
+const arrangeButton = ref<HTMLButtonElement | null>(null)
 const searchButton = ref<HTMLButtonElement | null>(null)
+const refreshButton = ref<HTMLButtonElement | null>(null)
 const searchOpen = ref(false)
 const rendered = reactive<RenderedBookChapter>({ html: '', outline: [] })
+const localNavigationFrozen = computed(() => books.refreshing || books.preparationRetryBlocked)
+const localFreezeDescriptionId = computed(() =>
+  books.refreshing
+    ? 'book-refresh-in-progress'
+    : books.preparationRetryBlocked
+      ? 'book-preparation-refresh-required'
+      : undefined
+)
+const contentAnchorFreeze = createBookContentAnchorFreeze()
 const formatDate = (value: string): string => new Date(value).toLocaleDateString()
 const formatProgress = (value: number): string => `${Math.round(value * 100)}%`
 let restoreGeneration = 0
@@ -382,11 +598,98 @@ let restoringPosition = false
 let unregisterReadingPositionProvider: (() => void) | null = null
 let unregisterSearchProgress: (() => void) | null = null
 
+const openPreparation = async (): Promise<void> => {
+  if (books.refreshing || books.preparationRetryBlocked) return
+  navCollapsed.value = false
+  await nextTick()
+  await books.beginPreparation()
+}
+
+const toggleContents = (): void => {
+  if (localNavigationFrozen.value) return
+  navCollapsed.value = !navCollapsed.value
+}
+
+const toggleOutline = (): void => {
+  if (localNavigationFrozen.value) return
+  outlineCollapsed.value = !outlineCollapsed.value
+}
+
+const closePreparation = async (): Promise<void> => {
+  await books.closePreparation()
+  await nextTick()
+  prepareButton.value?.focus({ preventScroll: true })
+}
+
+const openSearch = (): void => {
+  if (books.refreshing || books.preparationRetryBlocked) return
+  books.clearTransientOperationFeedback()
+  searchOpen.value = true
+}
+
+const commitPreparation = async (): Promise<void> => {
+  const preparationId = books.preparation?.preparationId
+  if (!preparationId) return
+  await books.commitPreparation()
+  if (
+    books.preparation !== null ||
+    books.preparationRetryBlocked ||
+    books.preparationStatus === null
+  ) {
+    return
+  }
+  await nextTick()
+  focusAfterBookPreparation({
+    contentsButton: contentsButton.value,
+    arrangeButton: arrangeButton.value
+  })
+}
+
 watch(
-  () => books.arrangementPending || books.outputPending,
+  () =>
+    books.refreshing ||
+    books.arrangementPending ||
+    books.preparationPending ||
+    books.preparationRetryBlocked ||
+    books.outputPending,
   (pending) => {
     if (pending) searchOpen.value = false
   }
+)
+
+const focusAfterFrozenContentAnchor = (): void => {
+  const candidates = books.refreshing
+    ? [leaveButton.value, refreshButton.value]
+    : [refreshButton.value, leaveButton.value]
+  const fallback = candidates.find((candidate) => candidate && !candidate.disabled)
+  if (!fallback) {
+    contentElement.value?.focus({ preventScroll: true })
+    return
+  }
+  fallback?.focus({ preventScroll: true })
+}
+
+watch(
+  [
+    () => contentElement.value,
+    () => rendered.html,
+    () => localNavigationFrozen.value,
+    () => localFreezeDescriptionId.value
+  ],
+  () => {
+    contentAnchorFreeze.sync(
+      contentElement.value,
+      localNavigationFrozen.value,
+      localFreezeDescriptionId.value
+    )
+    redirectFrozenBookAnchorFocus(
+      contentElement.value,
+      document.activeElement,
+      localNavigationFrozen.value,
+      focusAfterFrozenContentAnchor
+    )
+  },
+  { flush: 'post', immediate: true }
 )
 
 const currentReadingRatio = (): number => {
@@ -407,14 +710,6 @@ const handleReaderScroll = (): void => {
   }
   books.reportReadingPosition(currentReadingRatio())
 }
-const fragmentKey = (value: string): string =>
-  value
-    .normalize('NFKC')
-    .trim()
-    .toLocaleLowerCase()
-    .replace(/[^\p{Letter}\p{Number}]+/gu, '-')
-    .replace(/^-+|-+$/g, '')
-
 watch(
   [
     () => books.session?.sessionId,
@@ -463,14 +758,14 @@ watch(
       waitForPaint: () => waitForPaint(paintWaitController.signal),
       position: () => {
         if (chapter.fragment) {
-          const decoded = fragmentKey(chapter.fragment)
+          const decoded = bookFragmentKey(chapter.fragment)
           const heading = rendered.outline.find(
             (item) =>
               item.id === chapter.fragment ||
-              fragmentKey(item.id) === decoded ||
-              fragmentKey(item.text) === decoded
+              bookFragmentKey(item.id) === decoded ||
+              item.fragment === decoded
           )
-          if (heading) scrollToHeading(heading.id, 'auto')
+          if (heading) scrollToHeading(heading.id, 'auto', true)
           else contentElement.value?.scrollTo({ top: 0 })
         } else {
           const element = contentElement.value
@@ -506,25 +801,52 @@ watch(
   { immediate: true, flush: 'sync' }
 )
 const handleContentClick = async (event: MouseEvent): Promise<void> => {
-  const anchor = (event.target as Element | null)?.closest<HTMLAnchorElement>('a[data-book-href]')
+  const anchor = renderedBookAnchorAt(contentElement.value, event.target)
   if (!anchor) return
+  if (blockFrozenBookAnchorInteraction(contentElement.value, event, localNavigationFrozen.value)) {
+    return
+  }
   event.preventDefault()
   const href = anchor.dataset.bookHref
   if (href) await books.followLink(href)
 }
 const handleContentKeydown = async (event: KeyboardEvent): Promise<void> => {
   if (event.key !== 'Enter' && event.key !== ' ') return
-  const anchor = (event.target as Element | null)?.closest<HTMLElement>('a[data-book-href]')
+  const anchor = renderedBookAnchorAt(contentElement.value, event.target)
   if (!anchor) return
+  if (blockFrozenBookAnchorInteraction(contentElement.value, event, localNavigationFrozen.value)) {
+    return
+  }
   event.preventDefault()
   const href = anchor.dataset.bookHref
   if (href) await books.followLink(href)
 }
+const handleContentPointerdown = (event: PointerEvent): void => {
+  blockFrozenBookAnchorInteraction(contentElement.value, event, localNavigationFrozen.value)
+}
+const handleContentFocusin = (event: FocusEvent): void => {
+  redirectFrozenBookAnchorFocus(
+    contentElement.value,
+    event.target,
+    localNavigationFrozen.value,
+    focusAfterFrozenContentAnchor
+  )
+}
 const activateNavigationNode = async (node: BookReaderNodeDto): Promise<void> => {
+  if (localNavigationFrozen.value) return
   await books.activateNode(node)
   if (window.matchMedia('(max-width: 700px)').matches) navCollapsed.value = true
 }
-const scrollToHeading = (id: string, behavior: 'auto' | 'smooth' = 'smooth'): void => {
+const activateOutline = (event: MouseEvent | KeyboardEvent, id: string): void => {
+  event.preventDefault()
+  scrollToHeading(id)
+}
+const scrollToHeading = (
+  id: string,
+  behavior: 'auto' | 'smooth' = 'smooth',
+  allowDuringRefresh = false
+): void => {
+  if (localNavigationFrozen.value && !(allowDuringRefresh && books.refreshing)) return
   const escaped =
     typeof CSS !== 'undefined' && CSS.escape ? CSS.escape(id) : id.replace(/"/g, '\\"')
   const container = contentElement.value
@@ -549,6 +871,11 @@ const keyboardNavigation = async (event: KeyboardEvent): Promise<void> => {
     await books.closeArrangement()
     return
   }
+  if (event.key === 'Escape' && books.preparation) {
+    event.preventDefault()
+    await closePreparation()
+    return
+  }
   if (event.key === 'Escape' && searchOpen.value) {
     event.preventDefault()
     await closeSearch()
@@ -559,13 +886,17 @@ const keyboardNavigation = async (event: KeyboardEvent): Promise<void> => {
     event.key === '/' &&
     books.mode === 'reader' &&
     !books.outputPending &&
+    !books.refreshing &&
+    !books.preparationPending &&
+    !books.preparation &&
+    !books.preparationRetryBlocked &&
     !target?.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])')
   ) {
     event.preventDefault()
-    searchOpen.value = true
+    openSearch()
     return
   }
-  if (event.key === 'Escape' && !navCollapsed.value) {
+  if (event.key === 'Escape' && !navCollapsed.value && !localNavigationFrozen.value) {
     event.preventDefault()
     navCollapsed.value = true
     await nextTick()
@@ -579,10 +910,20 @@ const keyboardNavigation = async (event: KeyboardEvent): Promise<void> => {
   ) {
     return
   }
-  if (event.key === 'ArrowLeft' && books.previousNodeId) {
+  if (
+    !books.refreshing &&
+    !books.preparationRetryBlocked &&
+    event.key === 'ArrowLeft' &&
+    books.previousNodeId
+  ) {
     event.preventDefault()
     await navigatePrevious()
-  } else if (event.key === 'ArrowRight' && books.nextNodeId) {
+  } else if (
+    !books.refreshing &&
+    !books.preparationRetryBlocked &&
+    event.key === 'ArrowRight' &&
+    books.nextNodeId
+  ) {
     event.preventDefault()
     await navigateNext()
   }
@@ -598,9 +939,9 @@ const leaveReader = async (): Promise<void> => {
   await books.showBookshelf()
 }
 const toggleSearch = (): void => {
-  if (books.outputPending) return
+  if (books.refreshing || books.outputPending || books.preparationRetryBlocked) return
   if (searchOpen.value) closeSearch()
-  else searchOpen.value = true
+  else openSearch()
 }
 const closeSearch = async (): Promise<void> => {
   searchOpen.value = false
@@ -629,7 +970,9 @@ onMounted(() => {
   window.addEventListener('keydown', keyboardNavigation)
 })
 onBeforeUnmount(() => {
+  contentAnchorFreeze.restoreAll()
   books.closeArrangement().catch(() => undefined)
+  books.closePreparation().catch(() => undefined)
   books.cancelExport().catch(() => undefined)
   books.cancelWebsite().catch(() => undefined)
   books.cancelSearch(false)
@@ -714,6 +1057,8 @@ button:disabled {
 .header-actions,
 .reader-actions {
   gap: 10px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 .book-cards {
   display: grid;
@@ -788,7 +1133,8 @@ button:disabled {
 }
 .reader-header {
   min-height: 56px;
-  padding: 0 14px;
+  padding: 8px 14px;
+  flex-wrap: wrap;
   justify-content: space-between;
   gap: 12px;
   border-bottom: 1px solid var(--floatBorderColor);
@@ -817,6 +1163,7 @@ button:disabled {
   transform: translateX(-50%);
 }
 .reader-grid {
+  position: relative;
   display: grid;
   min-height: 0;
   flex: 1;
@@ -937,7 +1284,7 @@ button:disabled {
   }
   .book-navigation {
     position: absolute;
-    inset: 57px 20% 0 0;
+    inset: 0 20% 0 0;
     z-index: 3;
     box-shadow: 10px 0 30px rgb(0 0 0 / 15%);
   }

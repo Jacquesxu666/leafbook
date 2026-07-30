@@ -1967,6 +1967,45 @@
   accumulate past the per-owner cap. The final selected Reader E2E gate is 4/4.
 - Git commit: not created; nothing was pushed.
 
+## 2026-07-30 — Phase 9C nonblocking preparation source boundary
+
+- User goal: ensure that every untrusted manuscript open used by Prepare Book
+  rejects FIFOs and other special files promptly, including at the final
+  synchronous publication revalidation, with no unsafe platform fallback.
+- Completed: added one mandatory safe-read flag gate for
+  `O_RDONLY | O_NOFOLLOW | O_NONBLOCK` and a root-directory variant that also
+  requires `O_DIRECTORY`. Missing runtime constants make preparation
+  unavailable. Automatic/selected manuscript reads, final source revalidation,
+  target-content verification, and final root-directory synchronization now
+  use the gated flags and immediately validate descriptor type, link count,
+  size, and/or expected inode identity before reading or synchronizing.
+  Deterministic POSIX coverage replaces automatic, explicitly selected, and
+  final-boundary manuscripts with FIFOs and proves sub-second rejection, no
+  `SUMMARY.md`, and preservation of the FIFO. Hosts without `mkfifo` skip only
+  those dynamic cases; a platform-static test retains the mandatory flags and
+  forbids `?? 0` fallback in every build.
+- Files: `packages/desktop/src/main/book/preparationManager.ts`,
+  `packages/desktop/test/unit/specs/book-preparation-manager.spec.ts`,
+  `docs/PREPARE_BOOK.md`, and this log.
+- Tests: preparation manager 23/23; heading/manager/preparation-store/reader
+  focused unit 158/158; desktop full unit 1133/1133; desktop typecheck and
+  production build passed (main bundle 1,828.98 kB). The image-alt actual
+  Prepare Electron scenario passed 1/1 in 4.6 seconds. The no-environment RC
+  returned its fixed SKIP result; an authorized real-book root was not
+  configured in this process, so no new authorized RC claim is made. Scoped
+  ESLint, Prettier, and `git diff --check` passed. An initially mis-forwarded
+  Playwright command started the broad suite; its target scenario passed before
+  the remaining run was intentionally interrupted, then the exact one-test
+  command passed cleanly.
+- Key decisions: regular source/target leaves never use a blocking or
+  follow-links fallback; the final directory descriptor additionally requires
+  `O_DIRECTORY` and must match the leased root inode. Special-file rejection
+  preserves the attacker-controlled leaf and remains zero-write.
+- Unresolved: the macOS result is covered locally, but Windows and Linux still
+  require their release-matrix runtime executions. A runtime without any
+  mandatory flag fails closed by design.
+- Git commit: not created; nothing was pushed.
+
 ## 2026-07-29 — Phase 8D legacy navigation and OS-shell boundary closure
 
 - User goal: close remaining renderer-reachable external navigation and
@@ -2535,3 +2574,1007 @@
   the previously documented validation-to-remove same-user race remains an
   accepted P3 constraint.
 - Git commit: not created; nothing was pushed.
+
+## 2026-07-30 — Phase 9C Prepare Book workflow
+
+- User goal: let an inferred Markdown folder become a GitBook-style book by
+  creating safe heading-based navigation without splitting or changing the
+  manuscript.
+- Completed: added a Node-safe Muya ATX-H1 analyzer and shared fragment
+  normalization; a main-owned preparation lease with inferred-only eligibility,
+  opaque source selection, bounded preview, create-only race-safe
+  `SUMMARY.md`, session refresh, and typed IPC; and the accessible Prepare Book
+  panel/store flow with cancel, Escape, stale-response cleanup, output/Arrange
+  mutual exclusion, and truthful durability-uncertain handling. The preview
+  renders at most 200 of up to 2,000 chapters and announces the remainder.
+  Production bundles the analyzer instead of requiring TypeScript at runtime.
+  The real-book RC Track B now clicks the actual Prepare Book UI, proves Cancel
+  is zero-write, then creates and exercises the generated summary; it no longer
+  writes a synthetic SUMMARY manually. A P1 parity repair now derives H1
+  outline text and shared fragment IDs from a sanitized DOM clone before visual
+  image placeholders are inserted, so image alt text remains authoritative
+  without changing the placeholder shown in the body; H2-H6 behavior is
+  unchanged.
+- Files: added `packages/muya/src/state/analyzeHeadings.ts` and tests;
+  `packages/desktop/src/common/book/heading.ts`;
+  `packages/desktop/src/main/book/preparationManager.ts`;
+  `packages/desktop/src/renderer/src/components/bookWorkspace/BookPreparationPanel.vue`;
+  preparation unit/Electron tests; and `docs/PREPARE_BOOK.md`. Updated Muya
+  inline lexer options, desktop main/session/IPC/preload/types/store/workspace,
+  fragment consumers, build/test aliases, RC harness/runner/docs, and this log.
+- Tests: Muya full Vitest passed 213 files and 1454/1454 tests. Desktop full
+  unit passed serially across 68 files and 1118/1118 tests;
+  preparation-focused tests passed 3 files and 140/140 tests; the actual
+  Prepare Electron scenario passed 1/1 in 5.3 seconds; and the selected source
+  release smoke passed 6/6 in 16.4 seconds. Desktop typecheck and production
+  build passed. The final main bundle is 1,819,964 bytes versus a
+  1,690,840-byte baseline (+129,124 bytes, +7.64%), and the analyzer is bundled
+  rather than left as a runtime package require. Full ESLint passed with zero
+  errors and 134 inherited warnings after clearing all new panel warnings;
+  Prettier and `git diff --check` passed. The no-environment wrapper emitted
+  its fixed SKIP status and all six privacy/cleanup runner self-tests passed.
+  The authorized hardened wrapper passed with the exact aggregate fields
+  `product_ready=false`, `book_structure_ready=true`,
+  `visual_fidelity=false`, and `adaptation_gaps=1`. Original-manifest equality,
+  validated cleanup, privacy scans, and absence of retained artifacts were
+  confirmed. Dependency manifests, lockfiles, release workflows, and version
+  files are unchanged. The P1 repair gate additionally passed the Muya analyzer
+  suite 5/5, Node without browser globals, desktop
+  heading/preparation-manager/reader suites 136/136, desktop typecheck and
+  production build, and an image-heading actual-Prepare Electron scenario 1/1
+  in 5.9 seconds; scoped ESLint, Prettier, and `git diff --check` passed.
+- Key decisions: only root-level readable session candidates may be selected;
+  renderer DTOs contain no filesystem paths or manuscript bytes; heading
+  extraction uses Muya block/inline semantics without DOM or renderer imports;
+  create uses an exclusive staged file plus atomic no-overwrite link and
+  identity/hash checks; a committed-but-unconfirmed result is never retried
+  automatically. Export and website generation deduplicate aliases to one
+  physical manuscript body.
+- Unresolved: Muya `tsc --noEmit` retains the pre-existing unused
+  `plantumlServer` diagnostic in `diagramPreview.ts`; it is unrelated and was
+  not changed. Inline SVG remains safely stripped as a visual-fidelity
+  observation. The documented same-user filesystem race and abrupt-process RC
+  cleanup limits remain.
+- Git commit: not created; nothing was pushed.
+
+## 2026-07-30 — Phase 9C post-hook publication race repair
+
+- User goal: close the `beforeLink` await window so a cancelled or stale
+  preparation, changed root/manuscript, attacker-created SUMMARY, or replaced
+  staging file can never be published afterward.
+- Completed: added a synchronous post-hook boundary validation for the exact
+  owner/session/generation/preparation lease, root and target-parent identity,
+  source descriptor/path identity and SHA-256, NFC/case-folded SUMMARY absence,
+  exact target absence, and staging descriptor/path identity and SHA-256. The
+  validated staging descriptor remains open while the manager enters its
+  critical turn and immediately performs the create-only hard link without an
+  await. Pre-critical failures expire the lease and remove exact staging
+  artifacts, including a stage carried by a root renamed within its original
+  parent. A close observed after the critical link now truthfully reports a
+  committed conflict instead of cancellation success.
+- Files: `packages/desktop/src/main/book/preparationManager.ts`,
+  `packages/desktop/test/unit/specs/book-preparation-manager.spec.ts`,
+  `docs/PREPARE_BOOK.md`, `docs/REAL_BOOK_RC.md`, and this log.
+- Tests: deterministic held-`beforeLink` races cover close, session revoke,
+  owner cleanup, source overwrite, root inode swap, exact and case-folded
+  attacker SUMMARY winners, plus critical cancellation. Manager unit passed
+  16/16; heading/manager/store/reader focused unit passed 4 files and 151/151;
+  Muya analyzer passed 5/5 and its Node-without-browser-globals smoke passed.
+  Desktop typecheck and production build passed. The actual image-alt Prepare
+  Electron scenario passed 1/1 in 7.5 seconds. Scoped ESLint, Prettier, and
+  `git diff --check` passed. The RC documentation now lists all six runner
+  privacy/cleanup self-tests.
+- Key decisions: failures after the hook retain semantic error truth
+  (`preparation-not-found`, `preparation-source-changed`, or
+  `preparation-conflict`) rather than collapsing every race into a generic
+  write failure; an attacker-owned target is preserved byte-for-byte.
+- Unresolved: Node still has no directory-handle-relative unlink API, so
+  recovery of a staging inode after an attacker moves the entire root outside
+  its original parent remains within the already documented same-user P3 path
+  race.
+- Git commit: not created; nothing was pushed.
+
+## 2026-07-30 — Phase 9C direct create-only publication boundary
+
+- User goal: remove the pathname staging/hard-link publication design and use
+  a truthful create-only boundary that never overwrites an existing SUMMARY or
+  claims crash-atomic content.
+- Completed: preparation now performs its final lease/session, root/parent,
+  source identity/digest, case-folded conflict, and exact-target validation
+  synchronously, then opens `SUMMARY.md` directly with
+  `O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_NONBLOCK` and mode `0600`.
+  Unsupported no-follow/non-blocking flags fail closed without a fallback.
+  After the descriptor is proven to be a regular single-link file, publication
+  is a no-await critical turn with a bounded canonical-byte write loop, file
+  sync, descriptor size/write-digest verification, root/parent revalidation,
+  pathname-to-descriptor inode and content verification, and directory sync.
+  Post-open failures unlink only when the unchanged root, parent, pathname, and
+  open descriptor prove ownership of the exact inode. Otherwise pathname
+  cleanup is forbidden and the revoked lease returns committed/uncertain;
+  directory-sync failure returns successful creation with uncertain
+  durability. All staging paths, hard-link publication, related hooks, cleanup,
+  tests, and current-design claims were removed.
+- Files: `packages/desktop/src/main/book/preparationManager.ts`,
+  `packages/desktop/test/unit/specs/book-preparation-manager.spec.ts`,
+  `docs/PREPARE_BOOK.md`, and this log.
+- Tests: direct manager passed 20/20; the heading, manager, preparation-store,
+  and reader focused set passed 155/155; Muya analyzer passed 5/5 and a
+  Node-without-browser-globals smoke passed. Desktop typecheck and production
+  build passed; the main bundle is 1,827,852 bytes. The image-alt actual
+  Prepare Electron scenario passed 1/1 in 7.7 seconds. The no-environment RC
+  emitted the fixed SKIP result and all six privacy/cleanup runner self-tests
+  passed; the authorized hardened real-book RC was independently reported
+  passing. Deterministic manager coverage includes direct `EEXIST`,
+  case-folded conflict, symlink/FIFO targets, a post-open pathname replacement
+  that preserves the attacker, safe write/sync cleanup, root-swap partial
+  residue truth, pre-critical cancellation/revocation, critical busy, and
+  source/root races. Scoped ESLint, Prettier, and `git diff --check` passed.
+- Key decisions: the final pathname is created directly and exclusively;
+  neither pathname staging nor hard-link publication is an allowed platform
+  fallback. The macOS, Windows, and Linux release matrix must validate the same
+  flag behavior. A post-open uncertainty is never auto-retried.
+- Unresolved: direct exclusive creation is not content-atomic across process
+  crash or power loss. An abrupt stop can leave a partial `SUMMARY.md`; its
+  next case-folded existence check fails closed and requires manual inspection
+  and removal. This is an explicit P3 durability/recovery limitation.
+- Git commit: not created; nothing was pushed.
+
+## 2026-07-30 — Phase 9C bounded publication verification
+
+- User goal: make direct `SUMMARY.md` verification immune to attacker-sized
+  allocation and detect target or manuscript changes at every publication
+  boundary.
+- Completed: the exclusive target still opens write-only, is immediately
+  required to be a zero-length regular single-link file, and retains its
+  device/inode/mode identity. Target verification safely reopens that exact
+  inode read-only and streams its expected bytes through one 64 KiB buffer with
+  an EOF probe and SHA-256; it never sizes an allocation from target metadata.
+  Full pre/post descriptor state is compared after writing, after file sync,
+  and immediately before directory sync. The prepared manuscript now retains
+  its complete stable file state and the asynchronous and final synchronous
+  reads recheck type, link count, device/inode, mode, size, mtime, ctime, and
+  digest. Transient hard-link or metadata changes therefore fail closed even
+  when content is restored.
+- Files: `packages/desktop/src/main/book/preparationManager.ts`,
+  `packages/desktop/test/unit/specs/book-preparation-manager.spec.ts`,
+  `docs/PREPARE_BOOK.md`, and this log.
+- Tests: preparation manager passed 29/29; heading, manager,
+  preparation-store, and reader passed 164/164; desktop full unit passed
+  serially across 68 files and 1139/1139 tests; Muya full unit passed serially
+  across 213 files and 1454/1454 tests; and the Node-without-browser-globals
+  analyzer smoke passed. Desktop typecheck and production build passed, with a
+  1,832,945-byte main bundle containing the analyzer. The actual image-alt
+  Prepare Electron scenario passed 1/1 in 8.8 seconds. The no-environment RC
+  emitted its fixed SKIP status and all six privacy/cleanup self-tests passed.
+  The independently run authorized hardened RC passed with the exact aggregate
+  fields `product_ready=false`, `book_structure_ready=true`,
+  `visual_fidelity=false`, and `adaptation_gaps=1`; original-manifest equality,
+  validated cleanup, privacy checks, and zero retained artifacts were
+  confirmed. The first intentionally parallel broad run hit unrelated
+  five-second resource-contention timeouts; the required serial reruns above
+  passed. Scoped ESLint, Prettier, and `git diff --check` passed.
+- Key decisions: the create contract remains
+  `O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_NONBLOCK`; content is read only
+  through a separately opened safe descriptor after matching it to the
+  original exclusive-create inode. Exact owned-inode cleanup reports
+  `committed: false`; loss of that proof remains truthfully
+  committed/uncertain.
+- Unresolved: the documented abrupt-process partial create and platform
+  release-matrix requirements remain.
+- Git commit: not created; nothing was pushed.
+
+## 2026-07-30 — Phase 9C post-open zero-write boundary
+
+- User goal: prevent a root, ancestor, target, source, session, or cancellation
+  race after exclusive target creation from receiving canonical SUMMARY bytes.
+- Completed: after `O_EXCL` opens the target, preparation now keeps the
+  descriptor open and performs a second synchronous prewrite validation of the
+  exact lease/session generation, original root and parent realpath/inode,
+  case-folded and exact target pathname, pathname-to-descriptor identity, empty
+  regular single-link target state and mode, and the manuscript's complete
+  state and digest. Canonical writing starts in the same synchronous turn only
+  after that boundary succeeds. Prewrite cancellation remains able to win;
+  cancellation after canonical writing begins retains the critical/busy
+  contract. A failed prewrite removes only a still-empty pathname that proves
+  it is the same descriptor inode, without depending on the root still having
+  its original identity; otherwise it closes without pathname cleanup and
+  truthfully reports an uncertain empty residue. Semantic failure codes remain
+  specific to expiration, source/root change, or SUMMARY conflict.
+- Files: `packages/desktop/src/main/book/preparationManager.ts`,
+  `packages/desktop/test/unit/specs/book-preparation-manager.spec.ts`,
+  `docs/PREPARE_BOOK.md`, and this log.
+- Tests: preparation manager passed 34/34. Deterministic tests cover root and
+  ancestor symlink redirection before open, root symlink redirection after
+  open, pathname replacement, empty and attacker-grown targets, source and
+  session changes, prewrite cancellation, and critical cancellation after
+  writing begins. Desktop full unit passed in isolated serial mode across 68
+  files and 1144/1144 tests; Muya full unit passed in isolated serial mode
+  across 213 files and 1454/1454 tests. Desktop typecheck and production build
+  passed; the main bundle is 1,838,847 bytes. The image-alt actual Prepare
+  Electron scenario passed 1/1 in 4.8 seconds, and all six no-environment RC
+  privacy/cleanup self-tests passed. The authorized real-book source variable
+  was not present in this shell, so no new authorized RC was originated here;
+  prior independent authorized RC evidence remains recorded above. Scoped
+  ESLint, Prettier, and `git diff --check` passed. Earlier unconstrained broad
+  runs hit unrelated five-second resource-contention timeouts in PDF and Muya
+  entrypoint tests; each focused test and both required isolated serial full
+  reruns passed.
+- Key decisions: a prewrite failure never writes canonical content. Safe empty
+  cleanup is bound to the open descriptor inode and the exact pathname, not to
+  a now-stale root identity. Node exposes no `openat`-style
+  directory-descriptor-relative transaction, so the precheck, open, prewrite
+  validation, and write remain separate same-user syscalls.
+- Unresolved: a same-account process with equal filesystem authority can still
+  race individual syscalls. This is a documented P3 limitation; the tested
+  observable guarantee is that deterministic ancestor/root redirection and
+  post-open prewrite races receive zero canonical bytes.
+- Git commit: not created; nothing was pushed.
+
+## 2026-07-30 — Phase 9C Unicode Default Case Folding boundary
+
+- User goal: make every Prepare Book SUMMARY-conflict scan and exact-stem
+  manuscript selection use one locale-independent full Unicode case fold.
+- Completed: added a generated Unicode 16.0.0 Default Case Folding helper that
+  normalizes input to NFC and applies the official C and F mappings while
+  excluding simple S alternatives and Turkic T mappings. The initial async
+  SUMMARY scan, final synchronous pre-open scan, post-open prewrite scan, and
+  exact-stem automatic selection now share that helper. Ill-formed UTF-16 fails
+  closed. Added a generator pinned to the official source version, SHA-256, and
+  1,557 expected mappings; it rejects source hash/version mismatches, malformed
+  data, duplicates, invalid code points, surrogate mappings, and unexpected
+  counts. Its self-test covers the valid source and tamper, wrong-version,
+  malformed-line, and duplicate failures. The generated runtime is compact and
+  performs no network or filesystem access.
+- Files: `scripts/generateUnicodeCaseFold.mjs`,
+  `packages/desktop/src/common/book/unicodeCaseFold.ts`,
+  `packages/desktop/src/main/book/preparationManager.ts`,
+  `packages/desktop/test/unit/specs/book-unicode-case-fold.spec.ts`,
+  `packages/desktop/test/unit/specs/book-preparation-manager.spec.ts`,
+  `docs/PREPARE_BOOK.md`, and this log.
+- Tests: Unicode helper and preparation focused coverage passed 45/45; the
+  helper, manager, preparation store, and Reader focused set passed 177/177.
+  Cases include ASCII, long-s `ſummary.md`, `Straße`/`STRASSE`, Greek sigma and
+  final sigma, Kelvin sign/K, NFC/NFD equivalence, duplicate folded candidate
+  ambiguity, and conflicts at async, synchronous pre-open, and post-open
+  prewrite boundaries. Desktop full unit passed serially across 69 files and
+  1155/1155 tests; Muya full unit passed serially across 213 files and
+  1454/1454 tests. Desktop typecheck and production build passed; the main
+  bundle is 1,855,316 bytes. The Node-without-browser-globals smoke passed, the
+  image-alt Prepare Electron scenario passed 1/1 in 3.8 seconds, and all six
+  no-environment RC privacy/cleanup self-tests passed. Scoped ESLint, Prettier,
+  and `git diff --check` passed.
+- Evidence: the official Unicode source SHA-256 is
+  `6f1f9c588eb4a5c718d9e8f93b782685e5c7fec872cf05e8e6878053599e09bb`.
+  Fresh source generation plus repository Prettier reproduced the generated
+  16,784-byte table byte-for-byte; its final content hash was
+  `0cadb2c645b05f3366c6b8e7780b63f8ad01692a660ce5aac11f3f589b5147ec`.
+  The hardened generator self-test emitted
+  `UNICODE_CASE_FOLD_GENERATOR_SELF_TEST_PASS`.
+- Key decisions: no locale APIs, upper-to-lower heuristic, runtime download,
+  dependency, or lockfile change is used. Unicode data updates require an
+  explicit version, source-hash, mapping-count, generated-table, and regression
+  review.
+- Unresolved: characters assigned new fold mappings after Unicode 16.0.0 remain
+  identity-mapped until deliberate regeneration. This pinned Unicode-version
+  drift is the residual risk; updating silently at runtime would make
+  cross-platform conflict decisions non-reproducible.
+- Git commit: not created; nothing was pushed.
+
+## 2026-07-30 — Phase 9C automatic preparation lease cleanup
+
+- User goal: ensure a failed automatically selected manuscript never leaves an
+  inaccessible preparation lease that consumes the per-owner cap, while
+  preserving successful and explicit-selection leases.
+- Completed: the unique automatic-candidate path now wraps preparation in
+  `try/finally`. A returned failure or thrown exception releases the lease only
+  when the map still contains that exact lease object and its preparation ID,
+  owner, session ID, session generation, and preparation generation all match
+  the captured automatic attempt. A successful automatic preparation retains
+  its lease. A stale failed attempt cannot delete a concurrent or replacement
+  lease. Explicit-selection failures retain their lease so the user can choose
+  another source or close the preparation.
+- Files: `packages/desktop/src/main/book/preparationManager.ts`,
+  `packages/desktop/test/unit/specs/book-preparation-manager.spec.ts`,
+  `docs/PREPARE_BOOK.md`, and this log.
+- Tests: Unicode helper plus preparation manager passed 48/48; the helper,
+  manager, preparation store, and Reader focused set passed 180/180. Four
+  sequential automatic failures covering invalid headings, invalid UTF-8,
+  duplicate fragments, and missing source did not consume the owner cap; a
+  corrected fifth begin succeeded and closed. Concurrent failed and valid
+  automatic begins preserved the valid lease, and an explicit-selection
+  failure could subsequently select a valid source and close. Desktop
+  typecheck and production build passed; the main bundle is 1,855,918 bytes.
+  The image-alt Prepare Electron scenario passed 1/1 in 3.8 seconds. Scoped
+  ESLint, Prettier, and `git diff --check` passed.
+- Generator evidence: `docs/PREPARE_BOOK.md` now specifies the exact
+  generation command followed by the repository Prettier step. A fresh
+  official Unicode 16.0.0 source run through those two documented steps
+  reproduced the committed generated artifact byte-for-byte with SHA-256
+  `0cadb2c645b05f3366c6b8e7780b63f8ad01692a660ce5aac11f3f589b5147ec`.
+- Key decisions: cleanup is identity-bound rather than ID-only, and `finally`
+  covers both ordinary error results and unexpected throws. Formatting remains
+  an explicit deterministic repository step rather than adding a formatter
+  dependency or runtime formatting path to the generator.
+- Unresolved: no new issue. The pinned Unicode-version drift documented in the
+  preceding entry remains.
+- Git commit: not created; nothing was pushed.
+
+## 2026-07-30 — Phase 9C preparation cleanup on session LRU eviction
+
+- User goal: make per-owner session-cap eviction synchronously revoke Prepare
+  Book state, restore the preparation capacity slot, and prevent evicted
+  sessions' late work from affecting newer leases.
+- Completed: `BookSessionManager.registerSession` now revokes the oldest
+  session's preparation leases between arrangement and export cleanup, matching
+  the established refresh, close, and invalid-root ordering. Added
+  identity/currentness checks immediately after the deterministic pre-read
+  test boundary so a revoked begin or selection fails before reading. Wired
+  narrowly scoped preparation read and pre-open hooks through the session
+  manager for deterministic race tests. Regression coverage exceeds the
+  20-session owner cap, verifies oldest-first repeated eviction, restores the
+  four-lease owner slot, preserves another owner's session and lease across
+  eviction and owner cleanup, and proves late automatic begin, explicit
+  selection, and commit results cannot revive or clear a newer lease; the late
+  commit also publishes no `SUMMARY.md`.
+- Files: `packages/desktop/src/main/book/sessionManager.ts`,
+  `packages/desktop/src/main/book/preparationManager.ts`,
+  `packages/desktop/test/unit/specs/book-reader.spec.ts`, and this log.
+- Tests: Reader plus preparation manager passed 174/174; Unicode helper,
+  preparation manager, preparation store, and Reader passed 184/184. Desktop
+  typecheck and production build passed; the main bundle is 1,856,300 bytes.
+  The image-alt Prepare Electron scenario passed 1/1 in 4.6 seconds, and all
+  six no-environment RC privacy/cleanup self-tests passed. Scoped ESLint,
+  Prettier, and `git diff --check` passed.
+- Key decisions: eviction cleanup remains synchronous and ordered as search,
+  edits, arrangements, preparations, exports, then session deletion. These
+  revokers contain only internal generation, collection, and abort operations;
+  export descriptor close is already guarded, and no user hook or filesystem
+  operation runs in the eviction path, so no artificial throwing-revoker
+  behavior was added. Test hooks are inert unless explicitly supplied.
+- Unresolved: no new issue. The authorized hardened real-book RC was left to
+  the parent runner with access to the private source.
+- Git commit: not created; nothing was pushed.
+
+## 2026-07-30 — Phase 9C true session LRU and book-scoped preparation messages
+
+- User goal: make the 20-session owner cap evict the genuinely least recently
+  used session and prevent Prepare Book status or error messages from leaking
+  into the bookshelf, editor, or another book.
+- Completed: every successful owner-checked session lookup now moves that exact
+  session to the newest Map position, and every session registration or
+  same-ID replacement uses one delete-plus-set helper. Eviction still filters
+  by owner and therefore removes only that owner's oldest remaining session,
+  retaining the complete preparation cleanup and late-result protections.
+  Internal identity/currentness-only `sessions.get` checks deliberately do not
+  manufacture user recency, and owner/library cleanup loops keep direct
+  deletion without access-driven Map mutation. The renderer now clears
+  preparation status and error state when opening a picker or library,
+  entering a session, showing the bookshelf, or leaving for the editor. A late
+  committed result reports status only while the original reader session is
+  still active, preserving the same-session close result while preventing an
+  old book from repopulating messages after a switch.
+- Files: `packages/desktop/src/main/book/sessionManager.ts`,
+  `packages/desktop/src/renderer/src/store/books.ts`,
+  `packages/desktop/test/unit/specs/book-reader.spec.ts`,
+  `packages/desktop/test/unit/specs/book-preparation-store.spec.ts`, and this
+  log.
+- Tests: session, preparation manager, and preparation store passed 186/186;
+  Unicode helper, preparation manager, preparation store, and Reader passed
+  188/188. Coverage touches the original oldest session before overflow,
+  verifies the untouched next-oldest and then the following session are
+  evicted, proves refresh replacement recency and cross-owner isolation, and
+  retains preparation revocation/cap and late begin/select/commit coverage.
+  Renderer tests cover bookshelf, successful book switch, editor, cancelled
+  picker, same-session late commit status, and an old commit resolving after a
+  book switch. Desktop typecheck and production build passed; the main bundle
+  is 1,856,619 bytes. The image-alt Prepare Electron scenario passed 1/1 in
+  4.0 seconds, and all six no-environment RC privacy/cleanup self-tests passed.
+  Scoped ESLint passed.
+- Key decisions: Map delete-plus-set supplies explicit monotonic recency
+  without a second timestamp/counter structure or clock edge cases. Only
+  authenticated owner access and stored replacements touch recency; background
+  lease identity probes do not. Preparation success remains visible after a
+  user closes the panel in the same active book, but never follows the user
+  across a session or mode reset.
+- Unresolved: no new issue. The authorized hardened real-book RC remains with
+  the parent runner that has private-source access.
+- Git commit: not created; nothing was pushed.
+
+## 2026-07-30 — Phase 9C stale preparation commit message isolation
+
+- User goal: keep a delayed committed or durability-uncertain result truthful
+  in its original book without ever presenting that old result as an error or
+  success belonging to a newly opened book or the bookshelf.
+- Completed: the stale preparation commit branch now applies both successful
+  status and committed-error feedback through one exact context predicate. The
+  original Reader session must still be active, its preparation generation
+  must have advanced exactly once for the deliberate panel close, and no
+  replacement preparation may be active. A book switch, bookshelf transition,
+  additional close/reset, or overlapping preparation generation therefore
+  suppresses both old success and old error writes symmetrically. A current
+  commit and a commit that finishes after closing its panel in the same book
+  remain truthful and are never retried.
+- Files: `packages/desktop/src/renderer/src/store/books.ts`,
+  `packages/desktop/test/unit/specs/book-preparation-store.spec.ts`, and this
+  log.
+- Tests: preparation store passed 14/14. Unicode helper, preparation manager,
+  preparation store, and Reader passed 192/192. New deterministic cases cover
+  same-session late committed-error visibility, successful old-result
+  suppression after a book switch, committed-error suppression after opening
+  another book and after returning to the bookshelf, and an older committed
+  error losing to a newer preparation generation. Desktop typecheck and
+  production build passed; the main bundle is 1,856,619 bytes. The image-alt
+  Prepare Electron scenario passed 1/1 in 3.9 seconds, and all six
+  no-environment RC privacy/cleanup self-tests passed.
+- Key decisions: an exact `token + 1` generation boundary distinguishes the
+  supported same-book “closed while commit finished” journey from any
+  overlapping request or later reset. The global committed-error banner uses
+  the same scope predicate as the success status rather than acting as an
+  unscoped cross-book notification.
+- Unresolved: no new issue. A future application-wide notification system
+  could surface background outcomes with explicit book identity, but the
+  current Reader banner must remain scoped to its active session.
+- Git commit: not created; nothing was pushed.
+
+## 2026-07-30 — Phase 9C reader-request commit isolation and uncertain retry block
+
+- User goal: prevent an old preparation commit from changing Reader feedback
+  after same-session navigation or refresh, and prevent users from retrying
+  Prepare while a committed-uncertain SUMMARY still requires inspection.
+- Completed: preparation commit now captures the Reader request generation at
+  dispatch. A post-close result is visible only when that generation, the
+  original session, the exact one-step preparation close generation, Reader
+  mode, and absence of a replacement preparation all still match. Explicit
+  chapter navigation, search-result navigation, refresh, book switching,
+  bookshelf transitions, and overlapping preparation work therefore suppress
+  old success and committed-error feedback. A visible committed uncertainty
+  enters a session-scoped retry-blocked state, displays explicit folder
+  inspection and refresh guidance, blocks both the store action and Prepare
+  button, and never retries or removes anything automatically. Cancelling the
+  folder picker preserves that state. A successful refresh clears it and the
+  refreshed navigation source independently decides whether Prepare remains
+  available; actual context transitions also clear it.
+- Files: `packages/desktop/src/renderer/src/store/books.ts`,
+  `packages/desktop/src/renderer/src/components/bookWorkspace/index.vue`,
+  `packages/desktop/test/unit/specs/book-preparation-store.spec.ts`, and this
+  log.
+- Tests: preparation store passed 20/20. Unicode helper, preparation manager,
+  preparation store, and Reader passed 198/198. Deterministic cases cover
+  commit-close followed by explicit chapter reading, search-result activation,
+  and refresh; stale success/error symmetry; same-book post-close truth;
+  switch, bookshelf, and overlapping-generation isolation; no-retry store
+  dispatch; cancelled-picker guidance retention; and inferred/summary refresh
+  recomputation. Desktop typecheck and production build passed; the main
+  bundle is 1,856,619 bytes. The image-alt Prepare Electron scenario passed
+  1/1 in 3.8 seconds, and all six no-environment RC privacy/cleanup self-tests
+  passed.
+- Key decisions: the global Reader generation is the request identity because
+  every accepted navigation and refresh already advances it. The uncertainty
+  block is separate from ordinary transient preparation errors and survives
+  cancelled open intent, but it is cleared by verified refresh or a real
+  session/mode transition. Refresh is the explicit recovery boundary; no
+  speculative filesystem action is added in the renderer.
+- Unresolved: no new issue. An application-wide notification system could
+  later surface background outcomes with explicit book identity, but current
+  feedback remains session-scoped.
+- Git commit: not created; nothing was pushed.
+
+## 2026-07-30 — Phase 9C session uncertainty marker and refresh epoch
+
+- User goal: keep old commit banners request-scoped while retaining a
+  same-session no-retry safety marker after navigation, without allowing a
+  result older than a successful authoritative refresh to re-block the book.
+- Completed: the retry block is now keyed to the exact session independently
+  of the Reader request-scoped error/status predicate. A delayed committed
+  uncertainty in the same active session sets the marker even after chapter or
+  search navigation, while its obsolete banner remains suppressed. Cross-book
+  and bookshelf outcomes set neither. Commit captures a session verification
+  epoch; only successful refresh or a real context transition advances it.
+  Therefore error-then-refresh-success clears the marker, refresh-success-then
+  old-error remains clear, and failed refresh retains the marker and guidance.
+  The computed current-session marker continues to drive the Prepare store
+  guard and disabled UI, while cancelled picker intent preserves it.
+- Files: `packages/desktop/src/renderer/src/store/books.ts`,
+  `packages/desktop/test/unit/specs/book-preparation-store.spec.ts`, and this
+  log.
+- Tests: preparation store passed 22/22. Unicode helper, preparation manager,
+  preparation store, and Reader passed 200/200. The navigation matrix now
+  covers both success and committed-error after explicit chapter reading,
+  committed-error after search-result reading, and successful refresh before
+  a late error. It verifies that same-session navigation suppresses obsolete
+  messages but blocks Prepare dispatch, successful refresh in either ordering
+  clears/recomputes the marker, and failed refresh retains the block and
+  inspection guidance. Existing current, cancelled-picker, switch, bookshelf,
+  overlapping-generation, inferred-refresh, and summary-refresh cases remain
+  green. Desktop typecheck and production build passed; the main bundle is
+  1,856,619 bytes. The image-alt Prepare Electron scenario passed 1/1 in
+  3.9 seconds, and all six no-environment RC privacy/cleanup self-tests passed.
+- Key decisions: banner visibility uses Reader request generation, whereas
+  retry safety uses session identity plus a successful-refresh epoch. Only a
+  completed authoritative refresh advances verification; an attempted or
+  failed refresh cannot erase uncertainty. This separates message freshness
+  from filesystem-safety recovery without adding renderer filesystem access.
+- Unresolved: no new issue. Background outcomes remain intentionally silent
+  outside their original session.
+- Git commit: not created; nothing was pushed.
+
+## 2026-07-30 — Phase 9C accessible refresh-required guidance
+
+- User goal: make the session uncertainty no-retry state understandable to
+  keyboard and assistive-technology users even when the obsolete request
+  banner is intentionally suppressed.
+- Completed: the disabled Prepare button now uses `aria-describedby` to
+  reference one stable `book-preparation-refresh-required` explanation. When
+  current request guidance already exists, that live status owns the ID. When
+  request-scoped feedback is suppressed but the session marker remains, a
+  persistent visible non-live explanation owns it instead. These branches are
+  mutually exclusive, so there is no duplicate ID, duplicate text, or
+  conflicting live announcement. Clearing the marker through successful
+  refresh or context transition removes both the description and ARIA binding.
+  The hover title remains supplemental rather than the only explanation.
+- Files:
+  `packages/desktop/src/renderer/src/components/bookWorkspace/index.vue`,
+  `packages/desktop/test/unit/specs/book-preparation-a11y.spec.ts`, and this
+  log.
+- Tests: the new real-DOM accessibility test and preparation store passed
+  23/23. Unicode helper, preparation manager, preparation accessibility,
+  preparation store, and Reader passed 201/201. Because the desktop unit
+  runner has neither the Vue SFC plugin nor `@vue/test-utils`, the test extracts
+  the actual accessibility-sensitive nodes from `index.vue`, compiles them
+  with `@vue/compiler-dom`, and mounts the real render function into jsdom. It
+  verifies disabled state, the stable ARIA relationship, exactly one visible
+  description, non-live suppressed guidance, current `role=status` guidance,
+  and complete binding/description removal after clearing. Existing store
+  coverage verifies switch and refresh clearing. Desktop typecheck and
+  production build passed; the main bundle is 1,856,619 bytes. The image-alt
+  Prepare Electron scenario passed 1/1 in 3.9 seconds, and all six
+  no-environment RC privacy/cleanup self-tests passed.
+- Key decisions: persistent safety guidance is visible text, not tooltip-only.
+  Only current request guidance is a live region; already-established
+  session-safety state is not re-announced merely because navigation changed.
+  The test compiles real template source to avoid a static assertion or
+  handwritten duplicate template.
+- Unresolved: no new issue.
+- Git commit: not created; nothing was pushed.
+
+## 2026-07-30 — Phase 9C unified preparation product closure
+
+- User goal: close the remaining preparation accessibility, navigation,
+  candidate-privacy, stale-feedback, and RC release-truth gaps as one coherent
+  product boundary.
+- Completed: preparation now expands a collapsed Contents panel before opening,
+  focuses the active panel, and restores focus to the stable Prepare trigger
+  after Cancel or Escape. The complete workspace and preparation-panel
+  templates have a single live owner for progress/errors and committed
+  uncertainty; visible chapter counts and persistent refresh guidance are
+  static. Candidate DTOs expose only opaque ID, title, and deterministic
+  `Document N` labels, making duplicate titles distinguishable without paths or
+  bodies. Begin, select, and commit scope away stale Reader errors while the
+  committed-uncertain guard remains authoritative. RC public aggregates now
+  report `content_adaptation_gaps=1`, `release_matrix_ready=false`, and explicit
+  privacy-safe accepted P3 boundary identifiers; documentation does not claim
+  SVG is the only production blocker.
+- Files: `packages/desktop/src/shared/types/bookReader.ts`,
+  `packages/desktop/src/main/book/preparationManager.ts`,
+  `packages/desktop/src/renderer/src/components/bookWorkspace/BookPreparationPanel.vue`,
+  `packages/desktop/src/renderer/src/components/bookWorkspace/index.vue`,
+  `packages/desktop/src/renderer/src/store/books.ts`,
+  `packages/desktop/scripts/run-real-book-rc.mjs`,
+  `packages/desktop/test/unit/specs/book-preparation-manager.spec.ts`,
+  `packages/desktop/test/unit/specs/book-preparation-store.spec.ts`,
+  `packages/desktop/test/unit/specs/book-preparation-a11y.spec.ts`,
+  `packages/desktop/test/e2e/book-reader.spec.ts`, `docs/PREPARE_BOOK.md`,
+  `docs/REAL_BOOK_RC.md`, and this log.
+- Tests: focused preparation manager/store/full-template DOM passed 71/71;
+  complete desktop unit suite passed 1181/1181; typecheck, production build,
+  scoped ESLint, Prettier, and `git diff --check` passed. The no-environment RC
+  emitted the exact new SKIP aggregate and all six privacy/cleanup self-tests
+  passed. The Electron book-reader run passed 9/11, including the complete new
+  Prepare flow; two unrelated existing mobile-drawer and whole-book-search
+  cases timed out without an assertion failure and were rerun separately.
+- Key decisions: the candidate ordinal follows the already deterministic
+  preparation source order and is presentation-only. A current preparation
+  error is announced by the panel, committed uncertainty by the workspace
+  status, and established refresh guidance remains visible but non-live.
+  Product readiness stays false for the release matrix and accepted P3
+  boundaries in addition to the one SVG adaptation gap.
+- Unresolved: isolated reruns reproduced the two unrelated Electron timeouts.
+  Playwright API tracing identified the mobile case waiting on its existing
+  post-drawer **Edit** button because it is outside the 650px viewport; the
+  search case still supplies no assertion detail. The requested Prepare E2E
+  scenario itself is green.
+- Git commit: not created; nothing was pushed.
+
+## 2026-07-30 — Phase 9C RC preparation assertion and responsive header follow-up
+
+- User goal: diagnose the authorized RC failure without exposing private data
+  and resolve the two isolated Electron timeouts observed during unified
+  preparation closure.
+- Completed: inspection found the RC still querying the preparation count as
+  `role=status` after the accessibility contract intentionally made the visible
+  count static. The RC now separately verifies the visible chapter count and
+  exactly one `.sr-only[aria-live="polite"]` announcement. A temporary
+  allowlisted stage-only diagnostic was prototyped, privacy-tested, and then
+  removed because the deterministic selector regression was identified; no new
+  child output is retained. Playwright API tracing also showed both unrelated
+  Electron timeouts waiting for header buttons outside the viewport after the
+  Prepare action increased header width. Reader actions now wrap, and the
+  mobile contents drawer is positioned relative to the reader grid so a
+  multi-row header does not overlap it.
+- Files:
+  `packages/desktop/test/e2e/real-book-rc.spec.ts`,
+  `packages/desktop/src/renderer/src/components/bookWorkspace/index.vue`, and
+  this log.
+- Tests: the exact Prepare, mobile drawer, and whole-book search Electron
+  scenarios passed 3/3 in 9.4 seconds after rebuilding. Production build,
+  desktop typecheck, scoped ESLint, Prettier, the no-environment RC aggregate,
+  and all six permanent privacy/cleanup self-tests passed.
+- Key decisions: RC checks both halves of the accessibility contract instead of
+  restoring a duplicate status role. Stage diagnostics are unnecessary once
+  the failure is locally deterministic, so the privacy wrapper continues to
+  expose only its existing aggregate. Header controls wrap rather than becoming
+  horizontally unreachable.
+- Unresolved: the authorized private RC still requires one wrapper rerun by the
+  parent environment; no private path or content was accessed here.
+- Git commit: not created; nothing was pushed.
+
+## 2026-07-30 — Phase 9C P2#14 begin-failure ownership and success focus
+
+- User goal: make a thrown/rejected preparation begin visible before a panel
+  exists, and restore keyboard focus after a successful preparation commit
+  removes the panel and changes navigation.
+- Completed: an unexpected begin throw or rejected invoke now sets the
+  workspace Reader error only while its preparation generation, Reader mode,
+  and owning session remain current. The panel-less workspace therefore owns
+  one visible alert; a new begin clears it, and a late failure after session
+  change is silent. Preparation-panel progress announcements are suppressed
+  while its error alert is present, preventing two live owners. Successful
+  commit handling now waits for store/session navigation and Vue DOM update,
+  then focuses the first visible stable target in order: current chapter,
+  Contents, Arrange. Hidden/disconnected targets are skipped and the tested
+  desktop, collapsed, and mobile paths never leave focus on `body`.
+- Files: `packages/desktop/src/renderer/src/store/books.ts`,
+  `packages/desktop/src/renderer/src/components/bookWorkspace/index.vue`,
+  `packages/desktop/src/renderer/src/components/bookWorkspace/BookPreparationPanel.vue`,
+  `packages/desktop/src/renderer/src/components/bookWorkspace/bookPreparationFocus.ts`,
+  `packages/desktop/test/unit/specs/book-preparation-store.spec.ts`,
+  `packages/desktop/test/unit/specs/book-preparation-a11y.spec.ts`,
+  `packages/desktop/test/unit/specs/book-preparation-focus.spec.ts`,
+  `packages/desktop/test/e2e/book-reader.spec.ts`, and this log.
+- Tests: targeted store/full-SFC DOM/focus tests passed 31/31. The complete
+  desktop unit suite passed 1187/1187 across 71 files. Desktop typecheck,
+  production build, scoped ESLint, Prettier, and `git diff --check` passed.
+  Existing desktop Prepare plus collapsed mobile commit focus E2E passed 2/2
+  in 5.8 seconds after the final build. The no-environment RC aggregate and all
+  six permanent privacy/cleanup self-tests passed.
+- Key decisions: begin failures reuse the existing scoped Reader alert because
+  no preparation panel exists to own them. Commit focus is a renderer concern,
+  kept in a small DOM helper with explicit visibility checks; the store remains
+  independent of DOM timing. Committed-uncertain results do not run the success
+  focus path.
+- Unresolved: the parent still owns the authorized private RC rerun.
+- Git commit: not created; nothing was pushed.
+
+## 2026-07-30 — Phase 9C P2#15 exclusive operation live ownership
+
+- User goal: guarantee that Prepare, export, website, arrangement, and search
+  transitions cannot leave stale success feedback competing with the current
+  operation's live announcement, while preserving committed-uncertain truth.
+- Completed: Prepare begin/select/commit now clear stale export and website
+  success/error feedback. Export and website starts clear each other's feedback
+  plus ordinary Prepare feedback and Reader errors. Arrangement and search
+  starts clear the same transient feedback. A committed-uncertain session
+  blocks export/website in both store guards and UI; search may continue, but
+  converts the already-announced uncertainty to the existing visible static
+  refresh guidance while retaining the marker and committed error in state.
+  The workspace suppresses the old committed alert whenever that marker owns
+  the static guidance. Full compiled workspace/panel DOM coverage now walks
+  export success, website success, Prepare begin/select, begin rejection,
+  commit success, and committed uncertainty with exactly one live owner in
+  every reachable state.
+- Files: `packages/desktop/src/renderer/src/store/books.ts`,
+  `packages/desktop/src/renderer/src/components/bookWorkspace/index.vue`,
+  `packages/desktop/test/unit/specs/book-preparation-store.spec.ts`,
+  `packages/desktop/test/unit/specs/book-preparation-a11y.spec.ts`, and this log.
+- Tests: targeted preparation store plus full-SFC DOM passed 30/30. The complete
+  desktop unit suite passed 1189/1189 across 71 files. Desktop typecheck,
+  production build, scoped ESLint, Prettier, and `git diff --check` passed.
+  Prepare, collapsed-mobile focus, export, website, and whole-book search E2E
+  passed 5/5 in 13.2 seconds. The no-environment RC aggregate and all six
+  permanent privacy/cleanup self-tests passed.
+- Key decisions: committed uncertainty is never silently cleared to make room
+  for another output operation; those writes are blocked until authoritative
+  refresh. Search remains available because it is read-only, but its current
+  live region takes precedence over an uncertainty event that was already
+  announced, leaving the safety instruction visible and non-live.
+- Unresolved: the parent still owns the authorized private RC rerun.
+- Git commit: not created; nothing was pushed.
+
+## 2026-07-30 — Phase 9C P2#16 committed-uncertain workspace freeze
+
+- User goal: after a preparation commit reports committed uncertainty, freeze
+  every current-book operation except authoritative refresh or leaving/switching
+  the book, without losing the visible safety guidance or creating another live
+  announcement owner.
+- Completed: the session-scoped committed-uncertain marker now blocks Prepare,
+  Arrange, Search scheduling/execution/progress/result activation, Edit, export,
+  website generation, chapter/tree/external-link navigation, previous/next
+  navigation, and new reading-position persistence at store boundaries. Pending
+  debounced position writes are dropped when the marker is set. Toolbar,
+  book-home, tree chapter, and previous/next controls expose the same visible
+  `book-preparation-refresh-required` description and are disabled; `/` and
+  arrow-key entrypoints are also guarded. Refresh and bookshelf/session-switch
+  paths remain available. Purely local outline scrolling and tree disclosure
+  remain available because they perform no store or IPC operation and cannot
+  compete for the live region. The committed error, retry marker, and the single
+  visible refresh status remain unchanged by blocked attempts.
+- Files:
+  `packages/desktop/src/renderer/src/store/books.ts`,
+  `packages/desktop/src/renderer/src/components/bookWorkspace/index.vue`,
+  `packages/desktop/src/renderer/src/components/bookWorkspace/BookTreeNode.vue`,
+  `packages/desktop/test/unit/specs/book-preparation-store.spec.ts`,
+  `packages/desktop/test/unit/specs/book-preparation-a11y.spec.ts`, and this log.
+- Tests: targeted preparation store plus full-SFC accessibility tests passed
+  32/32. The complete desktop unit suite passed 1191/1191 across 71 files.
+  Desktop typecheck, production build, scoped ESLint, Prettier, and
+  `git diff --check` passed. The complete book-reader Electron E2E suite passed
+  12/12 in 28.5 seconds. The no-environment RC aggregate emitted its fixed SKIP
+  result and all six permanent privacy/cleanup self-tests passed.
+- Key decisions: “only refresh or leave/switch” is enforced at both UI and store
+  boundaries, including read-only Search and background reading-position writes,
+  because either would be a new current-session operation after an uncertain
+  filesystem commit. Store guards remain authoritative for keyboard, rendered
+  Markdown links, and any future menu caller; no separate LeafBook application
+  menu entrypoints exist in the current implementation.
+- Unresolved: the parent still owns the authorized private RC rerun; no private
+  path or content was accessed here.
+- Git commit: not created; nothing was pushed.
+
+## 2026-07-30 — Phase 9C P2#17 centralized session lifecycle finalization
+
+- User goal: finish the interrupted session lifecycle hardening so every
+  removal and replacement uses central helpers, retained edit leases rebind
+  safely, library removal and the per-owner cap revoke all dependent state,
+  and stale or repeated cleanup remains isolated and idempotent.
+- Completed: centralized direct `sessions` Map writes in touch, insert, delete,
+  and replacement-publication helpers. Public refresh now publishes its
+  already-invalidated replacement without revoking the old session twice;
+  private arrangement, preparation, and edit-save replacements still
+  invalidate exactly once. Edit-save replacement retains and atomically
+  rebinds only the saving lease, while `removeLibrary` and all removal
+  boundaries revoke the current session through the shared delete helper.
+  Added a source assertion that rejects direct session Map mutators outside
+  the helper block, exact old-versus-new replacement assertions, a table for
+  close/remove/owner-cleanup/cap idempotence, and repeated edit-save rebind
+  followed by cross-owner library-removal coverage. Existing preparation cap,
+  owner isolation, and deterministic late begin/select/commit tests remain
+  green.
+- Files: `packages/desktop/src/main/book/sessionManager.ts`,
+  `packages/desktop/test/unit/specs/book-reader.spec.ts`, and this log.
+- Tests: Reader passed 137/137; focused Unicode, preparation manager,
+  preparation store, and Reader passed 211/211. The complete desktop unit suite
+  passed 1198/1198 across 71 files. Desktop typecheck and production build
+  passed; the main bundle is 1,855.73 kB. The complete Reader Electron suite
+  passed 12/12 in 28.2 seconds. The no-environment RC aggregate emitted its
+  fixed privacy-safe SKIP result and all six permanent privacy/cleanup
+  self-tests passed. Scoped ESLint and Prettier passed, and `git diff --check`
+  passed.
+- Key decisions: public refresh uses an explicit publish-only helper because it
+  revokes at dispatch before any scan can race; all other replacements use the
+  invalidate-and-publish helper. Tests inspect old and replacement object
+  identity so a future duplicate revoke or accidental new-session revoke
+  cannot hide behind an otherwise successful DTO.
+- Unresolved: the authorized private real-book RC remains with the parent
+  environment; no private path or content was accessed.
+- Git commit: not created; nothing was pushed.
+
+## 2026-07-30 — Phase 9C P2#18 atomic refresh freeze
+
+- User goal: make public refresh an atomic authorization boundary so the
+  revoked session cannot acquire any new operation while its replacement scan
+  is pending, while preserving safe failure recovery, owner isolation, and an
+  accessible renderer freeze.
+- Completed: main now tracks the exact refreshing session object separately
+  from its public ownership lookup. Public refresh revokes leases once, marks
+  that object frozen before the scan starts, and uses a narrowly privileged
+  identity-only path for refresh internals. All ordinary read, link, search,
+  edit, arrangement, preparation, export, and website acquisition fails closed
+  during the window. Success publishes the replacement before clearing the old
+  marker; scan failure clears the marker and restores the old session without
+  restoring any lease. Repeated same-owner refresh shares the scan, other
+  owners cannot join it, unrelated owners remain usable, and owner close can
+  remove the frozen session so a late scan cannot publish an orphan.
+  Renderer state exposes `refreshing`, guards every current-book IPC entrypoint
+  and shortcut without waiting/replaying intent, preserves only the pre-refresh
+  reading-position flush, disables and describes current-book controls, leaves
+  the bookshelf exit available, and presents one visible `role=status`
+  refresh instruction without a competing loading announcement.
+- Files: `packages/desktop/src/main/book/sessionManager.ts`,
+  `packages/desktop/src/renderer/src/store/books.ts`,
+  `packages/desktop/src/renderer/src/components/bookWorkspace/index.vue`,
+  `packages/desktop/test/unit/specs/book-reader.spec.ts`,
+  `packages/desktop/test/unit/specs/book-preparation-a11y.spec.ts`, and this log.
+- Tests: focused lifecycle, preparation, store, and full-template accessibility
+  tests passed 230/230. The complete desktop unit suite passed 1211/1211 across
+  71 files. After the final single-live-owner and failed-refresh guidance
+  strengthening, Reader, preparation store, and full-template accessibility
+  passed 182/182. Desktop typecheck and production build passed; the main
+  bundle is 1,856.34 kB. The complete Reader Electron suite passed 12/12 in
+  27.9 seconds. The no-environment RC aggregate emitted its fixed privacy-safe
+  SKIP result and all six permanent privacy/cleanup self-tests passed. Scoped
+  ESLint, Prettier, and `git diff --check` passed.
+- Key decisions: the freeze is keyed by object identity rather than only the
+  reusable session ID. Close remains a lifecycle control allowed to target the
+  exact frozen object; ordinary authorization always rejects it. Renderer
+  actions are dropped rather than queued so user intent from the revoked model
+  can never replay against the replacement.
+- Unresolved: the authorized private real-book RC remains with the parent
+  environment; no private path or content was accessed.
+- Git commit: not created; nothing was pushed.
+
+## 2026-07-30 — Phase 9C P2#19 strict local UI freeze
+
+- User goal: make refresh and committed-uncertain states freeze local
+  current-book navigation as strictly as IPC-backed actions, including
+  recursive tree disclosure, chapter-outline scrolling, and Escape-driven
+  Contents collapse, while retaining leave, cancel, and authoritative refresh
+  behavior.
+- Completed: introduced one local navigation freeze boundary for refresh and
+  committed uncertainty. Contents and Outline controls now share the visible
+  freeze description and use guarded handlers. Chapter-outline anchors expose
+  disabled semantics, leave the tab order while frozen, and reject click,
+  Enter, and Space activation; `scrollToHeading` independently rejects frozen
+  calls. The fragment-restoration path has a narrow refresh-only bypass so the
+  authoritative replacement can restore its heading without weakening the
+  committed-uncertain boundary. Rendered chapter links, tree activation,
+  post-activation mobile collapse, and Escape Contents collapse also fail
+  closed. Every recursive tree toggle, group label, and chapter label now
+  inherits disabled/described state and uses a defensive guarded handler.
+  Added full-template refresh and committed-uncertainty assertions plus a
+  three-level recursive tree test covering disabled semantics and click,
+  Enter, and Space no-ops.
+- Files: `packages/desktop/src/renderer/src/components/bookWorkspace/BookTreeNode.vue`,
+  `packages/desktop/src/renderer/src/components/bookWorkspace/index.vue`,
+  `packages/desktop/test/unit/specs/book-preparation-a11y.spec.ts`, and this log.
+- Tests: focused Reader and full-template accessibility tests passed 157/157.
+  The complete desktop unit suite passed 1212/1212 across 71 files after the
+  final test strengthening. Desktop typecheck, production build, Prettier,
+  ESLint, and `git diff --check` passed; lint retained only existing warnings
+  and the existing module-type warning. The complete Reader Electron E2E suite
+  passed 12/12 in 29.1 seconds. The no-environment RC aggregate emitted its
+  fixed privacy-safe SKIP result, the opt-in real-book scenario skipped without
+  a private source, and all six permanent privacy/cleanup self-tests passed.
+- Key decisions: local disclosure and scrolling are frozen because they still
+  mutate UI state derived from a revoked or uncertain book model. Search and
+  panel closure remain allowed cleanup. The only frozen scroll bypass is
+  conditioned on active refresh, so it cannot operate merely because a caller
+  marks an operation internal.
+- Unresolved: the authorized private real-book RC remains with the parent
+  environment; no private path or content was accessed.
+- Git commit: not created; nothing was pushed.
+
+## 2026-07-30 — Phase 9C P2#20 rendered body-link freeze
+
+- User goal: make every rendered Markdown link expose and enforce the same
+  refresh and committed-uncertain freeze as the surrounding Reader controls,
+  including exact accessibility-state restoration, rerenders, pointer and
+  keyboard input, and focus management.
+- Completed: added an explicit per-anchor snapshot manager for `tabindex`,
+  `aria-disabled`, and `aria-describedby`. A post-render watcher synchronizes
+  current body links whenever the content root, rendered HTML, freeze state, or
+  shared guidance owner changes. Frozen links retain their exact `href` and
+  `data-book-href` targets while becoming disabled, described, and absent from
+  sequential focus. Removed links are restored before their snapshots are
+  discarded, replacement links are frozen in the same render cycle, and
+  unfreeze or unmount restores every original attribute exactly. Delegated
+  pointer-down, click, Enter, and Space guards prevent activation and page
+  scrolling. Already-focused and programmatically focused frozen links move to
+  an enabled Bookshelf/Refresh control, with the content region as a final
+  stable fallback.
+- Files:
+  `packages/desktop/src/renderer/src/components/bookWorkspace/bookContentAnchorFreeze.ts`,
+  `packages/desktop/src/renderer/src/components/bookWorkspace/index.vue`,
+  `packages/desktop/test/unit/specs/book-content-anchor-freeze.spec.ts`,
+  `packages/desktop/test/unit/specs/book-preparation-a11y.spec.ts`, and this log.
+- Tests: the final focused Reader, full-template accessibility, and real
+  rendered-link suite passed 159/159. The complete desktop unit suite passed
+  1214/1214 across 72 files. Desktop typecheck, production build, Prettier,
+  ESLint, and `git diff --check` passed; lint retained only the existing 134
+  warnings and module-type warning. The complete Reader Electron E2E suite
+  passed 12/12 in 29.5 seconds. The no-environment RC aggregate emitted its
+  fixed privacy-safe SKIP result, the direct opt-in scenario skipped without a
+  private source, and all six permanent privacy/cleanup self-tests passed.
+- Key decisions: snapshot only attributes this freeze owns, never navigation
+  targets. Refresh and committed uncertainty use their existing single visible
+  guidance IDs. Pointer-down prevention closes the focus-before-click gap, and
+  delegated `focusin` handling closes programmatic-focus gaps that
+  `tabindex="-1"` alone cannot address. No IPC, preload, shared type, filesystem,
+  or network surface changed.
+- Unresolved: the authorized private real-book RC remains with the parent
+  environment; no private path or content was accessed.
+- Git commit: not created; nothing was pushed.
+
+## 2026-07-30 — Phase 9C P2#21 rendered-link focus-ref wiring
+
+- User goal: correct the rendered-link freeze focus target so committed
+  uncertainty lands on the real enabled Refresh control, while refreshing
+  lands on an allowed enabled control and never on disabled output actions or
+  the document body.
+- Completed: removed the misplaced `refreshButton` ref from the output controls
+  and attached its single occurrence to the button that invokes
+  `books.refresh`. Audited all workspace focus refs against their rendered
+  labels, visibility conditions, disabled conditions, and focus callers.
+  Strengthened the complete compiled-workspace mount with live Vue template
+  refs, the real anchor snapshot helper, post-render synchronization, and the
+  actual delegated focus handler. The test renders real external and fragment
+  body links, proves committed-uncertain programmatic focus lands on enabled
+  Refresh, proves refreshing focus lands on enabled Bookshelf, and explicitly
+  rejects disabled Export and `document.body` as destinations.
+- Files: `packages/desktop/src/renderer/src/components/bookWorkspace/index.vue`,
+  `packages/desktop/test/unit/specs/book-preparation-a11y.spec.ts`, and this log.
+- Tests: the final focused Reader, real-link, and complete-template suite passed
+  160/160. The complete desktop unit suite passed 1215/1215 across 72 files.
+  Desktop typecheck, production build, Prettier, ESLint, and
+  `git diff --check` passed; lint retained only the existing 134 warnings and
+  module-type warning. The complete Reader Electron E2E suite passed 12/12 in
+  29.2 seconds. The no-environment RC aggregate emitted its fixed privacy-safe
+  SKIP result, the direct opt-in scenario skipped without a private source, and
+  all six permanent privacy/cleanup self-tests passed.
+- Key decisions: the focus ref is validated by DOM identity and control label,
+  not merely by a non-null ref. Refresh remains the preferred recovery target
+  for committed uncertainty; during active refresh, its disabled state makes
+  the enabled Bookshelf leave action the correct fallback. The content region
+  remains only a final non-body fallback if neither allowed button is enabled.
+  No IPC, preload, shared type, filesystem, or network surface changed.
+- Unresolved: the authorized private real-book RC remains with the parent
+  environment; no private path or content was accessed.
+- Git commit: not created; nothing was pushed.
+
+## 2026-07-30 — Phase 9C final independent acceptance
+
+- User goal: close Phase 9C only after fresh independent code, privacy,
+  accessibility, lifecycle, filesystem, and product-quality reviews reported
+  no remaining P0–P2 findings, while keeping release-readiness limitations
+  explicit.
+- Completed: the final independent acceptance reported P0=0, P1=0, and P2=0.
+  It confirmed the actual Refresh and Bookshelf focus targets, rendered-link
+  freeze and exact attribute restoration, strict refresh and
+  committed-uncertain operation freezes, centralized session invalidation and
+  lease revocation, Node-safe heading analysis, Unicode 16.0 default case
+  folding, path-free preparation DTOs, create-only bounded SUMMARY writes,
+  single-owner live feedback, and the real Prepare Book workflow. No private
+  sample path, title, body text, or child-process output was retained or added
+  to repository output.
+- Files: the final Phase 9C worktree consists of the preparation manager and
+  typed IPC/preload/store/UI integration; shared heading and Unicode case-fold
+  helpers; Muya heading analysis; Reader rendering, focus, tree, and body-link
+  accessibility helpers; focused unit/Electron/real-book RC tests;
+  `docs/PREPARE_BOOK.md`, `docs/REAL_BOOK_RC.md`, the Unicode generator, and
+  this log.
+- Tests and gates: the final complete desktop unit run passed 1215/1215 across
+  72 files; the final focused Reader/rendered-link/template run passed
+  160/160; Muya's serial full suite passed 1454/1454 across 213 files; the
+  Reader Electron E2E suite passed 12/12. Desktop typecheck, production build,
+  scoped/full ESLint (zero errors; only existing warnings), Prettier, and
+  `git diff --check` passed. The built main bundle is 1,856,342 bytes and
+  contains the analyzer without a runtime Muya analyzer require. The
+  no-environment RC emitted its fixed SKIP aggregate and all six
+  privacy/cleanup self-tests passed.
+- Authorized real-book RC: the parent-authorized, privacy-safe wrapper passed
+  with the exact aggregate `RC_HARNESS_PASS product_ready=false
+visual_fidelity=false content_adaptation_gaps=1 release_matrix_ready=false
+accepted_p3_boundaries=crash_partial_create,same_user_syscall_path_boundary,unicode_casefold_pin_drift
+book_structure_ready=true code=0`. The harness verified the original sample
+  manifest unchanged, validated cleanup of its temporary writable copy, and
+  zero retained private artifacts. No private source path, title, prose,
+  fragment, token, manifest value, or child-process output was written to the
+  log or retained in the repository.
+- Key decisions: Phase 9C book-structure preparation is accepted, but the
+  application is not declared product/release ready. Inline-SVG visual
+  fidelity remains an adaptation gap; the Windows/Linux/macOS release matrix
+  is not complete; and the three named accepted P3 boundaries remain explicit.
+  Those readiness fields are not hidden or collapsed into a single SVG claim.
+- Artifacts and Git: generated `test-results` output was removed from the
+  project after verification. Dependency manifests, the lockfile, workflows,
+  and version files are unchanged. HEAD remains
+  `596ad81aced1f9924d2956f62e94c496a91c07d7`. No commit or push was created.

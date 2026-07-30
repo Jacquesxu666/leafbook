@@ -7,7 +7,9 @@
         class="tree-toggle"
         :aria-label="expanded ? `Collapse ${node.title}` : `Expand ${node.title}`"
         :aria-expanded="expanded"
-        @click="expanded = !expanded"
+        :disabled="disabled"
+        :aria-describedby="disabled ? describedBy : undefined"
+        @click="toggleExpanded"
       >
         {{ expanded ? '▾' : '▸' }}
       </button>
@@ -17,7 +19,9 @@
         class="tree-label"
         :class="{ current: isCurrent }"
         :aria-current="isCurrent ? 'page' : undefined"
-        @click="$emit('activate', node)"
+        :disabled="disabled"
+        :aria-describedby="disabled ? describedBy : undefined"
+        @click="activate"
       >
         {{ node.title }}
         <span v-if="node.type === 'external'" aria-hidden="true">↗</span>
@@ -26,7 +30,9 @@
         v-else-if="node.children.length"
         class="tree-label tree-group-label"
         :aria-expanded="expanded"
-        @click="expanded = !expanded"
+        :disabled="disabled"
+        :aria-describedby="disabled ? describedBy : undefined"
+        @click="toggleExpanded"
       >
         {{ node.title }}
       </button>
@@ -38,6 +44,8 @@
         :key="child.nodeId"
         :node="child"
         :current-node-id="currentNodeId"
+        :disabled="disabled"
+        :described-by="describedBy"
         @activate="$emit('activate', $event)"
       />
     </ul>
@@ -48,13 +56,26 @@
 import { computed, ref } from 'vue'
 import type { BookReaderNodeDto } from '@shared/types/bookReader'
 
-const props = defineProps<{ node: BookReaderNodeDto; currentNodeId: string | null }>()
-defineEmits<{ activate: [node: BookReaderNodeDto] }>()
+const props = defineProps<{
+  node: BookReaderNodeDto
+  currentNodeId: string | null
+  disabled?: boolean
+  describedBy?: string
+}>()
+const emit = defineEmits<{ activate: [node: BookReaderNodeDto] }>()
 const expanded = ref(true)
 const isCurrent = computed(
   () =>
     props.node.nodeId === props.currentNodeId || props.node.landingNodeId === props.currentNodeId
 )
+const toggleExpanded = (): void => {
+  if (props.disabled) return
+  expanded.value = !expanded.value
+}
+const activate = (): void => {
+  if (props.disabled) return
+  emit('activate', props.node)
+}
 </script>
 
 <style scoped>
@@ -67,6 +88,10 @@ const isCurrent = computed(
   border: 0;
   border-radius: 6px;
   cursor: pointer;
+}
+.book-tree-row button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
 }
 .tree-toggle,
 .tree-spacer {

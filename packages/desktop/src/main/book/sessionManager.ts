@@ -13,6 +13,7 @@ import {
 import Store from 'electron-store'
 import { loadBookFromDirectory, safelyReadBookChapter } from './filesystem'
 import { BookArrangementManager } from './arrangementManager'
+import { BookPreparationManager } from './preparationManager'
 import { resolveBookTarget } from 'common/book/path'
 import { validateBookExportHtml } from 'common/book/exportPolicy'
 import {
@@ -37,6 +38,9 @@ import type {
   BookArrangementDto,
   BookArrangementSaveDto,
   BookArrangementSaveRequestDto,
+  BookPreparationCommitRequestDto,
+  BookPreparationDto,
+  BookPreparationSaveDto,
   BookEditDto,
   BookEditFormatDto,
   BookEditSaveDto,
@@ -282,6 +286,8 @@ export interface BookSessionManagerTestHooks {
   beforeEditCommitCritical?: () => void | Promise<void>
   editCommitCriticalStarted?: () => void
   afterArrangementSave?: () => void | Promise<void>
+  beforePreparationRead?: () => void | Promise<void>
+  beforePreparationCommitOpen?: () => void | Promise<void>
   beforeExportParentPin?: () => void | Promise<void>
   afterExportSourcePass?: (pass: 1 | 2) => void | Promise<void>
   afterExportTempOpen?: (tempPath?: string) => void | Promise<void>
@@ -341,6 +347,15 @@ const structuredError = (
     | 'arrangement-too-large'
     | 'arrangement-commit-uncertain'
     | 'arrangement-write-failed'
+    | 'preparation-not-found'
+    | 'preparation-not-available'
+    | 'preparation-source-required'
+    | 'preparation-source-changed'
+    | 'preparation-too-large'
+    | 'preparation-invalid-headings'
+    | 'preparation-conflict'
+    | 'preparation-commit-uncertain'
+    | 'preparation-write-failed'
     | 'export-busy'
     | 'export-too-large'
     | 'export-source-changed'
@@ -893,6 +908,7 @@ const localHrefTarget = (
 export class BookSessionManager {
   private readonly store: Store<BookshelfSchema>
   private readonly sessions = new Map<string, BookSession>()
+  private readonly refreshingSessions = new Set<BookSession>()
   private shelfMutation = Promise.resolve()
   private readonly refreshes = new Map<string, Promise<BookReaderResult<BookSessionDto>>>()
   private readonly ownerGenerations = new Map<number, number>()
@@ -901,6 +917,7 @@ export class BookSessionManager {
   private readonly activeSearches = new Map<number, ActiveSearch>()
   private readonly editLeases = new Map<string, BookEditLease>()
   private readonly arrangements = new BookArrangementManager()
+  private readonly preparations: BookPreparationManager
   private readonly exportLeases = new Map<string, BookExportLease>()
   private readonly exportPreparations = new Set<number>()
   private searchCacheBytes = 0
@@ -920,6 +937,10 @@ export class BookSessionManager {
       name: 'bookshelf',
       cwd: userDataPath,
       defaults: { libraries: [] }
+    })
+    this.preparations = new BookPreparationManager({
+      beforePrepareRead: this.testHooks.beforePreparationRead,
+      beforeOpen: this.testHooks.beforePreparationCommitOpen
     })
     this.writeLibraries(this.readLibraries())
   }
@@ -986,32 +1007,97 @@ export class BookSessionManager {
   private async validateSessionRoot(
     sessionId: string,
     session: BookSession,
-    invalidate: boolean = true
+    invalidate: boolean = true,
+    allowRefreshing: boolean = false
   ): Promise<'valid' | 'invalid' | 'revoked'> {
     const current = await this.identifyRoot(session.rootPath)
-    if (this.ownedSession(sessionId, session.ownerId) !== session) return 'revoked'
+    const owned = allowRefreshing
+      ? this.currentOwnedSession(sessionId, session.ownerId)
+      : this.ownedSession(sessionId, session.ownerId)
+    if (owned !== session) return 'revoked'
     const valid =
       current !== null &&
       current.realPath === session.rootIdentity.realPath &&
       current.dev === session.rootIdentity.dev &&
       current.ino === session.rootIdentity.ino
     if (!valid) {
-      if (invalidate) {
-        session.generation += 1
-        this.revokeSessionSearch(session)
-        this.revokeSessionEdits(sessionId)
-        this.arrangements.revokeSession(sessionId)
-        this.revokeSessionExports(sessionId)
-        this.sessions.delete(sessionId)
-      }
+      if (invalidate) this.deleteSession(sessionId, session)
       return 'invalid'
     }
     return 'valid'
   }
 
-  private ownedSession(sessionId: string, ownerId: number): BookSession | null {
+  private currentOwnedSession(sessionId: string, ownerId: number): BookSession | null {
     const session = this.sessions.get(sessionId)
     return session?.ownerId === ownerId ? session : null
+  }
+
+  private ownedSession(sessionId: string, ownerId: number): BookSession | null {
+    const session = this.currentOwnedSession(sessionId, ownerId)
+    if (!session || this.refreshingSessions.has(session)) return null
+    this.touchSession(sessionId, session)
+    return session
+  }
+
+  private touchSession(sessionId: string, session: BookSession): void {
+    if (this.sessions.get(sessionId) !== session) return
+    this.sessions.delete(sessionId)
+    this.sessions.set(sessionId, session)
+  }
+
+  private insertSession(session: BookSession): void {
+    this.sessions.set(session.dto.sessionId, session)
+  }
+
+  private revokeSessionLeases(
+    sessionId: string,
+    session: BookSession,
+    retainedEdit?: BookEditLease
+  ): void {
+    this.revokeSessionSearch(session)
+    this.revokeSessionEdits(sessionId, retainedEdit)
+    this.arrangements.revokeSession(sessionId)
+    this.preparations.revokeSession(sessionId)
+    this.revokeSessionExports(sessionId)
+  }
+
+  private invalidateSession(
+    sessionId: string,
+    session: BookSession,
+    retainedEdit?: BookEditLease
+  ): boolean {
+    if (this.sessions.get(sessionId) !== session) return false
+    session.generation += 1
+    this.revokeSessionLeases(sessionId, session, retainedEdit)
+    return true
+  }
+
+  private deleteSession(sessionId: string, session: BookSession): boolean {
+    if (!this.invalidateSession(sessionId, session)) return false
+    this.sessions.delete(sessionId)
+    return true
+  }
+
+  private replaceSession(
+    sessionId: string,
+    session: BookSession,
+    replacement: BookSession,
+    retainedEdit?: BookEditLease
+  ): boolean {
+    if (!this.invalidateSession(sessionId, session, retainedEdit)) return false
+    return this.publishSessionReplacement(sessionId, session, replacement)
+  }
+
+  private publishSessionReplacement(
+    sessionId: string,
+    session: BookSession,
+    replacement: BookSession
+  ): boolean {
+    if (this.sessions.get(sessionId) !== session) return false
+    replacement.generation = session.generation
+    this.sessions.delete(sessionId)
+    this.sessions.set(sessionId, replacement)
+    return true
   }
 
   private ownerGeneration(ownerId: number): number {
@@ -1025,17 +1111,13 @@ export class BookSessionManager {
   cleanupOwner(ownerId: number): void {
     this.ownerGenerations.set(ownerId, this.ownerGeneration(ownerId) + 1)
     for (const [sessionId, session] of this.sessions) {
-      if (session.ownerId === ownerId) {
-        session.generation += 1
-        this.revokeSessionSearch(session)
-        this.revokeSessionEdits(sessionId)
-        this.sessions.delete(sessionId)
-      }
+      if (session.ownerId === ownerId) this.deleteSession(sessionId, session)
     }
     for (const lease of this.editLeases.values()) {
       if (lease.ownerId === ownerId) this.revokeEditLease(lease)
     }
     this.arrangements.cleanupOwner(ownerId)
+    this.preparations.cleanupOwner(ownerId)
     for (const lease of this.exportLeases.values()) {
       if (lease.ownerId === ownerId) this.revokeExport(lease)
     }
@@ -1352,18 +1434,13 @@ export class BookSessionManager {
   }
 
   private registerSession(session: BookSession): BookSessionDto {
-    this.sessions.set(session.dto.sessionId, session)
+    this.insertSession(session)
     const ownerId = session.ownerId
     const owned = [...this.sessions].filter(([, session]) => session.ownerId === ownerId)
     while (owned.length > MAX_SESSIONS) {
       const oldest = owned.shift()
       if (!oldest) break
-      oldest[1].generation += 1
-      this.revokeSessionSearch(oldest[1])
-      this.revokeSessionEdits(oldest[0])
-      this.arrangements.revokeSession(oldest[0])
-      this.revokeSessionExports(oldest[0])
-      this.sessions.delete(oldest[0])
+      this.deleteSession(oldest[0], oldest[1])
     }
     return session.dto
   }
@@ -1373,7 +1450,7 @@ export class BookSessionManager {
     ownerId: number = 0
   ): Promise<BookReaderResult<BookSessionDto>> {
     if (!validOpaqueId(sessionId)) return error('invalid-request', 'Invalid session identifier.')
-    const initial = this.ownedSession(sessionId, ownerId)
+    const initial = this.currentOwnedSession(sessionId, ownerId)
     if (!initial) {
       return error('session-not-found', 'This book session has expired.')
     }
@@ -1383,7 +1460,7 @@ export class BookSessionManager {
       const result = await inFlight
       if (
         !this.ownerIsCurrent(ownerId, ownerGeneration) ||
-        (!this.ownedSession(sessionId, ownerId) &&
+        (!this.currentOwnedSession(sessionId, ownerId) &&
           (result.ok || result.error.code !== 'book-unavailable'))
       ) {
         return error('session-not-found', 'This book session has expired.')
@@ -1393,18 +1470,18 @@ export class BookSessionManager {
     // A public refresh is an explicit revocation boundary. It must never share
     // the save-owned refresh capability below: starting it invalidates every
     // edit lease before any scan await can race a pending save.
-    initial.generation += 1
+    if (!this.invalidateSession(sessionId, initial)) {
+      return error('session-not-found', 'This book session has expired.')
+    }
+    this.refreshingSessions.add(initial)
     const sessionGeneration = initial.generation
-    this.revokeSessionEdits(sessionId)
-    this.arrangements.revokeSession(sessionId)
-    this.revokeSessionExports(sessionId)
     const operation = this.refreshSession(sessionId, ownerId, initial, sessionGeneration)
     this.refreshes.set(sessionId, operation)
     try {
       const result = await operation
       if (
         !this.ownerIsCurrent(ownerId, ownerGeneration) ||
-        (!this.ownedSession(sessionId, ownerId) &&
+        (!this.currentOwnedSession(sessionId, ownerId) &&
           (result.ok || result.error.code !== 'book-unavailable'))
       ) {
         return error('session-not-found', 'This book session has expired.')
@@ -1412,6 +1489,7 @@ export class BookSessionManager {
       return result
     } finally {
       if (this.refreshes.get(sessionId) === operation) this.refreshes.delete(sessionId)
+      this.refreshingSessions.delete(initial)
     }
   }
 
@@ -1422,12 +1500,12 @@ export class BookSessionManager {
     sessionGeneration: number
   ): Promise<BookReaderResult<BookSessionDto>> {
     if (
-      this.ownedSession(sessionId, ownerId) !== session ||
+      this.currentOwnedSession(sessionId, ownerId) !== session ||
       session.generation !== sessionGeneration
     ) {
       return error('session-not-found', 'This book session has expired.')
     }
-    const initialRoot = await this.validateSessionRoot(sessionId, session)
+    const initialRoot = await this.validateSessionRoot(sessionId, session, true, true)
     if (initialRoot === 'revoked') {
       return error('session-not-found', 'This book session has expired.')
     }
@@ -1437,12 +1515,12 @@ export class BookSessionManager {
     this.revokeSessionSearch(session)
     const result = await this.loadBook(session.rootPath)
     if (
-      this.ownedSession(sessionId, ownerId) !== session ||
+      this.currentOwnedSession(sessionId, ownerId) !== session ||
       session.generation !== sessionGeneration
     ) {
       return error('session-not-found', 'This book session has expired.')
     }
-    const refreshedRoot = await this.validateSessionRoot(sessionId, session)
+    const refreshedRoot = await this.validateSessionRoot(sessionId, session, true, true)
     if (refreshedRoot === 'revoked') {
       return error('session-not-found', 'This book session has expired.')
     }
@@ -1453,7 +1531,7 @@ export class BookSessionManager {
       return error('book-unavailable', 'LeafBook could not safely refresh this book.')
     }
     if (
-      this.ownedSession(sessionId, ownerId) !== session ||
+      this.currentOwnedSession(sessionId, ownerId) !== session ||
       session.generation !== sessionGeneration
     ) {
       return error('session-not-found', 'This book session has expired.')
@@ -1466,9 +1544,11 @@ export class BookSessionManager {
       session,
       sessionId
     )
-    replacement.generation = sessionGeneration
-    this.revokeSessionSearch(session)
-    this.sessions.set(sessionId, replacement)
+    // Public refresh invalidated this exact session before the scan started.
+    // Publish without revoking the old object a second time.
+    if (!this.publishSessionReplacement(sessionId, session, replacement)) {
+      return error('session-not-found', 'This book session has expired.')
+    }
     return {
       ok: true,
       value: replacement.dto
@@ -1477,16 +1557,14 @@ export class BookSessionManager {
 
   closeSession(sessionId: unknown, ownerId: number = 0): BookReaderResult<true> {
     if (!validOpaqueId(sessionId)) return error('invalid-request', 'Invalid session identifier.')
-    const session = this.ownedSession(sessionId, ownerId)
+    // Closing is a lifecycle control, not an operation acquisition. It must be
+    // able to remove the exact frozen session so leaving during refresh cannot
+    // publish an orphaned replacement afterward.
+    const session = this.currentOwnedSession(sessionId, ownerId)
     if (!session) {
       return error('session-not-found', 'This book session has expired.')
     }
-    session.generation += 1
-    this.revokeSessionSearch(session)
-    this.revokeSessionEdits(sessionId)
-    this.arrangements.revokeSession(sessionId)
-    this.revokeSessionExports(sessionId)
-    this.sessions.delete(sessionId)
+    this.deleteSession(sessionId, session)
     return { ok: true, value: true }
   }
 
@@ -1942,14 +2020,7 @@ export class BookSessionManager {
       }
       this.writeLibraries(libraries.filter((item) => item.libraryId !== libraryId))
       for (const [sessionId, session] of this.sessions) {
-        if (session.libraryId === libraryId) {
-          session.generation += 1
-          this.revokeSessionSearch(session)
-          this.revokeSessionEdits(sessionId)
-          this.arrangements.revokeSession(sessionId)
-          this.revokeSessionExports(sessionId)
-          this.sessions.delete(sessionId)
-        }
+        if (session.libraryId === libraryId) this.deleteSession(sessionId, session)
       }
       return { ok: true, value: true }
     })
@@ -1992,9 +2063,9 @@ export class BookSessionManager {
     this.editLeases.delete(lease.editId)
   }
 
-  private revokeSessionEdits(sessionId: string): void {
+  private revokeSessionEdits(sessionId: string, retainedEdit?: BookEditLease): void {
     for (const lease of this.editLeases.values()) {
-      if (lease.sessionId === sessionId) this.revokeEditLease(lease)
+      if (lease.sessionId === sessionId && lease !== retainedEdit) this.revokeEditLease(lease)
     }
   }
 
@@ -2083,13 +2154,7 @@ export class BookSessionManager {
           session,
           sessionId
         )
-        replacement.generation = generation + 1
-        session.generation = replacement.generation
-        this.revokeSessionSearch(session)
-        this.revokeSessionEdits(sessionId)
-        this.arrangements.revokeSession(sessionId)
-        this.revokeSessionExports(sessionId)
-        this.sessions.set(sessionId, replacement)
+        if (!this.replaceSession(sessionId, session, replacement)) return saved
         saved.value.session = replacement.dto
         return saved
       } catch {
@@ -2105,6 +2170,121 @@ export class BookSessionManager {
 
   closeArrangement(arrangementId: unknown, ownerId: number = 0): BookReaderResult<true> {
     return this.arrangements.close(arrangementId, ownerId)
+  }
+
+  async beginPreparation(
+    sessionId: unknown,
+    ownerId: number = 0
+  ): Promise<BookReaderResult<BookPreparationDto>> {
+    if (!validOpaqueId(sessionId)) {
+      return error('invalid-request', 'Invalid book preparation request.')
+    }
+    const session = this.ownedSession(sessionId, ownerId)
+    if (!session) return error('session-not-found', 'This book session has expired.')
+    if (session.dto.navigationSource !== 'inferred' || session.summaryPath) {
+      return error(
+        'preparation-not-available',
+        'Only an inferred book without SUMMARY can be prepared.'
+      )
+    }
+    if ((await this.validateSessionRoot(sessionId, session, false)) !== 'valid') {
+      return error('book-unavailable', 'This book folder changed and cannot be prepared.')
+    }
+    const generation = session.generation
+    const seenPaths = new Set<string>()
+    const sources = session.readableNodeIds.flatMap((nodeId) => {
+      const target = session.targets.get(nodeId)
+      if (
+        !target ||
+        target.kind !== 'chapter' ||
+        target.path.includes('/') ||
+        target.path.includes('\\') ||
+        seenPaths.has(target.path)
+      ) {
+        return []
+      }
+      seenPaths.add(target.path)
+      return [{ nodeId, title: target.title, path: target.path }]
+    })
+    return this.preparations.begin({
+      ownerId,
+      sessionId,
+      sessionGeneration: generation,
+      rootPath: session.rootPath,
+      rootIdentity: session.rootIdentity,
+      rootName: path.basename(session.rootPath),
+      sources,
+      isCurrent: () =>
+        this.ownedSession(sessionId, ownerId) === session && session.generation === generation
+    })
+  }
+
+  selectPreparationSource(
+    preparationId: unknown,
+    sourceNodeId: unknown,
+    ownerId: number = 0
+  ): Promise<BookReaderResult<BookPreparationDto>> {
+    return this.preparations.select(preparationId, sourceNodeId, ownerId)
+  }
+
+  async commitPreparation(
+    request: BookPreparationCommitRequestDto,
+    ownerId: number = 0
+  ): Promise<BookReaderResult<BookPreparationSaveDto>> {
+    const sessionId = this.preparations.sessionIdFor(request.preparationId, ownerId)
+    if (!sessionId) {
+      return error('preparation-not-found', 'This preparation has expired.')
+    }
+    const session = this.ownedSession(sessionId, ownerId)
+    if (!session) return error('session-not-found', 'This book session has expired.')
+    const generation = session.generation
+    const committed = await this.preparations.commit(
+      request.preparationId,
+      request.revision,
+      ownerId
+    )
+    if (!committed.ok) return committed
+    const saved: BookPreparationSaveDto = {
+      preparationId: request.preparationId,
+      sourceNodeId: null,
+      session: null,
+      committed: true,
+      durabilityUncertain: committed.value.durabilityUncertain
+    }
+    try {
+      const result = await this.loadBook(session.rootPath)
+      if (
+        this.ownedSession(sessionId, ownerId) !== session ||
+        session.generation !== generation ||
+        result.diagnostics.some((item) => item.code === 'scan-root-error') ||
+        (await this.validateSessionRoot(sessionId, session, false)) !== 'valid'
+      ) {
+        return { ok: true, value: saved }
+      }
+      const replacement = this.createSession(
+        session.libraryId,
+        session.rootIdentity,
+        ownerId,
+        result,
+        session,
+        sessionId
+      )
+      if (!this.replaceSession(sessionId, session, replacement)) {
+        return { ok: true, value: saved }
+      }
+      saved.session = replacement.dto
+      saved.sourceNodeId =
+        replacement.chapterNodeByPath.get(committed.value.sourcePath) ??
+        replacement.dto.entryNodeId ??
+        null
+      return { ok: true, value: saved }
+    } catch {
+      return { ok: true, value: saved }
+    }
+  }
+
+  closePreparation(preparationId: unknown, ownerId: number = 0): BookReaderResult<true> {
+    return this.preparations.close(preparationId, ownerId)
   }
 
   private async pathAncestry(
@@ -2649,7 +2829,6 @@ export class BookSessionManager {
       session,
       lease.sessionId
     )
-    replacement.generation = sessionGeneration + 1
     const reboundNodeId = replacement.opaqueNodeIds.get(lease.stableKey)
     if (
       !reboundNodeId ||
@@ -2663,16 +2842,7 @@ export class BookSessionManager {
     // Consume only this save operation's private scan. Other leases are tied
     // to the replaced session object and are revoked; the saving lease is
     // rebound atomically with the replacement.
-    session.generation = replacement.generation
-    for (const candidate of [...this.editLeases.values()]) {
-      if (candidate.sessionId === lease.sessionId && candidate !== lease) {
-        this.revokeEditLease(candidate)
-      }
-    }
-    this.revokeSessionSearch(session)
-    this.arrangements.revokeSession(lease.sessionId)
-    this.revokeSessionExports(lease.sessionId)
-    this.sessions.set(lease.sessionId, replacement)
+    if (!this.replaceSession(lease.sessionId, session, replacement, lease)) return null
     lease.session = replacement
     lease.sessionGeneration = replacement.generation
     lease.nodeId = reboundNodeId

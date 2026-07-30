@@ -92,6 +92,201 @@ test('open book, navigate chapters, return to bookshelf, and preserve editor flo
   }
 })
 
+test('prepares an inferred manuscript without changing its bytes and exports it once', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'leafbook-e2e-prepare-'))
+  const destination = await fs.mkdtemp(path.join(os.tmpdir(), 'leafbook-e2e-prepare-output-'))
+  const manuscriptPath = path.join(root, 'manuscript.md')
+  const summaryPath = path.join(root, 'SUMMARY.md')
+  const output = path.join(destination, 'prepared-book.html')
+  const headings = Array.from({ length: 205 }, (_, index) => {
+    const ordinal = String(index + 1).padStart(3, '0')
+    const heading =
+      index === 102 ? `# ![Badge](badge.png) Chapter ${ordinal}` : `# Chapter ${ordinal}`
+    return `${heading}\n\nBody ${ordinal}.`
+  })
+  const manuscript = `${headings.join('\n\n')}\n\nLEAFBOOK_PHYSICAL_SOURCE_SENTINEL\n`
+  const expectedSummary = `# ${path.basename(root)}\n\n${Array.from({ length: 205 }, (_, index) => {
+    const ordinal = String(index + 1).padStart(3, '0')
+    const title = index === 102 ? `Badge Chapter ${ordinal}` : `Chapter ${ordinal}`
+    const fragment = index === 102 ? `badge-chapter-${ordinal}` : `chapter-${ordinal}`
+    return `- [${title}](manuscript.md#${fragment})`
+  }).join('\n')}\n`
+  await fs.writeFile(manuscriptPath, manuscript)
+  const originalHash = createHash('sha256').update(manuscript).digest('hex')
+
+  const firstLaunch = await launchElectron([], { suppressErrorDialog: true })
+  try {
+    await firstLaunch.app.evaluate(
+      ({ dialog }, values) => {
+        dialog.showOpenDialog = async () =>
+          ({
+            canceled: false,
+            filePaths: [values.root],
+            bookmarks: []
+          }) as Electron.OpenDialogReturnValue
+        dialog.showSaveDialog = async () =>
+          ({ canceled: false, filePath: values.output }) as Electron.SaveDialogReturnValue
+      },
+      { root, output }
+    )
+    await clickMenuById(firstLaunch.app, 'leafbookOpenBook')
+
+    for (let attempt = 0; attempt < 3; attempt++) {
+      if (attempt === 0) {
+        await firstLaunch.page.getByRole('button', { name: 'Contents' }).click()
+        await expect(firstLaunch.page.getByRole('button', { name: 'Contents' })).toHaveAttribute(
+          'aria-expanded',
+          'false'
+        )
+      }
+      await firstLaunch.page.getByRole('button', { name: 'Prepare Book' }).click()
+      const panel = firstLaunch.page.locator('.preparation-panel')
+      await expect(panel).toBeVisible()
+      await expect(panel).toBeFocused()
+      await expect(firstLaunch.page.getByRole('button', { name: 'Contents' })).toHaveAttribute(
+        'aria-expanded',
+        'true'
+      )
+      await panel.getByLabel('Manuscript').selectOption({ label: 'Document 1 — Chapter 001' })
+      await expect(panel.getByText('205 chapters found')).toBeVisible()
+      await expect(
+        panel.getByRole('list', { name: 'Prepared chapters' }).getByRole('listitem')
+      ).toHaveCount(200)
+      await expect(panel.getByText('5 more chapters are ready')).toBeVisible()
+      if (attempt === 1) {
+        await firstLaunch.page.keyboard.press('Escape')
+      } else {
+        await panel.getByRole('button', { name: 'Cancel' }).click()
+      }
+      await expect(panel).toHaveCount(0)
+      await expect(firstLaunch.page.getByRole('button', { name: 'Prepare Book' })).toBeFocused()
+      await expect
+        .poll(async () =>
+          fs.stat(summaryPath).then(
+            () => true,
+            () => false
+          )
+        )
+        .toBe(false)
+    }
+
+    await firstLaunch.page.getByRole('button', { name: 'Prepare Book' }).click()
+    let panel = firstLaunch.page.locator('.preparation-panel')
+    await panel.getByLabel('Manuscript').selectOption({ label: 'Document 1 — Chapter 001' })
+    await fs.writeFile(summaryPath, '# External race winner\n')
+    await panel.getByRole('button', { name: 'Create SUMMARY.md' }).click()
+    await expect(firstLaunch.page.getByRole('alert')).toContainText(
+      'SUMMARY was created before confirmation'
+    )
+    expect(await fs.readFile(summaryPath, 'utf8')).toBe('# External race winner\n')
+    expect(
+      createHash('sha256')
+        .update(await fs.readFile(manuscriptPath))
+        .digest('hex')
+    ).toBe(originalHash)
+
+    await panel.getByRole('button', { name: 'Cancel' }).click()
+    await fs.unlink(summaryPath)
+    await firstLaunch.page.getByRole('button', { name: 'Refresh' }).click()
+    await firstLaunch.page.getByRole('button', { name: 'Prepare Book' }).click()
+    panel = firstLaunch.page.locator('.preparation-panel')
+    await panel.getByLabel('Manuscript').selectOption({ label: 'Document 1 — Chapter 001' })
+    await panel.getByRole('button', { name: 'Create SUMMARY.md' }).click()
+    await expect(panel).toHaveCount(0)
+    await expect(
+      firstLaunch.page.getByRole('status').filter({ hasText: 'Arrange mode is now available' })
+    ).toBeVisible()
+    await expect(firstLaunch.page.locator(':focus')).toHaveText(/Chapter 001|Contents|Arrange/)
+    expect(await firstLaunch.page.evaluate(() => document.activeElement === document.body)).toBe(
+      false
+    )
+    expect(await fs.readFile(summaryPath, 'utf8')).toBe(expectedSummary)
+    expect(
+      createHash('sha256')
+        .update(await fs.readFile(manuscriptPath))
+        .digest('hex')
+    ).toBe(originalHash)
+
+    for (const title of ['Chapter 001', 'Badge Chapter 103', 'Chapter 205']) {
+      const navigation = firstLaunch.page.getByRole('navigation', { name: 'Book contents' })
+      await navigation.getByRole('button', { name: title, exact: true }).click()
+      await expect(navigation.locator('button[aria-current="page"]')).toHaveText(title)
+    }
+    await expect(firstLaunch.page.getByRole('button', { name: 'Arrange' })).toBeEnabled()
+    await firstLaunch.page.getByRole('button', { name: 'Export…' }).click()
+    await expect(
+      firstLaunch.page.getByRole('status').filter({ hasText: 'Exported prepared-book.html' })
+    ).toBeVisible()
+    const html = await fs.readFile(output, 'utf8')
+    expect(html.match(/LEAFBOOK_PHYSICAL_SOURCE_SENTINEL/g)).toHaveLength(1)
+    expect(html).not.toContain(root)
+    await expectNoRendererErrors(firstLaunch.app)
+  } finally {
+    await firstLaunch.app.close()
+  }
+
+  const secondLaunch = await launchElectron([], { suppressErrorDialog: true })
+  try {
+    await secondLaunch.app.evaluate(({ dialog }, selectedRoot) => {
+      dialog.showOpenDialog = async () =>
+        ({
+          canceled: false,
+          filePaths: [selectedRoot],
+          bookmarks: []
+        }) as Electron.OpenDialogReturnValue
+    }, root)
+    await clickMenuById(secondLaunch.app, 'leafbookOpenBook')
+    await expect(secondLaunch.page.getByRole('button', { name: 'Prepare Book' })).toHaveCount(0)
+    await expect(secondLaunch.page.getByRole('button', { name: 'Arrange' })).toBeEnabled()
+    await expect(secondLaunch.page.locator('.reader-header strong')).toHaveText('Chapter 001')
+    await expectNoRendererErrors(secondLaunch.app)
+  } finally {
+    await secondLaunch.app.close()
+    await fs.rm(root, { recursive: true, force: true })
+    await fs.rm(destination, { recursive: true, force: true })
+  }
+})
+
+test('restores focus after a collapsed mobile preparation commit', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'leafbook-e2e-prepare-focus-'))
+  const manuscript = path.join(root, `${path.basename(root)}.md`)
+  await fs.writeFile(manuscript, '# First chapter\n\nText.\n\n# Second chapter\n\nMore text.\n')
+  const { app, page } = await launchElectron([], { suppressErrorDialog: true })
+  try {
+    await app.evaluate(({ BrowserWindow }) => {
+      const window = BrowserWindow.getAllWindows()[0]
+      if (!window) throw new Error('Editor window was unavailable.')
+      window.setContentSize(650, 800)
+    })
+    await app.evaluate(({ dialog }, selectedRoot) => {
+      dialog.showOpenDialog = async () =>
+        ({
+          canceled: false,
+          filePaths: [selectedRoot],
+          bookmarks: []
+        }) as Electron.OpenDialogReturnValue
+    }, root)
+    await clickMenuById(app, 'leafbookOpenBook')
+    const contents = page.getByRole('button', { name: 'Contents' })
+    if ((await contents.getAttribute('aria-expanded')) === 'true') {
+      await contents.click()
+    }
+    await expect(contents).toHaveAttribute('aria-expanded', 'false')
+    await page.getByRole('button', { name: 'Prepare Book' }).click()
+    await expect(contents).toHaveAttribute('aria-expanded', 'true')
+    const panel = page.locator('.preparation-panel')
+    await expect(panel).toBeFocused()
+    await panel.getByRole('button', { name: 'Create SUMMARY.md' }).click()
+    await expect(panel).toHaveCount(0)
+    await expect(page.locator(':focus')).toHaveText(/First chapter|Contents|Arrange/)
+    expect(await page.evaluate(() => document.activeElement === document.body)).toBe(false)
+    await expectNoRendererErrors(app)
+  } finally {
+    await app.close()
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
 test('exports one offline HTML book with scoped Chinese heading navigation', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'leafbook-e2e-html-book-'))
   const destination = await fs.mkdtemp(path.join(os.tmpdir(), 'leafbook-e2e-html-output-'))

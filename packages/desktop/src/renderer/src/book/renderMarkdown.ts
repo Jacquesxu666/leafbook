@@ -2,11 +2,13 @@
 import { renderToStaticHTML } from '@muyajs/core'
 import { sanitize } from '@/util/dompurify'
 import type { Config } from 'dompurify'
+import { bookFragmentKey } from 'common/book/heading'
 
 export interface ReaderOutlineItem {
   id: string
   level: number
   text: string
+  fragment: string
 }
 
 export interface RenderedBookChapter {
@@ -58,6 +60,14 @@ export const renderBookMarkdown = async (markdown: string): Promise<RenderedBook
   const rendered = renderToStaticHTML(markdown)
   const clean = sanitize(rendered, READER_SANITIZE_CONFIG)
   const document = new DOMParser().parseFromString(clean, 'text/html')
+  const semanticHeadingTitles = new Map<HTMLHeadingElement, string>()
+  document.querySelectorAll<HTMLHeadingElement>('h1').forEach((heading) => {
+    const semantic = heading.cloneNode(true) as HTMLHeadingElement
+    semantic.querySelectorAll('img').forEach((image) => {
+      image.replaceWith(document.createTextNode(image.alt))
+    })
+    semanticHeadingTitles.set(heading, semantic.textContent?.trim() ?? '')
+  })
 
   document.querySelectorAll('*').forEach((element) => {
     for (const attribute of [
@@ -96,8 +106,11 @@ export const renderBookMarkdown = async (markdown: string): Promise<RenderedBook
   const usedHeadingIds = new Set<string>()
   const headingIdOccurrences = new Map<string, number>()
   document.querySelectorAll<HTMLHeadingElement>('h1,h2,h3,h4,h5,h6').forEach((heading, index) => {
-    const text = heading.textContent?.trim() || `Section ${index + 1}`
-    const baseId = heading.id || `leafbook-heading-${index + 1}`
+    const semanticText =
+      heading.tagName.toLocaleLowerCase() === 'h1' ? semanticHeadingTitles.get(heading) : undefined
+    const text = semanticText || heading.textContent?.trim() || `Section ${index + 1}`
+    const semanticFragment = semanticText ? bookFragmentKey(semanticText) : ''
+    const baseId = semanticFragment || heading.id || `leafbook-heading-${index + 1}`
     let occurrence = (headingIdOccurrences.get(baseId) ?? 0) + 1
     let id = occurrence === 1 ? baseId : `${baseId}-${occurrence}`
     while (usedHeadingIds.has(id)) {
@@ -107,7 +120,12 @@ export const renderBookMarkdown = async (markdown: string): Promise<RenderedBook
     headingIdOccurrences.set(baseId, occurrence)
     usedHeadingIds.add(id)
     heading.id = id
-    outline.push({ id, level: Number(heading.tagName.slice(1)), text })
+    outline.push({
+      id,
+      level: Number(heading.tagName.slice(1)),
+      text,
+      fragment: bookFragmentKey(text)
+    })
   })
   return { html: document.body.innerHTML, outline }
 }

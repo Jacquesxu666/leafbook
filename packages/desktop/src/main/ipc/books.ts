@@ -120,6 +120,16 @@ const boundedArrangementSave = (value: unknown): boolean => {
   )
 }
 
+const boundedPreparationCommit = (value: unknown): boolean => {
+  const request = value as { preparationId?: unknown; revision?: unknown } | null
+  return Boolean(
+    request &&
+    boundedId(request.preparationId) &&
+    typeof request.revision === 'string' &&
+    /^[a-f0-9]{64}$/.test(request.revision)
+  )
+}
+
 const boundedExportCommit = (value: unknown): boolean => {
   const request = value as { exportId?: unknown; html?: unknown } | null
   return Boolean(
@@ -209,6 +219,26 @@ export const registerBookHandlers = (): void => {
   ipcMain.handle('lb::books::close-arrangement', (event, arrangementId) =>
     isTrustedEditorSender(event) && boundedId(arrangementId)
       ? getManager().closeArrangement(arrangementId, event.sender.id)
+      : rejected()
+  )
+  ipcMain.handle('lb::books::begin-preparation', (event, sessionId) =>
+    isTrustedEditorSender(event) && boundedId(sessionId)
+      ? getManager().beginPreparation(sessionId, event.sender.id)
+      : rejected()
+  )
+  ipcMain.handle('lb::books::select-preparation-source', (event, preparationId, sourceNodeId) =>
+    isTrustedEditorSender(event) && boundedId(preparationId) && boundedId(sourceNodeId)
+      ? getManager().selectPreparationSource(preparationId, sourceNodeId, event.sender.id)
+      : rejected()
+  )
+  ipcMain.handle('lb::books::commit-preparation', (event, request) =>
+    isTrustedEditorSender(event) && boundedPreparationCommit(request)
+      ? getManager().commitPreparation(request, event.sender.id)
+      : rejected()
+  )
+  ipcMain.handle('lb::books::close-preparation', (event, preparationId) =>
+    isTrustedEditorSender(event) && boundedId(preparationId)
+      ? getManager().closePreparation(preparationId, event.sender.id)
       : rejected()
   )
   ipcMain.handle('lb::books::begin-export', (event, sessionId) =>

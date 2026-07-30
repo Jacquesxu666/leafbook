@@ -14,6 +14,7 @@ export default defineConfig({
   resolve: {
     alias: {
       '@': resolve(__dirname, 'src/renderer/src'),
+      'leafbook-muya-heading-analyzer': resolve(__dirname, '../muya/src/state/analyzeHeadings.ts'),
       common: resolve(__dirname, 'src/common'),
       muya: resolve(__dirname, '../muyajs'),
       '@shared': resolve(__dirname, 'src/shared'),

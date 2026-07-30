@@ -17,6 +17,9 @@ import type {
   BookArrangementDto,
   BookArrangementSaveDto,
   BookArrangementSaveRequestDto,
+  BookPreparationCommitRequestDto,
+  BookPreparationDto,
+  BookPreparationSaveDto,
   BookExportCommitRequestDto,
   BookExportSaveDto,
   BookExportSnapshotDto,
@@ -139,6 +142,15 @@ declare global {
         request: BookArrangementSaveRequestDto
       ): Promise<BookReaderResult<BookArrangementSaveDto>>
       closeArrangement(arrangementId: string): Promise<BookReaderResult<true>>
+      beginPreparation(sessionId: string): Promise<BookReaderResult<BookPreparationDto>>
+      selectPreparationSource(
+        preparationId: string,
+        sourceNodeId: string
+      ): Promise<BookReaderResult<BookPreparationDto>>
+      commitPreparation(
+        request: BookPreparationCommitRequestDto
+      ): Promise<BookReaderResult<BookPreparationSaveDto>>
+      closePreparation(preparationId: string): Promise<BookReaderResult<true>>
       beginExport(sessionId: string): Promise<BookReaderResult<BookExportSnapshotDto>>
       commitExport(
         request: BookExportCommitRequestDto
