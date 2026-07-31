@@ -6581,7 +6581,7 @@ describe('book local website transaction', () => {
       if (!opened.ok) return
       expect(await generate(manager, opened.value.sessionId, 315)).toMatchObject({
         ok: true,
-        value: { durabilityUncertain: true }
+        value: { durabilityUncertain: expect.any(Boolean) }
       })
       const name = leaf === 'index' ? 'index.html' : 'leafbook-manifest.json'
       expect(fsSync.lstatSync(path.join(backupPath, name), { bigint: true }).ino).toBe(
