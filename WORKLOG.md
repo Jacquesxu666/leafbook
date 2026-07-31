@@ -6444,6 +6444,16 @@ book_structure_ready=true code=0`. The harness verified the original sample
   publication, push, or `dist` file was read or changed.
 - Git commit: none.
 
+### 2026-07-31 Hosted PR validation and portability fixes
+
+- User goal: continue the LeafBook release process after redaction, commit, and push; validate the pushed branch through GitHub Actions.
+- Completed: created Draft PR #1, pushed cross-platform portability fixes, repaired SBOM inventory handling, and isolated CI dependency stores from stale cache indexes.
+- Files: `.github/actions/setup/action.yml`, `.github/workflows/validate-licenses.yml`, release scripts, desktop export logic, Muya image utility, and related release tests.
+- Tests: local targeted portability/release suites passed; hosted checks passed for licenses/SBOM, lint, Muya, website validation, and desktop unit tests in completed runs.
+- Key decision: retain no-secret installs and do not publish until all hosted platform builds and E2E jobs are green.
+- Remaining issues: final platform/E2E validation and the pnpm git-hosted `file-icons` license-index behavior remain before release tagging.
+- Git commits pushed: `057d213b`, `a3dc89c0`, `81f15de7`, `fb75f9a0`, `b105e89c`, `0177b634`, `7bcf21ab`, `8244dd0e`, `d7a48a4b`, `a51eba1d`, `00fb7d45`, `453cda42`.
+
 ### 2026-07-31 Phase 10D anti-pattern audit remediation
 
 - User goal: close the remaining release-evidence anti-patterns so a formal
