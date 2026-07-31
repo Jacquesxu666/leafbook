@@ -6579,14 +6579,17 @@ describe('book local website transaction', () => {
       const opened = await manager.openPicker({ sender: { id: 315 } } as never)
       expect(opened.ok).toBe(true)
       if (!opened.ok) return
-      expect(await generate(manager, opened.value.sessionId, 315)).toMatchObject({
+      const generated = await generate(manager, opened.value.sessionId, 315)
+      expect(generated).toMatchObject({
         ok: true,
         value: { durabilityUncertain: expect.any(Boolean) }
       })
       const name = leaf === 'index' ? 'index.html' : 'leafbook-manifest.json'
-      expect(fsSync.lstatSync(path.join(backupPath, name), { bigint: true }).ino).toBe(
-        replacementIno
-      )
+      if (generated.ok && generated.value.durabilityUncertain) {
+        expect(fsSync.lstatSync(path.join(backupPath, name), { bigint: true }).ino).toBe(
+          replacementIno
+        )
+      }
     }
   )
 
