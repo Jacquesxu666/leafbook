@@ -18,12 +18,11 @@ export default defineConfig({
     // hence, we need to "exclude" (in order to NOT externalise) ESonly modules so that they can be converted to commonJS and can be required() afterwards correctly
     build: {
       externalizeDeps: {
-        // Bundle electron-store + plist inline so they are available as a
-        // CommonJS require() after electron-vite converts the main process
-        // output. plist 5 ships ESM-only (no CJS `exports` entry), so leaving
-        // it externalized makes the main process `require('plist')` throw
-        // ERR_PACKAGE_PATH_NOT_EXPORTED at startup.
-        exclude: ['electron-store', 'plist'],
+        // Bundle electron-store, plist, and marked inline so they are available as
+        // transformed CommonJS after electron-vite converts the main output.
+        // plist 5 and marked 18 ship ESM-only, so leaving either externalized
+        // would make the main-process CommonJS bundle fail at startup.
+        exclude: ['electron-store', 'plist', 'marked'],
         include: ['native-keymap']
       }
     },
@@ -37,6 +36,10 @@ export default defineConfig({
         'leafbook-muya-heading-analyzer': resolve(
           __dirname,
           '../muya/src/state/analyzeHeadings.ts'
+        ),
+        'leafbook-markdown-tokenizer-contract': resolve(
+          __dirname,
+          '../muya/src/utils/marked/tokenizerContract.ts'
         ),
         common: resolve(__dirname, 'src/common'),
         muya: resolve(__dirname, '../muyajs'),

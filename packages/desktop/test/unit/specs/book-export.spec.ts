@@ -5,15 +5,20 @@ import {
   BOOK_EXPORT_CSP,
   BOOK_EXPORT_MAX_ATTRIBUTES,
   BOOK_EXPORT_MAX_DEPTH,
+  BOOK_EXPORT_MAX_IMAGE_SOURCE_LENGTH,
+  BOOK_EXPORT_MAX_IMAGE_TEXT_LENGTH,
+  BOOK_EXPORT_MAX_IMAGE_TOKEN_LENGTH,
   BOOK_EXPORT_MAX_TAGS,
   BOOK_EXPORT_MAX_TOKEN_LENGTH,
   BOOK_EXPORT_STYLE,
+  BOOK_WEBSITE_CSP,
   validateBookExportHtml
 } from 'common/book/exportPolicy'
 import type { BookExportSnapshotDto } from '@shared/types/bookReader'
 
 const snapshot = (): BookExportSnapshotDto => ({
   exportId: 'export-id-0000000001',
+  format: 'html',
   title: '离线书籍 <安全>',
   landingNodeId: null,
   nodes: [
@@ -50,7 +55,8 @@ const snapshot = (): BookExportSnapshotDto => ({
         '# 重复标题\n\n[去第二个标题](two.md#重复标题)\n\n# 重复标题\n\n<img src=x onerror=alert(1) style="background:url(https://bad)">',
       linkTargets: {
         'two.md#重复标题': { documentId: '2', fragment: '重复标题' }
-      }
+      },
+      resourceTargets: []
     },
     {
       documentId: '2',
@@ -58,12 +64,58 @@ const snapshot = (): BookExportSnapshotDto => ({
       title: '第二章',
       markdown:
         '# 重复标题\n\n[网络地址](https://example.invalid/x)\n\n![本地图](private.png)\n\n<script>alert(1)</script>',
-      linkTargets: {}
+      linkTargets: {},
+      resourceTargets: []
     }
   ]
 })
 
 describe('LeafBook single-file HTML export', () => {
+  it('binds only main-approved opaque image targets to the matching Markdown slots', async () => {
+    const value = snapshot()
+    const second = value.documents[1]
+    if (!second) throw new Error('The test snapshot is missing its second document.')
+    const target = 'data:image/png;base64,iVBORw0KGgo='
+    value.documents[1] = { ...second, resourceTargets: [target] }
+    const html = await generateBookExportHtml(value)
+
+    expect(
+      validateBookExportHtml(html, {
+        format: 'html',
+        expectedImageSources: [target]
+      })
+    ).toBe(true)
+    expect(validateBookExportHtml(html)).toBe(false)
+    const document = new DOMParser().parseFromString(html, 'text/html')
+    expect(document.querySelectorAll(`img[src="${target}"]`)).toHaveLength(1)
+    expect(html).not.toContain('private.png')
+  })
+
+  it('uses website CSP and accepts only the exact content-addressed asset path', async () => {
+    const value = snapshot()
+    const second = value.documents[1]
+    if (!second) throw new Error('The test snapshot is missing its second document.')
+    const target = `assets/${'a'.repeat(64)}.png`
+    value.format = 'website'
+    value.documents[1] = { ...second, resourceTargets: [target] }
+    const html = await generateBookExportHtml(value)
+
+    expect(html).toContain(BOOK_WEBSITE_CSP)
+    expect(html).not.toContain(BOOK_EXPORT_CSP)
+    expect(
+      validateBookExportHtml(html, {
+        format: 'website',
+        expectedImageSources: [target]
+      })
+    ).toBe(true)
+    expect(
+      validateBookExportHtml(html, {
+        format: 'website',
+        expectedImageSources: [`assets/${'b'.repeat(64)}.png`]
+      })
+    ).toBe(false)
+  })
+
   it('emits one body per physical document and rewrites only scoped offline links', async () => {
     const html = await generateBookExportHtml(snapshot())
     expect(validateBookExportHtml(html)).toBe(true)
@@ -220,6 +272,67 @@ describe('LeafBook single-file HTML export', () => {
     ]) {
       expect(validateBookExportHtml(unsafe)).toBe(false)
     }
+  })
+
+  it('permits only a bounded large img token and enforces exact image count, order, and source', () => {
+    const shell = (body: string): string =>
+      `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="${BOOK_EXPORT_CSP}"><title>Safe</title><style>${BOOK_EXPORT_STYLE}</style></head><body>${body}</body></html>`
+    const first = `data:image/png;base64,${'A'.repeat(100 * 1024)}`
+    const second = `data:image/png;base64,${'B'.repeat(
+      BOOK_EXPORT_MAX_IMAGE_SOURCE_LENGTH - 'data:image/png;base64,'.length
+    )}`
+    const boundaryText = 'x'.repeat(BOOK_EXPORT_MAX_IMAGE_TEXT_LENGTH)
+    const safe = shell(
+      `<img src="${first}" alt="one"><img src="${second}" alt="${boundaryText}" title="${boundaryText}">`
+    )
+    expect(BOOK_EXPORT_MAX_IMAGE_TOKEN_LENGTH).toBeGreaterThan(
+      BOOK_EXPORT_MAX_IMAGE_SOURCE_LENGTH + BOOK_EXPORT_MAX_IMAGE_TEXT_LENGTH * 2
+    )
+    expect(validateBookExportHtml(safe, { expectedImageSources: [first, second] })).toBe(true)
+    expect(validateBookExportHtml(safe, { expectedImageSources: [second, first] })).toBe(false)
+    expect(validateBookExportHtml(safe, { expectedImageSources: [first] })).toBe(false)
+    expect(validateBookExportHtml(safe, { expectedImageSources: [first, first] })).toBe(false)
+    const over = `${second}C`
+    expect(
+      validateBookExportHtml(shell(`<img src="${over}" alt="over">`), {
+        expectedImageSources: [over]
+      })
+    ).toBe(false)
+    expect(
+      validateBookExportHtml(
+        shell(`<img src="${first}" alt="${boundaryText}x" title="boundary">`),
+        { expectedImageSources: [first] }
+      )
+    ).toBe(false)
+    expect(
+      validateBookExportHtml(
+        shell(`<img src="${first}" alt="boundary" title="${boundaryText}x">`),
+        { expectedImageSources: [first] }
+      )
+    ).toBe(false)
+    expect(validateBookExportHtml(shell(`<div title="${'x'.repeat(100 * 1024)}"></div>`))).toBe(
+      false
+    )
+  })
+
+  it('validates only managed supported-resource placeholders in the exact mixed sequence', () => {
+    const shell = (body: string): string =>
+      `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="${BOOK_EXPORT_CSP}"><title>Safe</title><style>${BOOK_EXPORT_STYLE}</style></head><body>${body}</body></html>`
+    const source = `data:image/png;base64,${'A'.repeat(32)}`
+    const managed =
+      '<span class="leafbook-media-placeholder" data-leafbook-export-placeholder="image-0">missing</span>'
+    const unrelated = '<span class="leafbook-media-placeholder">unsupported raw image</span>'
+    const html = shell(`${managed}${managed}${unrelated}<img src="${source}" alt="safe">`)
+    expect(
+      validateBookExportHtml(html, {
+        expectedResourceSequence: ['placeholder:image-0', 'placeholder:image-0', source]
+      })
+    ).toBe(true)
+    expect(
+      validateBookExportHtml(html, {
+        expectedResourceSequence: ['placeholder:image-0', source, 'placeholder:image-0']
+      })
+    ).toBe(false)
   })
 
   it('fails closed on deterministic DOM-repair differential mutations', () => {

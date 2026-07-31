@@ -3,9 +3,9 @@ import type { IFrontmatterToken, ILexOption, TLexedToken } from './types';
 import { Marked } from 'marked';
 import compatibleTaskList from './compatibleTaskList';
 import footnoteExtension from './extensions/footnote';
-import mathExtension from './extensions/math';
 import fm from './frontMatter';
 import { DEFAULT_OPTIONS } from './options';
+import { leafBookTokenizerContract } from './tokenizerContract';
 import walkTokens from './walkTokens';
 
 export function lexBlock(
@@ -21,14 +21,7 @@ export function lexBlock(
     // any consumer that once passed `math: true` would get math parsing forever.
     const m = new Marked();
 
-    if (math) {
-        m.use(
-            mathExtension({
-                throwOnError: false,
-                useKatexRender: false,
-            }),
-        );
-    }
+    m.use(leafBookTokenizerContract({ math, superSubScript: false }));
 
     if (footnote) {
         m.use(footnoteExtension());

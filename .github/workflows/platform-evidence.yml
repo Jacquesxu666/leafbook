@@ -1,0 +1,488 @@
+name: Linux native evidence (manual or reusable)
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected-commit:
+        description: Full lowercase commit SHA resolved by the selected release tag
+        required: true
+        type: string
+  workflow_call:
+    inputs:
+      expected-commit:
+        description: Full lowercase commit SHA resolved by the selected release tag
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build-once:
+    name: Build four Linux carriers once (${{ matrix.arch }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            os: ubuntu-24.04
+          - arch: arm64
+            os: ubuntu-24.04-arm
+    steps:
+      - name: Bind invocation to an exact release tag commit
+        shell: bash
+        env:
+          EXPECTED_COMMIT: ${{ inputs.expected-commit }}
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF_TYPE:-}" != "tag" ]] ||
+            [[ ! "${GITHUB_REF_NAME:-}" =~ ^v[0-9A-Za-z.+-]+$ ]] ||
+            [[ ! "${GITHUB_SHA:-}" =~ ^[0-9a-f]{40}$ ]] ||
+            [[ ! "$EXPECTED_COMMIT" =~ ^[0-9a-f]{40}$ ]] ||
+            [[ "$GITHUB_SHA" != "$EXPECTED_COMMIT" ]]; then
+            echo 'BLOCKED: invocation is not bound to the selected release tag commit.' >&2
+            exit 1
+          fi
+
+      - name: Check out exact source revision
+        # actions/checkout v4.3.1
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.expected-commit }}
+
+      - name: Validate exact tag and package version
+        run: node scripts/validate-release-tag.mjs "$GITHUB_REF_NAME"
+
+      - name: Install native Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y icnsutils graphicsmagick xz-utils libx11-dev \
+            libxkbfile-dev gnome-keyring libsecret-1-dev libfontconfig-dev rpm \
+            cpio squashfs-tools
+
+      - name: Install Python 3.12
+        # actions/setup-python v5.6.0
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.12'
+
+      - name: Setup frozen dependency graph without repository credentials
+        uses: ./.github/actions/setup
+        with:
+          node-version: '24.14.1'
+
+      - name: Run postinstall and native rebuild without repository credentials
+        run: pnpm tsx scripts/postinstall.ts
+        env:
+          npm_config_user_agent: pnpm
+          USE_ELECTRON_CLANG: '0'
+
+      - name: Build exactly four architecture-qualified carriers without publishing
+        run: pnpm run build:linux:${{ matrix.arch }}
+
+      - name: Audit all four carriers and their common application payload
+        run: pnpm audit:platform-artifacts -- linux ${{ matrix.arch }}
+
+      - name: Stage exact same-byte carrier set
+        run: |
+          node scripts/stage-release-evidence.mjs linux ${{ matrix.arch }} dist evidence
+          node scripts/release-checksums.mjs verify evidence
+
+      - name: Upload carriers for fresh-runner validation
+        # actions/upload-artifact v4.6.2
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: leafbook-linux-${{ matrix.arch }}-native-candidate
+          retention-days: 7
+          if-no-files-found: error
+          path: evidence/*
+
+  fresh-portable-and-deb-validation:
+    name: Fresh AppImage, tar, and deb lifecycle (${{ matrix.arch }})
+    needs: build-once
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            os: ubuntu-24.04
+          - arch: arm64
+            os: ubuntu-24.04-arm
+    steps:
+      - name: Check out exact evidence verifier source
+        # actions/checkout v4.3.1
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.expected-commit }}
+
+      - name: Rebind fresh runner to exact release tag and commit
+        shell: bash
+        env:
+          EXPECTED_COMMIT: ${{ inputs.expected-commit }}
+        run: |
+          set -euo pipefail
+          [[ "${GITHUB_REF_TYPE:-}" == "tag" ]]
+          [[ "${GITHUB_SHA:-}" == "$EXPECTED_COMMIT" ]]
+          node scripts/validate-release-tag.mjs "$GITHUB_REF_NAME"
+
+      - name: Install runtime-only validation dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb libnss3 libatk1.0-0 libatk-bridge2.0-0 \
+            libcups2 libdrm2 libgtk-3-0 libgbm1 libasound2t64 desktop-file-utils shared-mime-info
+
+      - name: Download the protected same-byte carrier set
+        # actions/download-artifact v4.3.0
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: leafbook-linux-${{ matrix.arch }}-native-candidate
+          path: evidence
+
+      - name: Verify downloaded same-byte carrier manifest
+        run: node scripts/release-checksums.mjs verify evidence
+
+      - name: Observe each portable lifecycle stage after its checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${RUNNER_NAME:-}" || -z "${RUNNER_OS:-}" || -z "${RUNNER_ARCH:-}" ||
+            -z "${ImageOS:-}" || -z "${ImageVersion:-}" ]]; then
+            echo 'Hosted Linux runner identity is incomplete.' >&2
+            exit 1
+          fi
+          record_stage() {
+            local stage="$1"
+            node scripts/native-evidence-receipt.mjs stage-write \
+              --category portable --stage "$stage" --architecture '${{ matrix.arch }}' \
+              --tag "$GITHUB_REF_NAME" --commit "$GITHUB_SHA" \
+              --runner-label "$RUNNER_NAME" --runner-os "$RUNNER_OS" \
+              --runner-arch "$RUNNER_ARCH" --image-os "$ImageOS" \
+              --image-version "$ImageVersion" --carriers evidence \
+              --output "portable-$stage-observation.json"
+          }
+          version="$(node -p "require('./packages/desktop/package.json').version")"
+          root="$(mktemp -d "$RUNNER_TEMP/leafbook-tar.XXXXXX")"
+          tar -xzf "evidence/leafbook-linux-${{ matrix.arch }}-$version.tar.gz" -C "$root"
+          executable="$(find "$root" -type f -path '*/LeafBook/leafbook' -print -quit)"
+          [[ -n "$executable" && -x "$executable" ]]
+          appimage="evidence/leafbook-linux-${{ matrix.arch }}-$version.AppImage"
+          chmod u+x "$appimage"
+          record_stage install
+          Xvfb :99 -screen 0 1280x800x24 >tar-xvfb.log 2>&1 &
+          xvfb_pid=$!
+          trap 'kill "$xvfb_pid" 2>/dev/null || true' EXIT
+          DISPLAY=:99 "$executable" --no-sandbox >tar-smoke.log 2>&1 &
+          pid=$!
+          sleep 12
+          kill -0 "$pid"
+          kill "$pid"
+          wait "$pid" || true
+          kill "$xvfb_pid"
+          wait "$xvfb_pid" || true
+          trap - EXIT
+          Xvfb :100 -screen 0 1280x800x24 >appimage-xvfb.log 2>&1 &
+          xvfb_pid=$!
+          trap 'kill "$xvfb_pid" 2>/dev/null || true' EXIT
+          APPIMAGE_EXTRACT_AND_RUN=1 DISPLAY=:100 "$appimage" --no-sandbox >appimage-smoke.log 2>&1 &
+          pid=$!
+          sleep 12
+          kill -0 "$pid"
+          kill "$pid"
+          wait "$pid" || true
+          kill "$xvfb_pid"
+          wait "$xvfb_pid" || true
+          trap - EXIT
+          record_stage smoke
+          rm -rf "$root"
+          record_stage uninstall
+          [[ ! -e "$root" ]]
+          record_stage residue
+
+      - name: Install, run, integrate, and purge the exact deb bytes
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${RUNNER_NAME:-}" || -z "${RUNNER_OS:-}" || -z "${RUNNER_ARCH:-}" ||
+            -z "${ImageOS:-}" || -z "${ImageVersion:-}" ]]; then
+            echo 'Hosted Linux runner identity is incomplete.' >&2
+            exit 1
+          fi
+          record_stage() {
+            local stage="$1"
+            node scripts/native-evidence-receipt.mjs stage-write \
+              --category deb --stage "$stage" --architecture '${{ matrix.arch }}' \
+              --tag "$GITHUB_REF_NAME" --commit "$GITHUB_SHA" \
+              --runner-label "$RUNNER_NAME" --runner-os "$RUNNER_OS" \
+              --runner-arch "$RUNNER_ARCH" --image-os "$ImageOS" \
+              --image-version "$ImageVersion" --carriers evidence \
+              --output "deb-$stage-observation.json"
+          }
+          version="$(node -p "require('./packages/desktop/package.json').version")"
+          deb="$(realpath "evidence/leafbook-linux-${{ matrix.arch }}-$version.deb")"
+          sudo apt-get install -y "$deb"
+          [[ -x /opt/LeafBook/leafbook ]]
+          [[ -L /usr/bin/leafbook ]]
+          desktop-file-validate /usr/share/applications/leafbook.desktop
+          grep -q 'text/markdown' /usr/share/applications/leafbook.desktop
+          record_stage install
+          Xvfb :101 -screen 0 1280x800x24 >deb-xvfb.log 2>&1 &
+          xvfb_pid=$!
+          trap 'kill "$xvfb_pid" 2>/dev/null || true' EXIT
+          DISPLAY=:101 /opt/LeafBook/leafbook --no-sandbox >deb-smoke.log 2>&1 &
+          pid=$!
+          sleep 12
+          kill -0 "$pid"
+          kill "$pid"
+          wait "$pid" || true
+          kill "$xvfb_pid"
+          wait "$xvfb_pid" || true
+          trap - EXIT
+          record_stage smoke
+          sudo apt-get purge -y leafbook
+          record_stage uninstall
+          [[ ! -e /opt/LeafBook ]]
+          [[ ! -e /usr/bin/leafbook ]]
+          [[ ! -e /usr/share/applications/leafbook.desktop ]]
+          record_stage residue
+
+      - name: Generate strict portable and deb lifecycle reports on this runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          for category in portable deb; do
+            node scripts/native-evidence-receipt.mjs lifecycle-write \
+              --category "$category" --architecture '${{ matrix.arch }}' \
+              --tag "$GITHUB_REF_NAME" --commit "$GITHUB_SHA" \
+              --install-report "$category-install-observation.json" \
+              --smoke-report "$category-smoke-observation.json" \
+              --uninstall-report "$category-uninstall-observation.json" \
+              --residue-report "$category-residue-observation.json" \
+              --output "$category-lifecycle.json"
+          done
+          printf '%s\n' '{"policy":"not-applicable","subjects":[]}' > signature-report.json
+
+      - name: Upload runner-bound portable and deb lifecycle evidence
+        # actions/upload-artifact v4.6.2
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: leafbook-linux-${{ matrix.arch }}-portable-deb-report
+          retention-days: 14
+          if-no-files-found: error
+          path: |
+            portable-lifecycle.json
+            deb-lifecycle.json
+            signature-report.json
+
+  rpm-native-validation:
+    name: Fresh Fedora-container RPM lifecycle (${{ matrix.arch }})
+    needs: build-once
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            os: ubuntu-24.04
+          - arch: arm64
+            os: ubuntu-24.04-arm
+    steps:
+      - name: Check out exact evidence verifier source
+        # actions/checkout v4.3.1
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.expected-commit }}
+
+      - name: Rebind fresh runner to exact release tag and commit
+        shell: bash
+        env:
+          EXPECTED_COMMIT: ${{ inputs.expected-commit }}
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF_TYPE:-}" != "tag" ]] || [[ "${GITHUB_SHA:-}" != "$EXPECTED_COMMIT" ]]; then
+            echo 'BLOCKED: fresh Fedora validation is not bound to the selected tag commit.' >&2
+            exit 1
+          fi
+          node scripts/validate-release-tag.mjs "$GITHUB_REF_NAME"
+
+      - name: Download the exact carrier set
+        # actions/download-artifact v4.3.0
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: leafbook-linux-${{ matrix.arch }}-native-candidate
+          path: evidence
+
+      - name: Verify downloaded same-byte carrier manifest
+        run: node scripts/release-checksums.mjs verify evidence
+
+      - name: Pull the reviewed multiarch Fedora image and record its resolved ID
+        shell: bash
+        run: |
+          set -euo pipefail
+          image='fedora@sha256:99e203b80b1c3d8f7e161ec10a68fd02b081ef83a3963553e513c82846b97814'
+          docker pull "$image"
+          image_id="$(docker image inspect --format '{{.Id}}' "$image")"
+          [[ "$image_id" =~ ^sha256:[0-9a-f]{64}$ ]]
+          printf '{"image":"%s","imageDigest":"%s","imageId":"%s","kind":"fedora-container"}\n' \
+            "$image" 'sha256:99e203b80b1c3d8f7e161ec10a68fd02b081ef83a3963553e513c82846b97814' "$image_id" \
+            > environment-report.json
+
+      - name: Observe each RPM lifecycle stage inside fresh Fedora
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${RUNNER_NAME:-}" || -z "${RUNNER_OS:-}" || -z "${RUNNER_ARCH:-}" ||
+            -z "${ImageOS:-}" || -z "${ImageVersion:-}" ]]; then
+            echo 'Hosted RPM validation runner identity is incomplete.' >&2
+            exit 1
+          fi
+          record_stage() {
+            local stage="$1"
+            node scripts/native-evidence-receipt.mjs stage-write \
+              --category rpm --stage "$stage" --architecture '${{ matrix.arch }}' \
+              --tag "$GITHUB_REF_NAME" --commit "$GITHUB_SHA" \
+              --runner-label "$RUNNER_NAME" --runner-os "$RUNNER_OS" \
+              --runner-arch "$RUNNER_ARCH" --image-os "$ImageOS" \
+              --image-version "$ImageVersion" --carriers evidence \
+              --environment-report environment-report.json \
+              --output "rpm-$stage-observation.json"
+          }
+          version="$(node -p "require('./packages/desktop/package.json').version")"
+          image='fedora@sha256:99e203b80b1c3d8f7e161ec10a68fd02b081ef83a3963553e513c82846b97814'
+          container="leafbook-rpm-${GITHUB_RUN_ID}-${{ matrix.arch }}"
+          docker create --name "$container" \
+            --volume "$PWD/evidence:/evidence:ro" \
+            --env "RPM_PATH=/evidence/leafbook-linux-${{ matrix.arch }}-$version.rpm" \
+            "$image" sleep infinity
+          trap 'docker rm -f "$container" >/dev/null 2>&1 || true' EXIT
+          docker start "$container"
+          docker exec "$container" bash -euo pipefail -c '
+            dnf install -y xorg-x11-server-Xvfb gtk3 libXScrnSaver nss alsa-lib "$RPM_PATH"
+            test -x /opt/LeafBook/leafbook
+            test -L /usr/bin/leafbook
+            test -f /usr/share/applications/leafbook.desktop
+          '
+          record_stage install
+          docker exec "$container" bash -euo pipefail -c '
+            Xvfb :99 -screen 0 1280x800x24 >/tmp/xvfb.log 2>&1 &
+            xvfb_pid=$!
+            trap '\''kill "$xvfb_pid" 2>/dev/null || true'\'' EXIT
+            DISPLAY=:99 /opt/LeafBook/leafbook --no-sandbox >/tmp/leafbook.log 2>&1 &
+            app_pid=$!
+            sleep 12
+            kill -0 "$app_pid"
+            kill "$app_pid"
+            wait "$app_pid" || true
+          '
+          record_stage smoke
+          docker exec "$container" dnf remove -y leafbook
+          record_stage uninstall
+          docker exec "$container" bash -euo pipefail -c '
+            test ! -e /opt/LeafBook
+            test ! -e /usr/bin/leafbook
+            test ! -e /usr/share/applications/leafbook.desktop
+          '
+          record_stage residue
+          docker rm -f "$container"
+          trap - EXIT
+
+      - name: Generate strict RPM lifecycle report after dnf removal
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/native-evidence-receipt.mjs lifecycle-write \
+            --category rpm --architecture '${{ matrix.arch }}' \
+            --tag "$GITHUB_REF_NAME" --commit "$GITHUB_SHA" \
+            --install-report rpm-install-observation.json \
+            --smoke-report rpm-smoke-observation.json \
+            --uninstall-report rpm-uninstall-observation.json \
+            --residue-report rpm-residue-observation.json \
+            --output rpm-lifecycle.json
+
+      - name: Upload runner-bound Fedora RPM lifecycle evidence
+        # actions/upload-artifact v4.6.2
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: leafbook-linux-${{ matrix.arch }}-fedora-report
+          retention-days: 14
+          if-no-files-found: error
+          path: |
+            environment-report.json
+            rpm-lifecycle.json
+
+  final-native-receipt:
+    name: Final same-byte Linux receipt (${{ matrix.arch }})
+    needs:
+      - fresh-portable-and-deb-validation
+      - rpm-native-validation
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            os: ubuntu-24.04
+          - arch: arm64
+            os: ubuntu-24.04-arm
+    steps:
+      - name: Check out exact receipt generator source
+        # actions/checkout v4.3.1
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.expected-commit }}
+
+      - name: Download exact carrier bytes
+        # actions/download-artifact v4.3.0
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: leafbook-linux-${{ matrix.arch }}-native-candidate
+          path: evidence
+
+      - name: Download portable and deb lifecycle report
+        # actions/download-artifact v4.3.0
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: leafbook-linux-${{ matrix.arch }}-portable-deb-report
+          path: reports
+
+      - name: Download Fedora RPM lifecycle report
+        # actions/download-artifact v4.3.0
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: leafbook-linux-${{ matrix.arch }}-fedora-report
+          path: rpm-report
+
+      - name: Generate and verify complete same-byte Linux receipt
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/release-checksums.mjs verify evidence
+          node scripts/native-evidence-receipt.mjs write \
+            --platform linux --architecture '${{ matrix.arch }}' \
+            --tag "$GITHUB_REF_NAME" --commit "$GITHUB_SHA" \
+            --carriers evidence --signature-report reports/signature-report.json \
+            --portable-lifecycle reports/portable-lifecycle.json \
+            --deb-lifecycle reports/deb-lifecycle.json \
+            --rpm-lifecycle rpm-report/rpm-lifecycle.json \
+            --output leafbook-linux-${{ matrix.arch }}-native-evidence.json
+          node scripts/native-evidence-receipt.mjs verify \
+            --receipt leafbook-linux-${{ matrix.arch }}-native-evidence.json \
+            --carriers evidence
+
+      - name: Upload complete Linux native receipt
+        # actions/upload-artifact v4.6.2
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: leafbook-linux-${{ matrix.arch }}-native-receipt
+          retention-days: 14
+          if-no-files-found: error
+          path: leafbook-linux-${{ matrix.arch }}-native-evidence.json

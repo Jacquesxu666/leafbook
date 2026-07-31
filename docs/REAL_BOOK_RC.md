@@ -120,12 +120,75 @@ Track A opens the unchanged copy using inferred navigation. It verifies:
 - an in-memory search query without printing the token;
 - reading-position restore and the dirty-editor cancel/discard guard;
 - zero remote HTTP(S) requests;
-- safe Phase 8B HTML and Phase 8C two-file website outputs.
+- safe single-file HTML and manifest-bound website outputs, including
+  content-addressed assets when the source book contains accepted local images.
 
 The inferred view still demonstrates why preparation is useful: its landing
 and physical-file navigation do not expose the manuscript headings as chapters.
-Inline SVG is currently stripped. That is safe and remains a visual-fidelity
-observation, but it does not block the preparation workflow.
+Raw inline SVG remains stripped. Safe local `.svg` Markdown image references
+use the separately audited resource sanitizer; this does not enable inline SVG
+or change the preparation workflow.
+
+## Replayable safe-SVG real-book harness
+
+Phase 10B2 also provides a structure-independent harness for one local Markdown
+book file or a bounded book directory:
+
+```sh
+node packages/desktop/scripts/run-real-book-svg-harness.mjs \
+  --book-path /absolute/path/to/book-or-directory
+```
+
+The path is input only and is never copied into stdout, stderr, the repository,
+or the receipt. The harness reads regular single-link source files through
+`O_NOFOLLOW` descriptors and creates an internal path-and-content manifest.
+The snapshot copy and the before-manifest are one operation, and the copied
+manifest must match before the test starts. Stable source checks bind device,
+inode, mode, link count, size, nanosecond mtime, and nanosecond ctime.
+Unified entry, per-directory entry, depth, per-file byte, and total-byte
+budgets also cover empty-directory attacks. It copies the source into an
+owner-private `mktemp` root, derives an isolated Markdown
+book-under-test from a real source chapter, and injects only test-only safe and
+script/network-bearing SVG fixtures there.
+
+It launches the production Electron build, requires the safe image to decode
+from a Blob URL, and requires the malicious image to remain an inert
+placeholder with no inline SVG/script DOM, renderer errors, or HTTP requests.
+It also verifies that the isolated user-data draft directory and HMAC key are
+private, that the real source and copied-book HMAC identities differ, and that
+ordinary reading/export leaves no preparation draft file behind.
+In `finally`, it recomputes the original aggregate manifest and root identity,
+then validates the temporary root, owner marker, inode and canonical system
+temporary prefix before recursive cleanup. Public output is one filename-free
+JSON receipt containing a random run ID, explicit source/packaged mode, and
+fixed status booleans. It contains no source digest, file count, byte count,
+path, filename, content, or other content-derived or exact-scale field.
+Packaged mode additionally requires an explicit audit receipt and caller-
+supplied receipt hash, recomputes the receipt-bound app tree, and proves the
+selected executable belongs to that exact package. After Electron exits, it
+stable-reads and hashes the receipt again, rebuilds the app tree again, and
+compares the executable's device, inode, mode, link count, size, mtime, and
+ctime with the pre-launch snapshot. Its public artifact audit digest is
+package-derived, not manuscript-derived. Failures emit only a fixed
+privacy-suppressed JSON object; an opt-in diagnostic emits a fixed stage label,
+never private data.
+
+The checks bracket launch but cannot atomically bind the pathname check to the
+kernel's later executable open. That remaining check-to-exec interval is an
+accepted P3 limitation for this unsigned local candidate; signing,
+notarization, and a platform launch trust decision remain formal-release
+requirements.
+
+Receipt construction performs two complete content/identity/entry-set tree
+snapshots and requires byte-for-byte internal equality, then performs a third
+terminal full-tree scan. A same-uid attacker could still swap and restore a
+path entirely between the terminal scan and the later launch; that
+instantaneous interval is the same accepted P3 rather than a claimed atomic
+guarantee.
+
+An earlier append-only worklog entry contains fields that the tightened privacy
+contract now forbids. It remains unchanged pending explicit user authorization
+for a targeted historical redaction; new records must not repeat those values.
 
 Track B uses the actual **Prepare Book** UI and main-process preparation API.
 The isolated copy root is chosen so its basename uniquely matches the

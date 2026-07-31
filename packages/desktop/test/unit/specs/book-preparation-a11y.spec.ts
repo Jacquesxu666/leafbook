@@ -108,8 +108,14 @@ const prepared = Vue.reactive<BookPreparationDto>({
   sourceTitle: null,
   candidates: [candidate],
   chapters: [],
+  removedChapters: [],
   summaryPreview: null,
-  requiresSelection: true
+  requiresSelection: true,
+  recovery: null,
+  draftPersisted: false,
+  draftDurabilityUncertain: false,
+  draftId: null,
+  draftNonce: 0
 })
 
 const mountedApps: Array<{ app: Vue.App; host: HTMLElement }> = []
@@ -119,6 +125,7 @@ const mountWorkspace = () => {
     mode: 'reader',
     session: {
       sessionId: 'session-id-1',
+      resourceToken: 'resource-token-1',
       libraryId: 'library-id-1',
       title: 'Book',
       navigationSource: 'inferred',
@@ -473,7 +480,9 @@ describe('book preparation workspace accessibility', () => {
   it('mounts the full workspace and panel templates with one panel announcement source', async () => {
     prepared.requiresSelection = false
     prepared.sourceTitle = 'Same title'
-    prepared.chapters = [{ ordinal: 1, line: 1, title: 'First', fragment: 'first' }]
+    prepared.chapters = [
+      { chapterId: 'chapter-1', ordinal: 1, line: 1, title: 'First', fragment: 'first' }
+    ]
     const { host } = mountWorkspace()
     await Vue.nextTick()
     expect(host.querySelector('.preparation-panel')).not.toBeNull()

@@ -9,6 +9,19 @@ defined only in `packages/desktop/package.json`. The first foundation release
 establishes an independent application identity; book-library, `SUMMARY.md`
 navigation, reading progress, and whole-book search will follow.
 
+## Install and operate safely
+
+Public, signed installers are not available yet. Current local macOS artifacts
+are unsigned and unnotarized development candidates; do not treat them as a
+formal release. Platform-specific install, upgrade, uninstall, data-location,
+and checksum instructions are in [docs/INSTALLATION.md](docs/INSTALLATION.md).
+
+Before using LeafBook with sensitive manuscripts, read
+[docs/PRIVACY_SECURITY.md](docs/PRIVACY_SECURITY.md). Release readiness and
+known evidence gaps are tracked in
+[docs/RELEASE_CHECKLIST.md](docs/RELEASE_CHECKLIST.md) and
+[docs/RELEASE_GATE.md](docs/RELEASE_GATE.md).
+
 ## Development
 
 Requirements and LeafBook-specific safe packaging notes are in
@@ -32,7 +45,13 @@ pnpm typecheck
 pnpm test:unit
 pnpm lint
 pnpm build
+SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)" \
+  pnpm generate:release-sbom -- /tmp/leafbook.spdx.json
+pnpm verify:release-notes
 ```
+
+The SBOM timestamp and namespace contract is documented in
+[docs/BUILD.md](docs/BUILD.md).
 
 The application icons are generated deterministically from
 `packages/desktop/build/icons/leafbook.svg` on macOS:

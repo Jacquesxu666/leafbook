@@ -1,3 +1,4 @@
+import type { Tokens } from 'marked';
 import { EXPORT_DOMPURIFY_CONFIG } from '../config';
 import { sanitize } from '../utils';
 import { getHighlightHtml } from '../utils/marked';
@@ -9,6 +10,12 @@ export interface IRenderToStaticHTMLOptions {
     isGitlabCompatibilityEnabled?: boolean;
     superSubScript?: boolean;
     frontMatter?: boolean;
+    /**
+     * Optional Markdown-image renderer. Raw HTML `<img>` elements never pass
+     * through this callback, allowing security-sensitive consumers to keep
+     * Markdown image provenance through the static rendering boundary.
+     */
+    imageRenderer?: (token: Tokens.Image) => string | false;
     /**
      * Skip DOMPurify sanitization. **Unsafe with untrusted input** — drops
      * the XSS guarantees of the default export path. Only intended for
@@ -55,6 +62,7 @@ export function renderToStaticHTML(
         isGitlabCompatibilityEnabled: options.isGitlabCompatibilityEnabled ?? true,
         superSubScript: options.superSubScript ?? true,
         frontMatter: options.frontMatter ?? false,
+        imageRenderer: options.imageRenderer,
     });
 
     // Post-process footnotes into the standard GFM / pandoc shape (inline

@@ -1,10 +1,11 @@
 # Releasing LeafBook
 
-LeafBook releases are published by the `Release LeafBook` workflow in
-`.github/workflows/release.yml`. Pushing a `v*` tag starts the pipeline:
+LeafBook release drafts are created by the `Release LeafBook` workflow in
+`.github/workflows/release.yml`. Pushing a `v*` tag starts the pipeline; public
+publication remains a separate reviewed action:
 
 ```text
-validate tag → build and audit five platform jobs → audit release set → publish
+validate tag → native build/validation receipts → exact-byte assembly → attest → draft
 ```
 
 `packages/desktop/package.json` is the single source of truth for the
@@ -17,8 +18,12 @@ version.
   `electron-updater` and does not have a signed, project-owned update feed.
 - Release assets must not include `latest*.yml`, any `.blockmap`, or other
   auto-updater metadata.
-- macOS builds are not signed or notarized.
-- Windows installers are not code-signed.
+- Release macOS carriers must come from the protected signing/notarization job
+  and pass fresh no-secret signature, stapling, Gatekeeper, audit, packaged
+  smoke, `/Applications` install/launch, and cleanup receipt validation. Local
+  development macOS builds remain unsigned and are never release assets.
+- Windows release installers must come from the protected signing job and pass
+  fresh-runner Authenticode/install/launch/uninstall receipt validation.
 - Linux packages are not signed by a LeafBook package repository.
 - `SHA256SUMS.txt` provides download integrity checks. It is not a substitute
   for platform code signing or notarization.
@@ -31,6 +36,16 @@ version.
 - An authenticated GitHub CLI (`gh auth status`) if using the commands below.
 - A clean checkout of the commit intended for release.
 - All required changes merged to `develop`.
+- Protected `windows-signing` Environment approval and its certificate secrets
+  configured as Environment-level (not repository-level) secrets; the reviewed
+  public signer thumbprint remains configured as `WIN_SIGNER_SHA1`.
+- Protected `macos-signing` Environment approval and its five Apple
+  signing/notarization values configured as Environment-level (not
+  repository-level) secrets. Reusable-workflow callers cannot pass Environment
+  secrets, so the release jobs have no signing-secret mapping and the protected
+  jobs resolve them directly; validation jobs receive none of them.
+- Protected release tags and reviewers prepared to inspect retained native
+  receipts, attestations, logs, and the draft before publication.
 
 ## 1. Set the desktop version
 
@@ -103,29 +118,36 @@ git push origin "v${VERSION}"
 
 The validate job rejects malformed SemVer tags and any tag that is not `v`
 followed by the desktop package version at the tagged commit. A version
-containing a pre-release suffix is published as a GitHub pre-release; a plain
-three-component SemVer tag is published as a stable release.
+containing a pre-release suffix marks the resulting draft as a GitHub
+pre-release; a plain three-component SemVer tag creates a non-prerelease draft.
+Neither path publishes the draft.
 
 ## 4. What CI builds and audits
 
-The build matrix contains five jobs:
+The native evidence graph contains six architecture lanes. Each lane may use
+multiple isolated jobs so that protected signing/build work is separated from
+fresh-machine validation:
 
-| Runner | Architecture | Expected assets | Audit |
-| --- | --- | --- | --- |
-| Ubuntu 22.04 | host | AppImage, snap, deb, rpm, tar.gz | packaged identity, executable, licenses, updater absence |
-| Windows | x64 | NSIS setup.exe, zip | packaged identity, executable, licenses, updater absence |
-| Windows 11 ARM | arm64 | NSIS setup.exe, zip | packaged identity, executable, licenses, updater absence |
-| macOS 15 Intel | x64 | dmg, zip | app identity, Info.plist, licenses, updater absence |
-| macOS 15 Apple silicon | arm64 | dmg, zip | app identity, Info.plist, licenses, updater absence |
+| Runner                 | Architecture | Expected assets            | Required native evidence                                         |
+| ---------------------- | ------------ | -------------------------- | ---------------------------------------------------------------- |
+| Ubuntu 24.04           | x64          | AppImage, deb, rpm, tar.gz | fresh AppImage/tar/deb plus pinned-Fedora RPM lifecycle receipts |
+| Ubuntu 24.04 ARM       | arm64        | AppImage, deb, rpm, tar.gz | fresh AppImage/tar/deb plus pinned-Fedora RPM lifecycle receipts |
+| Windows                | x64          | NSIS setup.exe, zip        | Authenticode and fresh install/launch/uninstall receipt          |
+| Windows 11 ARM         | arm64        | NSIS setup.exe, zip        | Authenticode and fresh install/launch/uninstall receipt          |
+| macOS 15 Intel         | x64          | signed dmg, signed zip     | notarization, Gatekeeper, audits and fresh install receipt       |
+| macOS 15 Apple silicon | arm64        | signed dmg, signed zip     | notarization, Gatekeeper, audits and fresh install receipt       |
 
-This is exactly 13 cross-platform artifacts:
+This is exactly 16 cross-platform artifacts. Snap is not a release target:
 
 ```text
-leafbook-linux-${VERSION}.AppImage
-leafbook-linux-${VERSION}.snap
-leafbook-linux-${VERSION}.deb
-leafbook-linux-${VERSION}.rpm
-leafbook-linux-${VERSION}.tar.gz
+leafbook-linux-x64-${VERSION}.AppImage
+leafbook-linux-x64-${VERSION}.deb
+leafbook-linux-x64-${VERSION}.rpm
+leafbook-linux-x64-${VERSION}.tar.gz
+leafbook-linux-arm64-${VERSION}.AppImage
+leafbook-linux-arm64-${VERSION}.deb
+leafbook-linux-arm64-${VERSION}.rpm
+leafbook-linux-arm64-${VERSION}.tar.gz
 leafbook-win-x64-${VERSION}-setup.exe
 leafbook-win-x64-${VERSION}.zip
 leafbook-win-arm64-${VERSION}-setup.exe
@@ -139,13 +161,19 @@ leafbook-mac-arm64-${VERSION}.zip
 Here `${VERSION}` denotes the exact value read from
 `packages/desktop/package.json`.
 
-Each job audits its local packages before upload. The publish job then merges
-the five CI artifacts and runs `scripts/audit-release-files.sh`, which fails if
-any of the 13 files is missing, empty, unexpected, or accompanied by
-`latest*.yml` or a `.blockmap`. It generates `SHA256SUMS.txt`, creates a draft
-GitHub Release with all assets, and publishes the draft only after upload
-succeeds. The final release therefore has 14 assets: 13 packages/archives plus
-the checksum file.
+The release assembly downloads each architecture-qualified candidate together
+with the native receipt produced for those same bytes. It rebinds every receipt
+to the tag, commit, platform and architecture, recomputes every carrier hash,
+and copies only the verified macOS 4 + Windows 4 + Linux 8 carriers into the
+exact-16 set. `scripts/audit-release-files.sh` rejects missing, empty or extra
+files, including `latest*.yml` and `.blockmap` updater metadata, before creating
+`SHA256SUMS.txt`.
+
+Only that receipt-bound exact-16 candidate reaches build-provenance and SBOM
+attestation. After attestation succeeds, the write-permission job revalidates
+the exact final snapshot and creates a **draft** GitHub Release. It does not
+publish the draft. If an authorized reviewer later approves publication, the
+public asset contract is 17 files: the 16 carriers plus `SHA256SUMS.txt`.
 
 ## 5. Monitor and verify
 
@@ -158,9 +186,9 @@ gh release view "v${VERSION}"
 
 Confirm that:
 
-- all five build jobs and their platform audits passed;
+- all signed/native evidence jobs and independent regression audits passed;
 - the release has the expected stable or pre-release status;
-- the 13 exact packages/archives and `SHA256SUMS.txt` are present;
+- the 16 exact packages/archives and `SHA256SUMS.txt` are present;
 - no `latest*.yml` or `.blockmap` asset is present;
 - the checksums validate for downloaded files:
 
@@ -168,13 +196,9 @@ Confirm that:
   sha256sum -c SHA256SUMS.txt --ignore-missing
   ```
 
-macOS users must currently clear quarantine after installing the unsigned app:
-
-```bash
-xattr -cr /Applications/LeafBook.app
-```
-
-Do not describe this workaround as signing or notarization.
+Unsigned and unnotarized macOS builds are development evidence only. Do not
+publish instructions that remove quarantine or bypass Gatekeeper; wait for a
+signed, notarized candidate that passes independent downloaded-artifact review.
 
 ## 6. After publishing
 

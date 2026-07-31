@@ -130,6 +130,52 @@ const boundedPreparationCommit = (value: unknown): boolean => {
   )
 }
 
+const boundedPreparationDraftApply = (value: unknown): boolean => {
+  const request = value as {
+    preparationId?: unknown
+    revision?: unknown
+    nonce?: unknown
+    operation?: {
+      type?: unknown
+      chapterId?: unknown
+      title?: unknown
+    }
+  } | null
+  const operation = request?.operation
+  if (
+    !request ||
+    !boundedId(request.preparationId) ||
+    typeof request.revision !== 'string' ||
+    !/^[a-f0-9]{64}$/.test(request.revision) ||
+    !Number.isSafeInteger(request.nonce) ||
+    (request.nonce as number) < 1 ||
+    !operation ||
+    !boundedId(operation.chapterId)
+  ) {
+    return false
+  }
+  if (operation.type === 'rename') {
+    return (
+      typeof operation.title === 'string' &&
+      operation.title.length > 0 &&
+      operation.title.length <= 2_048 &&
+      Buffer.byteLength(operation.title, 'utf8') <= 4_096
+    )
+  }
+  return (
+    (operation.type === 'move-up' ||
+      operation.type === 'move-down' ||
+      operation.type === 'remove' ||
+      operation.type === 'restore') &&
+    operation.title === undefined
+  )
+}
+
+const boundedPreparationRecovery = (value: unknown): boolean => {
+  const request = value as { preparationId?: unknown; recoveryId?: unknown } | null
+  return Boolean(request && boundedId(request.preparationId) && boundedId(request.recoveryId))
+}
+
 const boundedExportCommit = (value: unknown): boolean => {
   const request = value as { exportId?: unknown; html?: unknown } | null
   return Boolean(
@@ -147,6 +193,24 @@ const boundedWebsiteCommit = (value: unknown): boolean => {
     boundedId(request.websiteId) &&
     typeof request.html === 'string' &&
     Buffer.byteLength(request.html, 'utf8') <= 64 * 1024 * 1024
+  )
+}
+
+const boundedResourceRequest = (value: unknown): boolean => {
+  const request = value as {
+    sessionId?: unknown
+    resourceToken?: unknown
+    nodeId?: unknown
+    reference?: unknown
+  } | null
+  return Boolean(
+    request &&
+    boundedId(request.sessionId) &&
+    boundedId(request.resourceToken) &&
+    boundedId(request.nodeId) &&
+    typeof request.reference === 'string' &&
+    request.reference.length > 0 &&
+    request.reference.length <= 4_096
   )
 }
 
@@ -174,6 +238,11 @@ export const registerBookHandlers = (): void => {
   ipcMain.handle('lb::books::read-chapter', (event, sessionId, nodeId) =>
     isTrustedEditorSender(event)
       ? getManager().readChapter(sessionId, nodeId, event.sender.id)
+      : rejected()
+  )
+  ipcMain.handle('lb::books::read-resource', (event, request) =>
+    isTrustedEditorSender(event) && boundedResourceRequest(request)
+      ? getManager().readResource(request, event.sender.id)
       : rejected()
   )
   ipcMain.handle('lb::books::begin-edit', (event, sessionId, nodeId) =>
@@ -229,6 +298,21 @@ export const registerBookHandlers = (): void => {
   ipcMain.handle('lb::books::select-preparation-source', (event, preparationId, sourceNodeId) =>
     isTrustedEditorSender(event) && boundedId(preparationId) && boundedId(sourceNodeId)
       ? getManager().selectPreparationSource(preparationId, sourceNodeId, event.sender.id)
+      : rejected()
+  )
+  ipcMain.handle('lb::books::apply-preparation-draft', (event, request) =>
+    isTrustedEditorSender(event) && boundedPreparationDraftApply(request)
+      ? getManager().applyPreparationDraft(request, event.sender.id)
+      : rejected()
+  )
+  ipcMain.handle('lb::books::restore-preparation-draft', (event, request) =>
+    isTrustedEditorSender(event) && boundedPreparationRecovery(request)
+      ? getManager().restorePreparationDraft(request, event.sender.id)
+      : rejected()
+  )
+  ipcMain.handle('lb::books::discard-preparation-draft', (event, request) =>
+    isTrustedEditorSender(event) && boundedPreparationRecovery(request)
+      ? getManager().discardPreparationDraft(request, event.sender.id)
       : rejected()
   )
   ipcMain.handle('lb::books::commit-preparation', (event, request) =>

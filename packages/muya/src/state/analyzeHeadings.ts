@@ -1,6 +1,6 @@
 import type { Heading } from '../utils/marked/types';
 import { tokenizer, tokensToPlainText } from '../inlineRenderer/lexer';
-import { lexBlock } from '../utils/marked';
+import { lexBlock } from '../utils/marked/lexBlock';
 
 const DEFAULT_MAX_BYTES = 8 * 1024 * 1024;
 const DEFAULT_MAX_HEADINGS = 2_000;

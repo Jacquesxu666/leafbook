@@ -277,7 +277,25 @@ export const getMarkdownContent = async (page: Page, app: ElectronApplication): 
 
 export const typeIntoEditor = async (page: Page, text: string): Promise<void> => {
   await page.click('.editor-component', { timeout: 5000 })
-  await page.keyboard.type(text, { delay: 0 })
+  // Muya commits input through DOM input/selection events. A zero-delay burst can
+  // outrun that commit path (especially in a packaged Electron renderer), so
+  // source-mode readback may observe a truncated tail. Keep this as real
+  // keyboard interaction, but allow each event turn to reach Muya's model.
+  await page.keyboard.type(text, { delay: 25 })
+  await page.waitForFunction(
+    (expected) => document.querySelector('.editor-component')?.textContent?.includes(expected),
+    text,
+    { timeout: 5000 }
+  )
+  // Let Muya consume the last real input event before a caller performs a
+  // source-mode round trip. Two rendered frames avoid a fixed wall-clock sleep
+  // while preserving the same user-visible interaction boundary.
+  await page.evaluate(
+    () =>
+      new Promise<void>((resolve) => {
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
+      })
+  )
 }
 
 // The @muyajs/core engine wraps editable paragraph text in

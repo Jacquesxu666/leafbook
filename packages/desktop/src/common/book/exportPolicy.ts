@@ -1,5 +1,7 @@
 export const BOOK_EXPORT_CSP =
   "default-src 'none'; img-src data:; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; navigate-to 'none'"
+export const BOOK_WEBSITE_CSP =
+  "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; navigate-to 'none'"
 
 export const BOOK_EXPORT_STYLE = `
 :root{color-scheme:light dark;font-family:ui-serif,Georgia,serif;line-height:1.65}
@@ -20,6 +22,13 @@ export const BOOK_EXPORT_MAX_DEPTH = 128
 export const BOOK_EXPORT_MAX_TAGS = 200_000
 export const BOOK_EXPORT_MAX_ATTRIBUTES = 32
 export const BOOK_EXPORT_MAX_TOKEN_LENGTH = 64 * 1024
+export const BOOK_EXPORT_MAX_IMAGE_TEXT_LENGTH = 4 * 1024
+export const BOOK_EXPORT_MAX_IMAGE_SOURCE_LENGTH =
+  Math.ceil((6 * 1024 * 1024) / 3) * 4 + 'data:image/svg+xml;base64,'.length
+export const BOOK_EXPORT_MAX_IMAGE_TOKEN_LENGTH =
+  BOOK_EXPORT_MAX_IMAGE_SOURCE_LENGTH +
+  BOOK_EXPORT_MAX_ATTRIBUTES * (BOOK_EXPORT_MAX_IMAGE_TEXT_LENGTH + 128) +
+  1024
 
 const ALLOWED_TAGS = new Set([
   'html',
@@ -77,6 +86,7 @@ const ALLOWED_TAGS = new Set([
   'kbd',
   'figure',
   'figcaption',
+  'img',
   'abbr',
   'cite',
   'q',
@@ -84,7 +94,7 @@ const ALLOWED_TAGS = new Set([
   'var',
   'samp'
 ])
-const VOID_TAGS = new Set(['meta', 'br', 'hr'])
+const VOID_TAGS = new Set(['meta', 'br', 'hr', 'img'])
 const HEAD_TAGS = new Set(['meta', 'title', 'style'])
 const SAFE_ATTRS = new Set([
   'class',
@@ -120,10 +130,10 @@ const hasDisallowedControl = (value: string, start: number, end: number): boolea
   }
   return false
 }
-const findTagEnd = (html: string, open: number): number => {
+const findTagEnd = (html: string, open: number, maximum: number): number => {
   let quote: '"' | "'" | null = null
   for (let index = open + 1; index < html.length; index++) {
-    if (index - open - 1 > BOOK_EXPORT_MAX_TOKEN_LENGTH) return -1
+    if (index - open - 1 > maximum) return -1
     const character = html[index] as string
     if (disallowedControl(character) || character === '<') return -1
     if (quote) {
@@ -150,7 +160,21 @@ const onlyAsciiWhitespace = (value: string, start = 0, end = value.length): bool
  * to recognize arbitrary HTML. All attributes must be quoted and explicitly
  * allowed; the only URL-bearing attribute is an in-document LeafBook anchor.
  */
-export const validateBookExportHtml = (html: string): boolean => {
+export interface BookExportHtmlValidationOptions {
+  format?: 'html' | 'website'
+  expectedImageSources?: readonly string[]
+  expectedResourceSequence?: readonly string[]
+}
+
+export const validateBookExportHtml = (
+  html: string,
+  options: BookExportHtmlValidationOptions = {}
+): boolean => {
+  const expectedCsp = options.format === 'website' ? BOOK_WEBSITE_CSP : BOOK_EXPORT_CSP
+  const strictResourceSequence =
+    options.expectedResourceSequence !== undefined || options.expectedImageSources !== undefined
+  const expectedResourceSequence =
+    options.expectedResourceSequence ?? options.expectedImageSources ?? []
   if (!html.startsWith('<!doctype html>')) return false
   let index = '<!doctype html>'.length
   let styleCount = 0
@@ -159,6 +183,7 @@ export const validateBookExportHtml = (html: string): boolean => {
   let viewportCount = 0
   let titleCount = 0
   let tagCount = 0
+  let imageIndex = 0
   let inBody = false
   let documentState: 'before-html' | 'in-html' | 'after-head' | 'after-body' = 'before-html'
   const stack: string[] = []
@@ -174,7 +199,8 @@ export const validateBookExportHtml = (html: string): boolean => {
         cspCount === 1 &&
         charsetCount === 1 &&
         viewportCount === 1 &&
-        titleCount === 1
+        titleCount === 1 &&
+        imageIndex === expectedResourceSequence.length
       )
     }
     if (hasDisallowedControl(html, index, open)) return false
@@ -186,9 +212,13 @@ export const validateBookExportHtml = (html: string): boolean => {
       return false
     }
     if (html.startsWith('<!--', open) || html.startsWith('<!', open)) return false
-    const close = findTagEnd(html, open)
+    const imageOpening = /^<img(?:[ \t\n\f\r]|\/?>)/iu.test(html.slice(open, open + 8))
+    const tokenMaximum = imageOpening
+      ? BOOK_EXPORT_MAX_IMAGE_TOKEN_LENGTH
+      : BOOK_EXPORT_MAX_TOKEN_LENGTH
+    const close = findTagEnd(html, open, tokenMaximum)
     if (close === -1) return false
-    if (close - open - 1 > BOOK_EXPORT_MAX_TOKEN_LENGTH) return false
+    if (close - open - 1 > tokenMaximum) return false
     tagCount++
     if (tagCount > BOOK_EXPORT_MAX_TAGS) return false
     let token = html.slice(open + 1, close)
@@ -248,17 +278,30 @@ export const validateBookExportHtml = (html: string): boolean => {
       while (cursor < token.length && token[cursor] !== quote) cursor++
       if (cursor >= token.length) return false
       const value = token.slice(valueStart, cursor++)
+      if (
+        value.length >
+        (tag === 'img' && attribute === 'src'
+          ? BOOK_EXPORT_MAX_IMAGE_SOURCE_LENGTH
+          : BOOK_EXPORT_MAX_IMAGE_TEXT_LENGTH)
+      ) {
+        return false
+      }
       attributes.set(attribute, value)
       if (attributes.size > BOOK_EXPORT_MAX_ATTRIBUTES) return false
       if (
         !SAFE_ATTRS.has(attribute) &&
         !attribute.startsWith('aria-') &&
         !(tag === 'meta' && ['charset', 'name', 'content', 'http-equiv'].includes(attribute)) &&
-        !(tag === 'a' && attribute === 'href')
+        !(tag === 'a' && attribute === 'href') &&
+        !(tag === 'img' && ['src', 'alt', 'loading', 'decoding'].includes(attribute)) &&
+        !(tag === 'span' && attribute === 'data-leafbook-export-placeholder')
       ) {
         return false
       }
       if (attribute === 'href' && !/^#leafbook-(?:chapter|heading)-[a-z0-9-]+$/i.test(value)) {
+        return false
+      }
+      if (tag === 'img' && attribute === 'src' && value !== expectedResourceSequence[imageIndex]) {
         return false
       }
     }
@@ -270,7 +313,7 @@ export const validateBookExportHtml = (html: string): boolean => {
       return false
     }
     if (tag === 'meta' && attributes.get('http-equiv') === 'Content-Security-Policy') {
-      if (attributes.get('content') !== BOOK_EXPORT_CSP) return false
+      if (attributes.get('content') !== expectedCsp) return false
       cspCount++
     } else if (tag === 'meta' && attributes.get('charset') === 'utf-8' && attributes.size === 1) {
       charsetCount++
@@ -292,6 +335,27 @@ export const validateBookExportHtml = (html: string): boolean => {
       continue
     }
     if (tag === 'title') titleCount++
+    if (
+      tag === 'img' &&
+      (!attributes.has('src') ||
+        !attributes.has('alt') ||
+        (attributes.has('loading') && attributes.get('loading') !== 'lazy') ||
+        (attributes.has('decoding') && attributes.get('decoding') !== 'async'))
+    ) {
+      return false
+    }
+    if (tag === 'img') imageIndex++
+    const placeholder = attributes.get('data-leafbook-export-placeholder')
+    if (placeholder !== undefined) {
+      if (
+        !/^image-(?:0|[1-9][0-9]{0,2})$/u.test(placeholder) ||
+        (strictResourceSequence &&
+          expectedResourceSequence[imageIndex] !== `placeholder:${placeholder}`)
+      ) {
+        return false
+      }
+      if (strictResourceSequence) imageIndex++
+    }
     if (!selfClosing && !VOID_TAGS.has(tag)) {
       if (stack.length >= BOOK_EXPORT_MAX_DEPTH) return false
       stack.push(tag)
@@ -305,6 +369,7 @@ export const validateBookExportHtml = (html: string): boolean => {
     charsetCount === 1 &&
     viewportCount === 1 &&
     titleCount === 1 &&
+    imageIndex === expectedResourceSequence.length &&
     documentState === 'after-body'
   )
 }

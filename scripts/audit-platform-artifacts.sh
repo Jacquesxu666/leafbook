@@ -10,6 +10,11 @@ fi
 platform="${1:-}"
 architecture="${2:-}"
 dist_dir="${3:-$repository_root/dist}"
+is_prerelease="${LEAFBOOK_IS_PRERELEASE:-true}"
+if [[ "$is_prerelease" != "true" && "$is_prerelease" != "false" ]]; then
+  echo "LEAFBOOK_IS_PRERELEASE must be true or false." >&2
+  exit 1
+fi
 
 if [[ ! -d "$dist_dir" || -L "$dist_dir" || "$(realpath "$dist_dir")" != "$repository_root/dist" ]]; then
   echo "Artifact directory must be the canonical fixed repository dist directory." >&2
@@ -25,14 +30,17 @@ expected=()
 archive=""
 case "$platform" in
   linux)
+    if [[ "$architecture" != "x64" && "$architecture" != "arm64" ]]; then
+      echo "Linux artifact audit requires x64 or arm64." >&2
+      exit 1
+    fi
     expected=(
-      "leafbook-linux-$version.AppImage"
-      "leafbook-linux-$version.snap"
-      "leafbook-linux-$version.deb"
-      "leafbook-linux-$version.rpm"
-      "leafbook-linux-$version.tar.gz"
+      "leafbook-linux-$architecture-$version.AppImage"
+      "leafbook-linux-$architecture-$version.deb"
+      "leafbook-linux-$architecture-$version.rpm"
+      "leafbook-linux-$architecture-$version.tar.gz"
     )
-    archive="${expected[4]}"
+    archive="${expected[3]}"
     ;;
   windows)
     if [[ "$architecture" != "x64" && "$architecture" != "arm64" ]]; then
@@ -57,60 +65,245 @@ for artifact in "${expected[@]}"; do
     exit 1
   fi
   "$repository_root/scripts/check-safe-artifact-path.sh" regular "$dist_dir/$artifact" "$dist_dir"
-done
-
-temporary_root="$(mktemp -d "${TMPDIR:-/tmp}/leafbook-platform-audit.XXXXXX")"
-trap 'rm -rf "$temporary_root"' EXIT
-if [[ "$platform" == "linux" ]]; then
-  tar -xzf "$dist_dir/$archive" -C "$temporary_root"
-else
-  tar -xf "$dist_dir/$archive" -C "$temporary_root"
-fi
-
-resources_directory="$(find "$temporary_root" -type d -path '*/resources' -print -quit)"
-if [[ -z "$resources_directory" ]]; then
-  echo "$archive does not contain an application resources directory." >&2
-  exit 1
-fi
-"$repository_root/scripts/check-safe-artifact-path.sh" directory "$resources_directory" "$temporary_root"
-"$repository_root/scripts/check-no-updater-files.sh" "$temporary_root"
-for license_file in LICENSE NOTICE THIRD-PARTY-LICENSES.txt; do
-  if [[ ! -s "$resources_directory/licenses/$license_file" ]]; then
-    echo "$archive is missing licenses/$license_file." >&2
+  if [[ "$(wc -c < "$dist_dir/$artifact")" -gt 1073741824 ]]; then
+    echo "Artifact exceeds the 1 GiB compressed carrier budget: $artifact" >&2
     exit 1
   fi
-  "$repository_root/scripts/check-safe-artifact-path.sh" regular \
-    "$resources_directory/licenses/$license_file" "$temporary_root"
 done
-grep -q "MarkText Contributors" "$resources_directory/licenses/LICENSE"
-grep -q "independent derivative project" "$resources_directory/licenses/NOTICE"
-if grep -q '^undefined$' "$resources_directory/licenses/THIRD-PARTY-LICENSES.txt"; then
-  echo "$archive contains an invalid third-party notice body." >&2
-  exit 1
-fi
 
-asar="$resources_directory/app.asar"
-"$repository_root/scripts/check-safe-artifact-path.sh" regular "$asar" "$temporary_root"
-asar_listing="$temporary_root/asar-list.txt"
-pnpm --filter leafbook exec asar list "$asar" > "$asar_listing"
-"$repository_root/scripts/check-asar-listing-no-updater.sh" "$asar_listing"
-pnpm --filter leafbook exec asar extract "$asar" "$temporary_root/asar"
-node - "$temporary_root/asar/package.json" "$version" <<'NODE'
+temporary_base="${TMPDIR:-/tmp}"
+temporary_root="$(mktemp -d "${temporary_base%/}/leafbook-platform-audit.XXXXXX")"
+trap 'rm -rf "$temporary_root"' EXIT
+reference_manifest_digest=""
+
+preflight_python_archive() {
+  local kind="$1"
+  local artifact="$2"
+  shift 2
+  python3 "$repository_root/scripts/run-bounded.py" 60 30 2147483648 -- \
+    python3 "$repository_root/scripts/preflight-archive.py" "$kind" "$artifact" "$@"
+}
+
+preflight_rpm() {
+  local artifact="$1"
+  local listing="$temporary_root/rpm-metadata.tsv"
+  python3 "$repository_root/scripts/run-bounded.py" 60 30 67108864 -- \
+    rpm -qp --queryformat \
+    '[%{FILESIZES}\t%{FILEMODES:perms}\t%{FILENAMES}\t%{FILELINKTOS}\n]' \
+    "$artifact" > "$listing"
+  node "$repository_root/scripts/preflight-entry-list.mjs" rpm "$listing"
+}
+
+preflight_rpm_scriptlets() {
+  local artifact="$1"
+  local surface output tag
+  for surface in scripts triggers filetriggers transfiletriggers; do
+    output="$temporary_root/rpm-$surface.txt"
+    python3 "$repository_root/scripts/run-bounded.py" 60 30 67108864 -- \
+      rpm -qp "--$surface" "$artifact" > "$output"
+    if grep -q '[^[:space:]]' "$output"; then
+      echo "RPM carrier contains unapproved $surface." >&2
+      exit 1
+    fi
+  done
+  for tag in \
+    PREIN POSTIN PREUN POSTUN PRETRANS POSTTRANS VERIFYSCRIPT \
+    TRIGGERSCRIPTS FILETRIGGERSCRIPTS TRANSFILETRIGGERSCRIPTS; do
+    output="$temporary_root/rpm-header-$tag.txt"
+    python3 "$repository_root/scripts/run-bounded.py" 60 30 67108864 -- \
+      rpm -qp --queryformat "%{$tag}" "$artifact" > "$output"
+    if sed '/^[[:space:]]*$/d; /^(none)$/d' "$output" | grep -q .; then
+      echo "RPM carrier contains an unapproved $tag header payload." >&2
+      exit 1
+    fi
+  done
+}
+
+preflight_squashfs() {
+  local artifact="$1"
+  local offset="$2"
+  local carrier="$3"
+  local safe_carrier="${carrier//[^A-Za-z0-9._-]/_}"
+  local listing="$temporary_root/$safe_carrier-squashfs-list.txt"
+  python3 "$repository_root/scripts/run-bounded.py" 60 30 67108864 -- \
+    unsquashfs -lln -o "$offset" "$artifact" > "$listing"
+  node "$repository_root/scripts/preflight-entry-list.mjs" squashfs "$listing"
+}
+
+audit_extracted_tree() {
+  local tree="$1"
+  local carrier="$2"
+  local carrier_kind="$3"
+  "$repository_root/scripts/check-safe-artifact-path.sh" directory "$tree" "$temporary_root"
+  "$repository_root/scripts/check-no-updater-files.sh" "$tree"
+  local layout_json resources_directory manifest_digest
+  layout_json="$(
+    node "$repository_root/scripts/audit-application-layout.mjs" \
+      "$platform" "$architecture" "$tree" "$carrier_kind" "$version"
+  )"
+  resources_directory="$(
+    node -e 'process.stdout.write(Buffer.from(JSON.parse(process.argv[1]).resourcesBase64, "base64"))' \
+      "$layout_json"
+  )"
+  manifest_digest="$(
+    node -e 'process.stdout.write(JSON.parse(process.argv[1]).manifestDigest)' "$layout_json"
+  )"
+  if [[ -z "$reference_manifest_digest" ]]; then
+    reference_manifest_digest="$manifest_digest"
+  elif [[ "$manifest_digest" != "$reference_manifest_digest" ]]; then
+    echo "$carrier application tree differs from the first audited carrier." >&2
+    exit 1
+  fi
+  "$repository_root/scripts/check-safe-artifact-path.sh" directory "$resources_directory" "$tree"
+  local license_file source
+  for license_file in LICENSE NOTICE THIRD-PARTY-LICENSES.txt; do
+    case "$license_file" in
+      LICENSE) source="$repository_root/LICENSE" ;;
+      NOTICE) source="$repository_root/NOTICE" ;;
+      THIRD-PARTY-LICENSES.txt)
+        source="$repository_root/packages/desktop/build/THIRD-PARTY-LICENSES.txt"
+        ;;
+    esac
+    "$repository_root/scripts/check-safe-artifact-path.sh" regular \
+      "$resources_directory/licenses/$license_file" "$tree"
+    if ! cmp -s "$source" "$resources_directory/licenses/$license_file"; then
+      echo "$carrier contains non-canonical licenses/$license_file." >&2
+      exit 1
+    fi
+  done
+  grep -q "MarkText Contributors" "$resources_directory/licenses/LICENSE"
+  grep -q "independent derivative project" "$resources_directory/licenses/NOTICE"
+  if grep -q '^undefined$' "$resources_directory/licenses/THIRD-PARTY-LICENSES.txt"; then
+    echo "$carrier contains an invalid third-party notice body." >&2
+    exit 1
+  fi
+
+  local asar="$resources_directory/app.asar"
+  local safe_carrier="${carrier//[^A-Za-z0-9._-]/_}"
+  local asar_listing="$temporary_root/$safe_carrier-asar-list.txt"
+  local asar_extract="$temporary_root/$safe_carrier-asar"
+  "$repository_root/scripts/check-safe-artifact-path.sh" regular "$asar" "$tree"
+  python3 "$repository_root/scripts/run-bounded.py" 60 30 67108864 -- \
+    node "$repository_root/scripts/preflight-asar.mjs" "$asar"
+  python3 "$repository_root/scripts/run-bounded.py" 120 90 536870912 -- \
+    pnpm --filter leafbook exec asar list "$asar" > "$asar_listing"
+  "$repository_root/scripts/check-asar-listing-no-updater.sh" "$asar_listing"
+  grep -qx '/node_modules/katex/dist/katex.mjs' "$asar_listing" || {
+    echo "$carrier ASAR is missing the required KaTeX ESM runtime." >&2
+    exit 1
+  }
+  python3 "$repository_root/scripts/run-bounded.py" 120 90 536870912 -- \
+    pnpm --filter leafbook exec asar extract "$asar" "$asar_extract"
+  node - "$asar_extract/package.json" "$version" "$carrier" <<'NODE'
 const fs = require('node:fs')
-const [packagePath, expectedVersion] = process.argv.slice(2)
+const [packagePath, expectedVersion, carrier] = process.argv.slice(2)
 const metadata = JSON.parse(fs.readFileSync(packagePath, 'utf8'))
 if (metadata.name !== 'leafbook' || metadata.version !== expectedVersion) {
-  throw new Error(`Unexpected packaged metadata: ${metadata.name}@${metadata.version}`)
+  throw new Error(`Unexpected ${carrier} metadata: ${metadata.name}@${metadata.version}`)
 }
 if (metadata.dependencies?.['electron-updater']) {
-  throw new Error('Packaged metadata contains electron-updater')
+  throw new Error(`${carrier} metadata contains electron-updater`)
+}
+if (metadata.author?.name !== 'Jacquesxu666') {
+  throw new Error(`Unexpected ${carrier} packaged author: ${metadata.author?.name}`)
 }
 NODE
+  if [[ "$platform" == "windows" ]]; then
+    find "$tree" -type f -name 'leafbook.exe' -print -quit | grep -q .
+  else
+    find "$tree" -type f -name 'leafbook' -print -quit | grep -q .
+  fi
+}
 
-if [[ "$platform" == "windows" ]]; then
-  find "$temporary_root" -type f -name 'leafbook.exe' -print -quit | grep -q .
+extract_linux_squashfs() {
+  local artifact="$1"
+  local destination="$2"
+  local carrier="$3"
+  local offset=0
+  if [[ "$carrier" == *.AppImage ]]; then
+    offset="$(
+      python3 "$repository_root/scripts/run-bounded.py" 60 30 67108864 -- \
+        python3 "$repository_root/scripts/find-squashfs-offset.py" "$artifact"
+    )"
+  fi
+  preflight_squashfs "$artifact" "$offset" "$carrier"
+  python3 "$repository_root/scripts/run-bounded.py" 60 30 67108864 -- \
+    unsquashfs -s -o "$offset" "$artifact" >/dev/null
+  python3 "$repository_root/scripts/run-bounded.py" 120 90 536870912 -- \
+    unsquashfs -no-progress -d "$destination" -o "$offset" "$artifact" >/dev/null
+}
+
+if [[ "$platform" == "linux" ]]; then
+  tar_root="$temporary_root/tar"
+  mkdir "$tar_root"
+  preflight_python_archive tar "$dist_dir/${expected[3]}"
+  python3 "$repository_root/scripts/run-bounded.py" 120 90 536870912 -- \
+    tar -xzf "$dist_dir/${expected[3]}" -C "$tar_root"
+  audit_extracted_tree "$tar_root" "${expected[3]}" archive
+
+  deb_root="$temporary_root/deb"
+  expected_deb_arch="$([[ "$architecture" == "x64" ]] && echo amd64 || echo arm64)"
+  preflight_python_archive deb "$dist_dir/${expected[1]}" "$version" "$expected_deb_arch"
+  dpkg-deb --info "$dist_dir/${expected[1]}" >/dev/null
+  [[ "$(dpkg-deb -f "$dist_dir/${expected[1]}" Package)" == "leafbook" ]]
+  [[ "$(dpkg-deb -f "$dist_dir/${expected[1]}" Version)" == "$version" ]]
+  [[ "$(dpkg-deb -f "$dist_dir/${expected[1]}" Architecture)" == "$expected_deb_arch" ]]
+  python3 "$repository_root/scripts/run-bounded.py" 120 90 536870912 -- \
+    dpkg-deb --extract "$dist_dir/${expected[1]}" "$deb_root"
+  audit_extracted_tree "$deb_root" "${expected[1]}" deb
+
+  rpm_root="$temporary_root/rpm"
+  mkdir "$rpm_root"
+  preflight_rpm "$dist_dir/${expected[2]}"
+  preflight_rpm_scriptlets "$dist_dir/${expected[2]}"
+  rpm -qip "$dist_dir/${expected[2]}" >/dev/null
+  [[ "$(rpm -qp --queryformat '%{NAME}' "$dist_dir/${expected[2]}")" == "leafbook" ]]
+  [[ "$(rpm -qp --queryformat '%{VERSION}' "$dist_dir/${expected[2]}")" == "$version" ]]
+  expected_rpm_arch="$([[ "$architecture" == "x64" ]] && echo x86_64 || echo aarch64)"
+  [[ "$(rpm -qp --queryformat '%{ARCH}' "$dist_dir/${expected[2]}")" == "$expected_rpm_arch" ]]
+  python3 "$repository_root/scripts/run-bounded.py" 120 90 536870912 -- \
+    bash -c 'set -euo pipefail; cd "$1"; rpm2cpio "$2" | cpio -idm --quiet' \
+    bash "$rpm_root" "$dist_dir/${expected[2]}"
+  audit_extracted_tree "$rpm_root" "${expected[2]}" rpm
+
+  appimage_root="$temporary_root/appimage"
+  extract_linux_squashfs "$dist_dir/${expected[0]}" "$appimage_root" "${expected[0]}"
+  audit_extracted_tree "$appimage_root" "${expected[0]}" appimage
+  appimage_desktop="$(find "$appimage_root" -maxdepth 2 -type f -name '*.desktop' -print -quit)"
+  "$repository_root/scripts/check-safe-artifact-path.sh" regular "$appimage_desktop" "$appimage_root"
+  grep -qx 'Name=LeafBook' "$appimage_desktop"
+  grep -Eq '^Exec=.+$' "$appimage_desktop"
+  grep -qx 'StartupWMClass=leafbook' "$appimage_desktop"
+  grep -Eq '^MimeType=.*text/markdown' "$appimage_desktop"
+
 else
-  find "$temporary_root" -type f -name 'leafbook' -print -quit | grep -q .
+  zip_root="$temporary_root/zip"
+  mkdir "$zip_root"
+  preflight_python_archive zip "$dist_dir/$archive"
+  python3 "$repository_root/scripts/run-bounded.py" 150 120 2147483648 -- \
+    python3 "$repository_root/scripts/safe-extract-zip.py" "$dist_dir/$archive" "$zip_root"
+  audit_extracted_tree "$zip_root" "$archive" archive
+
+  setup="${expected[0]}"
+  node - "$dist_dir/$setup" <<'NODE'
+const fs = require('node:fs')
+const file = process.argv[2]
+const data = fs.readFileSync(file)
+if (data.length < 512 || data[0] !== 0x4d || data[1] !== 0x5a) {
+  throw new Error('Windows setup carrier is not a valid PE file')
+}
+const peOffset = data.readUInt32LE(0x3c)
+if (peOffset + 4 > data.length || data.subarray(peOffset, peOffset + 4).toString('binary') !== 'PE\0\0') {
+  throw new Error('Windows setup carrier has no valid PE signature')
+}
+NODE
+  python3 "$repository_root/scripts/run-bounded.py" 120 90 536870912 -- \
+    7z t "$dist_dir/$setup" >/dev/null
+  if [[ "$is_prerelease" == "false" ]]; then
+    echo "Stable release blocked: the NSIS setup carrier still requires an isolated install/uninstall and installed-bundle audit on Windows." >&2
+    exit 1
+  fi
+  echo "Pre-release evidence only: $setup passed PE and container integrity checks, but not installed-bundle validation." >&2
 fi
 
-echo "LeafBook $platform $architecture artifacts passed identity, license, and updater audits."
+echo "LeafBook $platform $architecture carriers passed the available structural audits."

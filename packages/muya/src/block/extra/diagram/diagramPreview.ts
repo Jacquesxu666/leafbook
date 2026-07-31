@@ -62,7 +62,6 @@ async function renderDiagram({
     target,
     vegaTheme,
     mermaidTheme,
-    plantumlServer,
     sequenceTheme,
 }: IRenderOptions) {
     const render = await loadRenderer(type);

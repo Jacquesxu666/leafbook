@@ -1,6 +1,7 @@
 /* eslint-disable @stylistic/space-before-function-paren */
 import { test, expect } from '@playwright/test'
 import fs from 'node:fs/promises'
+import http from 'node:http'
 import os from 'node:os'
 import path from 'node:path'
 import { createHash } from 'node:crypto'
@@ -14,6 +15,15 @@ import {
   typeIntoEditor,
   waitForEditor
 } from './helpers'
+
+const readerImageFixtures = {
+  'local.png':
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==',
+  'local.jpg':
+    '/9j/4AAQSkZJRgABAQAASABIAAD/4QBMRXhpZgAATU0AKgAAAAgAAYdpAAQAAAABAAAAGgAAAAAAA6ABAAMAAAABAAEAAKACAAQAAAABAAAAAaADAAQAAAABAAAAAQAAAAD/7QA4UGhvdG9zaG9wIDMuMAA4QklNBAQAAAAAAAA4QklNBCUAAAAAABDUHYzZjwCyBOmACZjs+EJ+/8AAEQgAAQABAwEiAAIRAQMRAf/EAB8AAAEFAQEBAQEBAAAAAAAAAAABAgMEBQYHCAkKC//EALUQAAIBAwMCBAMFBQQEAAABfQECAwAEEQUSITFBBhNRYQcicRQygZGhCCNCscEVUtHwJDNicoIJChYXGBkaJSYnKCkqNDU2Nzg5OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6g4SFhoeIiYqSk5SVlpeYmZqio6Slpqeoqaqys7S1tre4ubrCw8TFxsfIycrS09TV1tfY2drh4uPk5ebn6Onq8fLz9PX29/j5+v/EAB8BAAMBAQEBAQEBAQEAAAAAAAABAgMEBQYHCAkKC//EALURAAIBAgQEAwQHBQQEAAECdwABAgMRBAUhMQYSQVEHYXETIjKBCBRCkaGxwQkjM1LwFWJy0QoWJDThJfEXGBkaJicoKSo1Njc4OTpDREVGR0hJSlNUVVZXWFlaY2RlZmdoaWpzdHV2d3h5eoKDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXGx8jJytLT1NXW19jZ2uLj5OXm5+jp6vLz9PX29/j5+v/bAEMAAgICAgICAwICAwUDAwMFBgUFBQUGCAYGBgYGCAoICAgICAgKCgoKCgoKCgwMDAwMDA4ODg4ODw8PDw8PDw8PD//bAEMBAgICBAQEBwQEBxALCQsQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEP/dAAQAAf/aAAwDAQACEQMRAD8A/SiiiitDM//Z',
+  'local.gif': 'R0lGODdhAQABAJEAAAAAACgsNP///wAAACH5BAkAAAMALAAAAAABAAEAAAICTAEAOw==',
+  'local.webp': 'UklGRiIAAABXRUJQVlA4IBYAAAAwAQCdASoBAAEADsD+JaQAA3AAAAAA'
+} as const
 
 test('open book, navigate chapters, return to bookshelf, and preserve editor flow', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'leafbook-e2e-book-'))
@@ -82,13 +92,219 @@ test('open book, navigate chapters, return to bookshelf, and preserve editor flo
     await expect(page.getByRole('heading', { name: 'Your Markdown books' })).toBeVisible()
     await expect(page.getByRole('heading', { name: 'Welcome' })).toBeVisible()
     await page.getByRole('button', { name: 'Back to editor' }).click()
-    await page.getByRole('button', { name: 'New File' }).click()
+
+    const newFileButton = page.getByRole('button', { name: 'New File' })
+    const editorReturnState = await page
+      .waitForFunction(() => {
+        const editor = document.querySelector('.editor-component')
+        if (editor?.children.length) return 'ready-editor'
+        if (document.querySelector('.recent-files-projects')) return 'new-file-welcome'
+        return false
+      })
+      .then((state) => state.jsonValue())
+
+    if (editorReturnState === 'new-file-welcome') {
+      await expect(page.locator('.recent-files-projects')).toBeVisible()
+      await expect(newFileButton).toBeVisible()
+      await expect(page.locator('.editor-component')).toHaveCount(0)
+      await newFileButton.click()
+    } else {
+      expect(editorReturnState).toBe('ready-editor')
+      await expect(page.locator('.recent-files-projects')).toHaveCount(0)
+      await expect(page.locator('.editor-component')).toBeAttached()
+    }
     await waitForEditor(page)
+    const editableSentinel = 'LEAFBOOK_READER_RETURN_EDITOR_EDITABLE_SENTINEL'
+    await typeIntoEditor(page, editableSentinel)
+    await expect
+      .poll(() => getMarkdownContent(page, app), { timeout: 5000 })
+      .toContain(editableSentinel)
     await expectNoRendererErrors(app)
   } finally {
     await app.close()
     await fs.rm(root, { recursive: true, force: true })
     await fs.rm(movedRoot, { recursive: true, force: true })
+  }
+})
+
+test('Reader displays four safe local image formats without path or network exposure', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'leafbook-e2e-reader-images-'))
+  const networkRequests: string[] = []
+  await fs.writeFile(
+    path.join(root, 'README.md'),
+    [
+      '# Reader images',
+      ...Object.keys(readerImageFixtures).map((name) => `![Safe ${name}](${name})`),
+      '![Missing](missing.png)',
+      '![Remote](https://example.invalid/tracker.png)',
+      '![SVG](unsafe.svg)',
+      '<img src="raw.png" alt="Raw HTML">',
+      ''
+    ].join('\n\n')
+  )
+  await Promise.all(
+    Object.entries(readerImageFixtures).map(([name, base64]) =>
+      fs.writeFile(path.join(root, name), Buffer.from(base64, 'base64'))
+    )
+  )
+  await fs.writeFile(
+    path.join(root, 'unreferenced.png'),
+    Buffer.from(readerImageFixtures['local.png'], 'base64')
+  )
+  await fs.writeFile(path.join(root, 'unsafe.svg'), '<svg><script>alert(1)</script></svg>')
+  await fs.writeFile(
+    path.join(root, 'raw.png'),
+    Buffer.from(readerImageFixtures['local.png'], 'base64')
+  )
+
+  const { app, page } = await launchElectron([], { suppressErrorDialog: true })
+  page.on('request', (request) => {
+    if (/^https?:/iu.test(request.url())) networkRequests.push(request.url())
+  })
+  try {
+    await app.evaluate(({ dialog }, selectedRoot) => {
+      dialog.showOpenDialog = async () =>
+        ({
+          canceled: false,
+          filePaths: [selectedRoot],
+          bookmarks: []
+        }) as Electron.OpenDialogReturnValue
+    }, root)
+    await clickMenuById(app, 'leafbookOpenBook')
+
+    const localImages = page.locator('.leafbook-markdown img.leafbook-local-image')
+    await expect(
+      page.locator('.leafbook-markdown img.leafbook-local-image[src^="blob:"]')
+    ).toHaveCount(4)
+    await expect(page.locator('.leafbook-media-placeholder')).toHaveCount(4)
+    await expect(localImages).toHaveCount(4)
+    for (let index = 0; index < 4; index += 1) {
+      await localImages.nth(index).scrollIntoViewIfNeeded()
+      await expect(
+        localImages.nth(index).evaluate((image) => (image as HTMLImageElement).decode()),
+        `fixture ${index} must decode`
+      ).resolves.toBeUndefined()
+    }
+    await expect
+      .poll(() =>
+        localImages.evaluateAll((images) =>
+          images.every(
+            (image) =>
+              image instanceof HTMLImageElement &&
+              image.src.startsWith('blob:') &&
+              image.complete &&
+              image.naturalWidth === 1
+          )
+        )
+      )
+      .toBe(true)
+    expect(networkRequests).toEqual([])
+    await expect(page.locator('[data-leafbook-resource]')).toHaveCount(0)
+    const chapterHtml = await page
+      .locator('.leafbook-markdown')
+      .evaluate((element) => element.outerHTML)
+    expect(chapterHtml).not.toMatch(
+      /src="(?:https?|file|data):|https:\/\/example\.invalid|unsafe\.svg|raw\.png|missing\.png|unreferenced\.png|resourceToken/iu
+    )
+    await expectNoRendererErrors(app)
+  } finally {
+    await app.close()
+    await fs.rm(root, { recursive: true, force: true })
+  }
+})
+
+test('Reader displays sanitized local SVG while malicious SVG stays inert and offline', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'leafbook-e2e-reader-svg-'))
+  let networkHits = 0
+  const server = http.createServer((_request, response) => {
+    networkHits += 1
+    response.writeHead(200, { 'content-type': 'image/png' })
+    response.end(Buffer.from(readerImageFixtures['local.png'], 'base64'))
+  })
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const address = server.address()
+  if (!address || typeof address === 'string') throw new Error('SVG test server did not bind.')
+  const remote = `http://127.0.0.1:${address.port}/tracker.png`
+  await fs.writeFile(
+    path.join(root, 'README.md'),
+    [
+      '# Reader SVG',
+      '![Safe vector](safe.svg)',
+      '![Malicious vector](evil.svg)',
+      `![Remote](${remote})`,
+      '![Data](data:image/svg+xml,evil)',
+      '![File](file:///tmp/evil.svg)',
+      '<img src="raw.svg" alt="Raw SVG">',
+      ''
+    ].join('\n\n')
+  )
+  await fs.writeFile(
+    path.join(root, 'safe.svg'),
+    '<svg xmlns="http://www.w3.org/2000/svg" width="32" height="16"><defs><linearGradient id="g" x1="0%" x2="100%" y1="0%" y2="0%"><stop offset="0%" stop-color="#fff"/><stop offset="100%" stop-color="#000"/></linearGradient></defs><rect width="32" height="16" fill="url(#g)"/></svg>'
+  )
+  await fs.writeFile(
+    path.join(root, 'evil.svg'),
+    `<svg xmlns="http://www.w3.org/2000/svg" width="32" height="16"><image href="${remote}"/><script>document.body.dataset.svgXss='yes'</script></svg>`
+  )
+  await fs.writeFile(
+    path.join(root, 'raw.svg'),
+    '<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"></svg>'
+  )
+
+  const { app, page } = await launchElectron([], { suppressErrorDialog: true })
+  const networkRequests: string[] = []
+  page.on('request', (request) => {
+    if (/^https?:/iu.test(request.url())) networkRequests.push(request.url())
+  })
+  try {
+    await app.evaluate(({ dialog }, selectedRoot) => {
+      dialog.showOpenDialog = async () =>
+        ({
+          canceled: false,
+          filePaths: [selectedRoot],
+          bookmarks: []
+        }) as Electron.OpenDialogReturnValue
+    }, root)
+    await clickMenuById(app, 'leafbookOpenBook')
+
+    const safeImage = page.locator(
+      '.leafbook-markdown img.leafbook-local-image[alt="Safe vector"][src^="blob:"]'
+    )
+    await expect(safeImage).toHaveCount(1)
+    await safeImage.scrollIntoViewIfNeeded()
+    await expect(
+      safeImage.evaluate((image) => (image as HTMLImageElement).decode())
+    ).resolves.toBeUndefined()
+    await expect
+      .poll(() =>
+        safeImage.evaluate(
+          (image) =>
+            image instanceof HTMLImageElement &&
+            image.complete &&
+            image.naturalWidth === 32 &&
+            image.naturalHeight === 16
+        )
+      )
+      .toBe(true)
+    await expect(page.locator('.leafbook-media-placeholder')).toHaveCount(5)
+    await expect(page.locator('.leafbook-markdown svg, .leafbook-markdown script')).toHaveCount(0)
+    expect(await page.evaluate(() => document.body.dataset.svgXss ?? null)).toBeNull()
+    await page.waitForTimeout(300)
+    expect(networkHits).toBe(0)
+    expect(networkRequests).toEqual([])
+    const chapterHtml = await page
+      .locator('.leafbook-markdown')
+      .evaluate((element) => element.outerHTML)
+    expect(chapterHtml).not.toMatch(
+      /evil\.svg|raw\.svg|(?:src|href)=["'](?:file:|data:|https?:)|127\.0\.0\.1|resourceToken|sessionId|nodeId/iu
+    )
+    await expectNoRendererErrors(app)
+  } finally {
+    await app.close()
+    await new Promise<void>((resolve, reject) =>
+      server.close((error) => (error ? reject(error) : resolve()))
+    )
+    await fs.rm(root, { recursive: true, force: true })
   }
 })
 
@@ -244,6 +460,88 @@ test('prepares an inferred manuscript without changing its bytes and exports it 
     await secondLaunch.app.close()
     await fs.rm(root, { recursive: true, force: true })
     await fs.rm(destination, { recursive: true, force: true })
+  }
+})
+
+test('recovers a private Prepare draft only after explicit restore and keeps books isolated', async () => {
+  test.setTimeout(60_000)
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'leafbook-e2e-draft-book-'))
+  const otherRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'leafbook-e2e-draft-other-'))
+  const userDataDir = await fs.mkdtemp(path.join(os.tmpdir(), 'leafbook-e2e-draft-user-'))
+  const source = '# First\n\nBody one.\n\n# Second\n\nBody two.\n\n# Third\n\nBody three.\n'
+  const sourcePath = path.join(root, 'manuscript.md')
+  await fs.writeFile(sourcePath, source)
+  await fs.writeFile(path.join(otherRoot, 'other.md'), '# Other one\n\n# Other two\n')
+  const originalHash = createHash('sha256').update(source).digest('hex')
+
+  const openBook = async (
+    launch: Awaited<ReturnType<typeof launchElectron>>,
+    selectedRoot: string
+  ): Promise<void> => {
+    await launch.app.evaluate(({ dialog }, value) => {
+      dialog.showOpenDialog = async () =>
+        ({ canceled: false, filePaths: [value], bookmarks: [] }) as Electron.OpenDialogReturnValue
+    }, selectedRoot)
+    await clickMenuById(launch.app, 'leafbookOpenBook')
+  }
+
+  const first = await launchElectron([], { suppressErrorDialog: true, userDataDir })
+  try {
+    await openBook(first, root)
+    await first.page.getByRole('button', { name: 'Prepare Book' }).click()
+    const panel = first.page.locator('.preparation-panel')
+    await panel.getByLabel('Manuscript').selectOption({ label: 'Document 1 — First' })
+    await panel.getByLabel('Chapter title / 章节标题').first().fill('Opening')
+    await expect(panel.getByText('Draft saved privately. / 草稿已私密保存。')).toBeVisible()
+    await panel.getByRole('button', { name: 'Cancel' }).click()
+    await expect(panel).toHaveCount(0)
+    await expect
+      .poll(() =>
+        fs.readFile(sourcePath).then((bytes) => createHash('sha256').update(bytes).digest('hex'))
+      )
+      .toBe(originalHash)
+    await expect(fs.lstat(path.join(root, 'SUMMARY.md'))).rejects.toMatchObject({ code: 'ENOENT' })
+  } finally {
+    await first.app.close()
+  }
+
+  const second = await launchElectron([], { suppressErrorDialog: true, userDataDir })
+  try {
+    await openBook(second, otherRoot)
+    await second.page.getByRole('button', { name: 'Prepare Book' }).click()
+    await expect(second.page.getByText('发现已保存的准备草稿')).toHaveCount(0)
+    await second.page.getByRole('button', { name: 'Cancel' }).click()
+
+    await openBook(second, root)
+    await second.page.getByRole('button', { name: 'Prepare Book' }).click()
+    const panel = second.page.locator('.preparation-panel')
+    await expect(panel.getByText('发现已保存的准备草稿')).toBeVisible()
+    await expect(panel.getByLabel('Chapter title / 章节标题').first()).toHaveValue('First')
+    await panel.getByRole('button', { name: 'Restore draft / 恢复草稿' }).click()
+    await expect(panel.getByText('发现已保存的准备草稿')).toHaveCount(0)
+    await expect(panel.getByLabel('Chapter title / 章节标题').first()).toHaveValue('Opening')
+    await panel.getByRole('button', { name: 'Remove Second / 移除' }).click()
+    await expect(panel.getByText('Draft saved privately. / 草稿已私密保存。')).toBeVisible()
+    await panel.getByRole('button', { name: 'Create SUMMARY.md' }).click()
+    await expect(panel).toHaveCount(0)
+    const summary = await fs.readFile(path.join(root, 'SUMMARY.md'), 'utf8')
+    expect(summary).toContain('[Opening]')
+    expect(summary).not.toContain('[Second]')
+    expect(summary).toContain('[Third]')
+    expect(
+      createHash('sha256')
+        .update(await fs.readFile(sourcePath))
+        .digest('hex')
+    ).toBe(originalHash)
+    const draftDirectory = path.join(userDataDir, 'leafbook-preparation-drafts')
+    const draftFiles = (await fs.readdir(draftDirectory)).filter((entry) => entry.endsWith('.json'))
+    expect(draftFiles).toHaveLength(0)
+    await expectNoRendererErrors(second.app)
+  } finally {
+    await second.app.close()
+    await fs.rm(root, { recursive: true, force: true })
+    await fs.rm(otherRoot, { recursive: true, force: true })
+    await fs.rm(userDataDir, { recursive: true, force: true })
   }
 })
 
@@ -450,7 +748,7 @@ test('generates an exact two-file offline website whose manifest hashes the load
     const html = await fs.readFile(path.join(output, 'index.html'))
     const manifestBytes = await fs.readFile(path.join(output, 'leafbook-manifest.json'))
     const expectedManifest = {
-      schemaVersion: 1,
+      schemaVersion: 2,
       generator: 'LeafBook',
       files: [
         {
@@ -532,6 +830,130 @@ test('generates an exact two-file offline website whose manifest hashes the load
       aliasTargetResolved: true,
       errors: []
     })
+    expect(loaded.requests.filter((url: string) => /^https?:/i.test(url))).toEqual([])
+    await expectNoRendererErrors(app)
+  } finally {
+    await app.close()
+    await fs.rm(root, { recursive: true, force: true })
+    await fs.rm(destination, { recursive: true, force: true })
+  }
+})
+
+test('exports offline book images as embedded data and hashed website assets', async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'leafbook-e2e-export-assets-book-'))
+  const destination = await fs.mkdtemp(path.join(os.tmpdir(), 'leafbook-e2e-export-assets-output-'))
+  const htmlOutput = path.join(destination, 'images.html')
+  const websiteOutput = path.join(destination, 'images-site')
+  const imageBytes = Buffer.from(readerImageFixtures['local.png'], 'base64')
+  await fs.writeFile(path.join(root, 'SUMMARY.md'), '- [第一章](one.md)\n- [第二章](two.md)\n')
+  await fs.writeFile(
+    path.join(root, 'one.md'),
+    '# 第一章\n\n![封面](cover.png)\n\n![远程](https://example.invalid/remote.png)\n'
+  )
+  await fs.writeFile(path.join(root, 'two.md'), '# 第二章\n\n![重复封面](duplicate.png)\n')
+  await fs.writeFile(path.join(root, 'cover.png'), imageBytes)
+  await fs.writeFile(path.join(root, 'duplicate.png'), imageBytes)
+
+  const { app, page } = await launchElectron([], { suppressErrorDialog: true })
+  try {
+    await app.evaluate(
+      ({ dialog }, values) => {
+        let saveCount = 0
+        dialog.showOpenDialog = async () =>
+          ({
+            canceled: false,
+            filePaths: [values.root],
+            bookmarks: []
+          }) as Electron.OpenDialogReturnValue
+        dialog.showSaveDialog = async () =>
+          ({
+            canceled: false,
+            filePath: saveCount++ === 0 ? values.htmlOutput : values.websiteOutput
+          }) as Electron.SaveDialogReturnValue
+        dialog.showMessageBox = async () =>
+          ({ response: 1, checkboxChecked: false }) as Electron.MessageBoxReturnValue
+      },
+      { root, htmlOutput, websiteOutput }
+    )
+    await clickMenuById(app, 'leafbookOpenBook')
+    await page.getByRole('button', { name: 'Export…' }).click()
+    await expect(page.getByRole('status')).toContainText('Exported images.html')
+    await page.getByRole('button', { name: 'Generate Website…' }).click()
+    await expect(page.getByRole('status')).toContainText('Generated images-site')
+
+    const html = await fs.readFile(htmlOutput, 'utf8')
+    expect(html.match(/data:image\/png;base64,/g)).toHaveLength(2)
+    expect(html).not.toContain(root)
+    expect(html).not.toContain('cover.png')
+    expect(html).not.toContain('duplicate.png')
+    expect(html).not.toContain('https://example.invalid')
+
+    const websiteEntries = (await fs.readdir(websiteOutput)).sort()
+    expect(websiteEntries).toEqual(['assets', 'index.html', 'leafbook-manifest.json'])
+    const assets = await fs.readdir(path.join(websiteOutput, 'assets'))
+    expect(assets).toHaveLength(1)
+    const assetName = assets[0]
+    expect(assetName).toMatch(/^[a-f0-9]{64}\.png$/)
+    if (!assetName) throw new Error('The exported asset was unavailable.')
+    expect(await fs.readFile(path.join(websiteOutput, 'assets', assetName))).toEqual(imageBytes)
+    const websiteHtml = await fs.readFile(path.join(websiteOutput, 'index.html'), 'utf8')
+    const relativeAsset = `assets/${assetName}`
+    expect(websiteHtml.split(relativeAsset)).toHaveLength(3)
+    expect(websiteHtml).not.toContain(root)
+    expect(websiteHtml).not.toContain('https://example.invalid')
+    const manifestBytes = await fs.readFile(path.join(websiteOutput, 'leafbook-manifest.json'))
+    const manifest = JSON.parse(manifestBytes.toString('utf8')) as {
+      schemaVersion: number
+      files: Array<{ path: string; size: number; sha256: string }>
+    }
+    expect(manifest.schemaVersion).toBe(2)
+    expect(manifest.files.map((file) => file.path)).toEqual([relativeAsset, 'index.html'])
+    for (const file of manifest.files) {
+      const bytes = await fs.readFile(path.join(websiteOutput, ...file.path.split('/')))
+      expect(file.size).toBe(bytes.byteLength)
+      expect(file.sha256).toBe(createHash('sha256').update(bytes).digest('hex'))
+    }
+
+    const loaded = await app.evaluate(
+      async ({ BrowserWindow, session }, filePath) => {
+        const partition = `leafbook-assets-e2e-${Date.now()}`
+        const isolated = session.fromPartition(partition)
+        const requests: string[] = []
+        isolated.webRequest.onBeforeRequest((details, callback) => {
+          requests.push(details.url)
+          callback({})
+        })
+        const window = new BrowserWindow({ show: false, webPreferences: { partition } })
+        try {
+          await window.loadFile(filePath)
+          return {
+            images: await window.webContents.executeJavaScript(`
+              (async () => {
+                const images = [...document.images]
+                images.forEach((image) => {
+                  image.loading = 'eager'
+                  image.scrollIntoView()
+                })
+                await Promise.all(images.map((image) => image.decode()))
+                return images.map((image) => ({
+                  src: image.getAttribute('src'),
+                  complete: image.complete,
+                  width: image.naturalWidth
+                }))
+              })()
+            `),
+            requests
+          }
+        } finally {
+          window.destroy()
+        }
+      },
+      path.join(websiteOutput, 'index.html')
+    )
+    expect(loaded.images).toEqual([
+      { src: relativeAsset, complete: true, width: 1 },
+      { src: relativeAsset, complete: true, width: 1 }
+    ])
     expect(loaded.requests.filter((url: string) => /^https?:/i.test(url))).toEqual([])
     await expectNoRendererErrors(app)
   } finally {

@@ -2,6 +2,7 @@
 set -euo pipefail
 
 repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$repository_root/scripts/private-root.sh"
 architecture="${1:-$(uname -m)}"
 case "$architecture" in
   arm64) app_directory="mac-arm64" ;;
@@ -40,8 +41,9 @@ if grep -q '^undefined$' "$resources/licenses/THIRD-PARTY-LICENSES.txt"; then
   exit 1
 fi
 
-temporary_root="$(mktemp -d "${TMPDIR:-/tmp}/leafbook-unpacked-audit.XXXXXX")"
-trap 'rm -rf "$temporary_root"' EXIT
+leafbook_private_root_create "$repository_root" "unpacked-audit"
+temporary_root="$LEAFBOOK_PRIVATE_ROOT"
+trap 'leafbook_private_root_cleanup "$repository_root"' EXIT
 pnpm --filter leafbook exec asar list "$asar" > "$temporary_root/asar-list.txt"
 "$repository_root/scripts/check-asar-listing-no-updater.sh" "$temporary_root/asar-list.txt"
 

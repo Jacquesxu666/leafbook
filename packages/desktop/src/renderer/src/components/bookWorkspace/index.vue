@@ -391,6 +391,10 @@
             :error="books.preparationError"
             :busy="books.preparationPending"
             @select="books.selectPreparationSource"
+            @edit-draft="books.schedulePreparationDraft"
+            @restore-draft="books.resolvePreparationRecovery(true)"
+            @discard-recovery="books.resolvePreparationRecovery(false)"
+            @discard-current-draft="books.discardCurrentPreparationDraft"
             @create="commitPreparation"
             @cancel="closePreparation"
           />
@@ -461,6 +465,7 @@
             <!-- Sanitized by renderBookMarkdown immediately before assignment. -->
             <!-- eslint-disable vue/no-v-html -->
             <article
+              ref="chapterArticle"
               class="leafbook-markdown markdown-body"
               @pointerdown="handleContentPointerdown"
               @click="handleContentClick"
@@ -552,10 +557,20 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import {
+  computed,
+  nextTick,
+  onBeforeUnmount,
+  onMounted,
+  onUpdated,
+  reactive,
+  ref,
+  watch
+} from 'vue'
 import type { BookReaderNodeDto, BookSearchResultDto } from '@shared/types/bookReader'
 import { useBooksStore } from '@/store/books'
 import { renderBookMarkdown, type RenderedBookChapter } from '@/book/renderMarkdown'
+import { BookImageHydrator } from '@/book/hydrateBookImages'
 import { restoreReadingPosition, waitForPaint } from '@/book/restoreReadingPosition'
 import { bookFragmentKey } from 'common/book/heading'
 import BookTreeNode from './BookTreeNode.vue'
@@ -574,6 +589,7 @@ const books = useBooksStore()
 const navCollapsed = ref(false)
 const outlineCollapsed = ref(false)
 const contentElement = ref<HTMLElement | null>(null)
+const chapterArticle = ref<HTMLElement | null>(null)
 const leaveButton = ref<HTMLButtonElement | null>(null)
 const contentsButton = ref<HTMLButtonElement | null>(null)
 const prepareButton = ref<HTMLButtonElement | null>(null)
@@ -581,7 +597,7 @@ const arrangeButton = ref<HTMLButtonElement | null>(null)
 const searchButton = ref<HTMLButtonElement | null>(null)
 const refreshButton = ref<HTMLButtonElement | null>(null)
 const searchOpen = ref(false)
-const rendered = reactive<RenderedBookChapter>({ html: '', outline: [] })
+const rendered = reactive<RenderedBookChapter>({ html: '', outline: [], resources: [] })
 const localNavigationFrozen = computed(() => books.refreshing || books.preparationRetryBlocked)
 const localFreezeDescriptionId = computed(() =>
   books.refreshing
@@ -591,6 +607,7 @@ const localFreezeDescriptionId = computed(() =>
       : undefined
 )
 const contentAnchorFreeze = createBookContentAnchorFreeze()
+const bookImageHydrator = new BookImageHydrator()
 const formatDate = (value: string): string => new Date(value).toLocaleDateString()
 const formatProgress = (value: number): string => `${Math.round(value * 100)}%`
 let restoreGeneration = 0
@@ -713,11 +730,14 @@ const handleReaderScroll = (): void => {
 watch(
   [
     () => books.session?.sessionId,
+    () => books.session?.resourceToken,
     () => books.chapter?.nodeId,
     () => books.chapter?.markdown,
-    () => books.chapter?.fragment
+    () => books.chapter?.fragment,
+    () => books.mode
   ],
   async (_identity, _previous, onCleanup) => {
+    bookImageHydrator.cancel()
     const chapter = books.chapter
     const generation = ++restoreGeneration
     const storeGeneration = books.beginReadingPositionRestore()
@@ -729,6 +749,7 @@ watch(
     onCleanup(() => {
       active = false
       paintWaitController.abort()
+      bookImageHydrator.cancel()
       if (generation === restoreGeneration) {
         restoringPosition = false
       }
@@ -737,6 +758,7 @@ watch(
     if (!chapter) {
       rendered.html = ''
       rendered.outline = []
+      rendered.resources = []
       if (generation === restoreGeneration) {
         restoringPosition = false
       }
@@ -753,6 +775,7 @@ watch(
       mount: (result) => {
         rendered.html = result.html
         rendered.outline = result.outline
+        rendered.resources = result.resources
       },
       waitForMount: nextTick,
       waitForPaint: () => waitForPaint(paintWaitController.signal),
@@ -787,6 +810,7 @@ watch(
       fail: () => {
         rendered.html = ''
         rendered.outline = []
+        rendered.resources = []
         books.error = {
           code: 'chapter-read-failed',
           message: 'LeafBook could not safely render this chapter.'
@@ -799,6 +823,46 @@ watch(
     })
   },
   { immediate: true, flush: 'sync' }
+)
+const hydrateMountedBookImages = (): void => {
+  const container = chapterArticle.value
+  const session = books.session
+  const chapter = books.chapter
+  const generation = restoreGeneration
+  if (
+    !container ||
+    !session ||
+    !chapter ||
+    !rendered.resources.length ||
+    books.mode !== 'reader' ||
+    !container.querySelector('img[data-leafbook-resource]')
+  ) {
+    return
+  }
+  bookImageHydrator
+    .hydrate({
+      container,
+      sessionId: session.sessionId,
+      resourceToken: session.resourceToken,
+      nodeId: chapter.nodeId,
+      resources: rendered.resources,
+      readResource: window.electron.books.readResource,
+      isCurrent: () =>
+        generation === restoreGeneration &&
+        books.mode === 'reader' &&
+        books.session?.sessionId === session.sessionId &&
+        books.session?.resourceToken === session.resourceToken &&
+        books.chapter?.nodeId === chapter.nodeId
+    })
+    .catch(() => undefined)
+}
+onUpdated(hydrateMountedBookImages)
+watch(
+  () => books.refreshing,
+  (refreshing) => {
+    if (refreshing) bookImageHydrator.cancel()
+  },
+  { flush: 'sync' }
 )
 const handleContentClick = async (event: MouseEvent): Promise<void> => {
   const anchor = renderedBookAnchorAt(contentElement.value, event.target)
@@ -936,6 +1000,7 @@ const navigateNext = async (): Promise<void> => {
 }
 const leaveReader = async (): Promise<void> => {
   searchOpen.value = false
+  bookImageHydrator.cancel()
   await books.showBookshelf()
 }
 const toggleSearch = (): void => {
@@ -970,6 +1035,7 @@ onMounted(() => {
   window.addEventListener('keydown', keyboardNavigation)
 })
 onBeforeUnmount(() => {
+  bookImageHydrator.cancel()
   contentAnchorFreeze.restoreAll()
   books.closeArrangement().catch(() => undefined)
   books.closePreparation().catch(() => undefined)
@@ -1234,6 +1300,12 @@ button:disabled {
   border-radius: 8px;
   text-align: center;
   opacity: 0.65;
+}
+.leafbook-markdown :deep(.leafbook-local-image) {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 1.25em auto;
 }
 .leafbook-markdown :deep(a[data-book-href]) {
   color: var(--themeColor);

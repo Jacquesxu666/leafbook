@@ -1,4 +1,5 @@
 import type { BookDiagnostic } from '../../common/book/model'
+import type { BookImageMediaType } from '../../common/book/imagePolicy'
 
 export type BookReaderErrorCode =
   | 'invalid-request'
@@ -9,6 +10,11 @@ export type BookReaderErrorCode =
   | 'node-not-found'
   | 'node-not-readable'
   | 'chapter-read-failed'
+  | 'resource-not-found'
+  | 'resource-not-readable'
+  | 'resource-too-large'
+  | 'resource-type-mismatch'
+  | 'resource-busy'
   | 'unsafe-link'
   | 'link-not-found'
   | 'search-cancelled'
@@ -36,6 +42,8 @@ export type BookReaderErrorCode =
   | 'preparation-too-large'
   | 'preparation-invalid-headings'
   | 'preparation-conflict'
+  | 'preparation-draft-stale'
+  | 'preparation-draft-write-failed'
   | 'preparation-commit-uncertain'
   | 'preparation-write-failed'
   | 'export-busy'
@@ -88,6 +96,7 @@ export interface BookReaderNodeDto {
 export interface BookSessionDto {
   libraryId: string
   sessionId: string
+  resourceToken: string
   title: string
   navigationSource: 'summary' | 'inferred'
   nodes: BookReaderNodeDto[]
@@ -105,6 +114,23 @@ export interface BookChapterDto {
   fragment: string | null
   readingPosition: number
   hasReadingPosition: boolean
+}
+
+export interface BookResourceRequestDto {
+  sessionId: string
+  resourceToken: string
+  nodeId: string
+  reference: string
+}
+
+export interface BookResourceDto {
+  mediaType: BookImageMediaType
+  byteLength: number
+  width: number
+  height: number
+  frameCount: number
+  decodePixels: number
+  bytes: Uint8Array
 }
 
 export interface BookEditFormatDto {
@@ -197,10 +223,17 @@ export interface BookPreparationCandidateDto {
 }
 
 export interface BookPreparationChapterDto {
+  chapterId: string
   ordinal: number
   line: number
   title: string
   fragment: string
+}
+
+export interface BookPreparationRecoveryDto {
+  recoveryId: string
+  status: 'available' | 'stale' | 'invalid'
+  chapterCount: number | null
 }
 
 export interface BookPreparationDto {
@@ -211,8 +244,30 @@ export interface BookPreparationDto {
   sourceTitle: string | null
   candidates: BookPreparationCandidateDto[]
   chapters: BookPreparationChapterDto[]
+  removedChapters: BookPreparationChapterDto[]
   summaryPreview: string | null
   requiresSelection: boolean
+  recovery: BookPreparationRecoveryDto | null
+  draftPersisted: boolean
+  draftDurabilityUncertain: boolean
+  draftId: string | null
+  draftNonce: number
+}
+
+export type BookPreparationDraftOperationDto =
+  | { type: 'move-up' | 'move-down' | 'remove' | 'restore'; chapterId: string }
+  | { type: 'rename'; chapterId: string; title: string }
+
+export interface BookPreparationDraftApplyRequestDto {
+  preparationId: string
+  revision: string
+  nonce: number
+  operation: BookPreparationDraftOperationDto
+}
+
+export interface BookPreparationRecoveryRequestDto {
+  preparationId: string
+  recoveryId: string
 }
 
 export interface BookPreparationCommitRequestDto {
@@ -239,10 +294,12 @@ export interface BookExportDocumentDto {
   title: string
   markdown: string | null
   linkTargets: Record<string, BookExportLinkTargetDto>
+  resourceTargets: Array<string | null>
 }
 
 export interface BookExportSnapshotDto {
   exportId: string
+  format: 'html' | 'website'
   title: string
   nodes: BookReaderNodeDto[]
   landingNodeId: string | null
@@ -272,21 +329,21 @@ export interface BookWebsiteCommitRequestDto {
 
 export interface BookWebsiteSaveDto {
   directoryName: string
-  files: ['index.html', 'leafbook-manifest.json']
+  files: string[]
   byteLength: number
   durabilityUncertain: boolean
 }
 
 export interface BookWebsiteManifestFileDto {
-  path: 'index.html'
+  path: string
   size: number
   sha256: string
 }
 
 export interface BookWebsiteManifestDto {
-  schemaVersion: 1
+  schemaVersion: 2
   generator: 'LeafBook'
-  files: [BookWebsiteManifestFileDto]
+  files: BookWebsiteManifestFileDto[]
 }
 
 export interface BookLinkNavigationDto {

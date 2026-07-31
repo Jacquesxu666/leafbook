@@ -5,13 +5,34 @@ on:
     types: [opened, synchronize, reopened]
     paths:
       - 'package.json'
+      - 'pnpm-workspace.yaml'
       - 'pnpm-lock.yaml'
+      - 'packages/desktop/package.json'
+      - 'packages/muyajs/package.json'
+      - 'packages/muya/package.json'
+      - 'scripts/generate-release-sbom.mjs'
+      - 'scripts/thirdPartyChecker.ts'
+      - 'scripts/validateLicenses.ts'
+      - 'scripts/verify-release-notes.mjs'
+      - 'docs/RELEASE_NOTES.md'
   push:
     branches:
       - develop
     paths:
       - 'package.json'
+      - 'pnpm-workspace.yaml'
       - 'pnpm-lock.yaml'
+      - 'packages/desktop/package.json'
+      - 'packages/muyajs/package.json'
+      - 'packages/muya/package.json'
+      - 'scripts/generate-release-sbom.mjs'
+      - 'scripts/thirdPartyChecker.ts'
+      - 'scripts/validateLicenses.ts'
+      - 'scripts/verify-release-notes.mjs'
+      - 'docs/RELEASE_NOTES.md'
+
+permissions:
+  contents: read
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -20,8 +41,24 @@ concurrency:
 jobs:
   validate-licenses:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
       - uses: ./.github/actions/setup
       - name: Validate dependency licenses
         run: pnpm run validate-licenses
+      - name: Bind SBOM time to exact source commit
+        shell: bash
+        run: |
+          source_date_epoch="$(git show -s --format=%ct "${GITHUB_SHA}^{commit}")"
+          [[ "$source_date_epoch" =~ ^[1-9][0-9]*$ ]]
+          printf 'SOURCE_DATE_EPOCH=%s\n' "$source_date_epoch" >> "$GITHUB_ENV"
+      - name: Gate transitive licenses and deterministic SPDX SBOM
+        run: |
+          pnpm generate:release-sbom -- /tmp/leafbook.spdx.json
+          pnpm generate:release-sbom -- /tmp/leafbook-second.spdx.json
+          cmp /tmp/leafbook.spdx.json /tmp/leafbook-second.spdx.json
+      - name: Gate formal release notes
+        run: pnpm verify:release-notes

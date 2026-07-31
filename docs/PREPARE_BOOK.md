@@ -16,7 +16,9 @@ body.
 2. Choose **Prepare Book**.
 3. If LeafBook cannot identify one manuscript from the folder name, choose a
    manuscript from the displayed list.
-4. Review the level-one chapter preview, then choose **Create SUMMARY.md**.
+4. Reorder, rename, remove, or add back chapters as needed. These changes are
+   saved as a private LeafBook draft and never modify the manuscript.
+5. Review the level-one chapter preview, then choose **Create SUMMARY.md**.
 
 LeafBook recognizes top-level ATX headings written as `# Chapter title`. It
 requires at least two headings. Setext headings, headings inside containers,
@@ -24,13 +26,60 @@ empty titles, duplicate normalized fragments, and documents beyond the safety
 limits are rejected with an explanation.
 
 The preview renders at most 200 chapter titles for responsiveness. The status
-message reports how many additional chapters will still be included.
+message reports how many additional chapters will still be included. Title
+input is debounced for 300 ms. Edits to different chapters retain their order,
+while repeated edits to one chapter coalesce to its latest title. Reorder,
+remove, add-back, Create, and Close first flush every pending title; if any
+draft write fails, LeafBook retains that edit and all later queued edits,
+preserves the error, and does not continue or close the preparation.
+
+## Private drafts and recovery
+
+Prepare edits are persisted by the main process under
+`userData/leafbook-preparation-drafts`. The directory is mode `0700`; its
+random 32-byte root-key and every draft are mode `0600`. A filename is
+HMAC-SHA256 of the canonical root path with that private key, never a raw path
+or unsalted hash. The schema-1 checksum envelope contains only the bounded
+relative manuscript identifier, base source/root identity and digest, ordered
+chapter identifiers/titles/fragments, inclusion state, and latest nonce. It
+contains no Markdown body or absolute path.
+
+Draft writes use an exclusive no-follow temporary file, file sync, atomic
+rename, and draft-directory sync. Startup cleanup recognizes only its exact
+temporary naming grammar and removes a regular entry only after its pathname
+and descriptor identities match. Unknown or changed entries are untouched.
+All files are bounded to 2 MiB and 2,000 chapters before allocation/parsing.
+Schema mismatch, truncation, checksum failure, excess size, symlink, hard-link,
+or unsafe permissions is shown only as a non-restorable draft that can be
+explicitly discarded by an identity-bound main-process operation.
+
+Node does not expose directory-descriptor-relative `unlinkat` for the draft
+store. Draft deletion is therefore a documented P3 same-user race boundary:
+LeafBook performs no asynchronous yield between the final no-follow
+pathname/descriptor identity check and unlink, refuses directories, and syncs
+the still-bound private directory afterward, but it does not claim protection
+against a process with the same account and equal filesystem authority racing
+that final pathname syscall.
+
+Restart never silently restores or applies a draft. Opening Prepare for the
+same book displays **Restore draft** and **Discard draft**. Restore is enabled
+only after main revalidates the current root, session, selected manuscript
+identity, and base digest; a changed source or same-path replacement root is
+stale and cannot be restored. Draft filenames isolate different books, and a
+persisted monotonic nonce makes out-of-order or competing-window saves
+latest-wins. Close/Cancel retains an existing draft; only explicit Discard
+removes it and resets to the current analyzed base.
+
+After **Create SUMMARY.md**, the draft is removed only after the exact source
+file has been verified and file plus directory durability succeeds. A failed
+or durability-uncertain source commit retains the draft.
 
 ## Write boundary
 
 Preparation is create-only. It creates one new root `SUMMARY.md`; it does not
 edit, split, rename, or move the selected manuscript or any other book file.
-Cancel and Escape create nothing. If any case variant of `SUMMARY.md` already
+Cancel and Escape create no source-book file; a previously saved private draft
+is retained. If any case variant of `SUMMARY.md` already
 exists, or another process creates one before confirmation, LeafBook stops
 without overwriting it.
 

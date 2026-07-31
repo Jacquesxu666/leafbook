@@ -3,6 +3,9 @@ productName: LeafBook
 directories:
   buildResources: build
   output: ../../dist
+# LeafBook has no trusted updater channel yet. Keep electron-builder from
+# inferring the inherited GitHub repository and embedding app-update.yml.
+publish: null
 files:
   - '!**/.vscode/*'
   - '!src/*'
@@ -27,7 +30,6 @@ files:
   - '!node_modules/mermaid/dist/mermaid.min.js'
   - '!node_modules/mermaid/dist/mermaid.esm.min.mjs'
   - '!node_modules/katex/dist/katex.min.js'
-  - '!node_modules/katex/dist/katex.mjs'
   # Don't bundle Linux build files
   - '!node_modules/ced/build/Release/compact_enc_det.a'
   - '!node_modules/**/{*.vcxproj,*.vcxproj.filters}'
@@ -113,7 +115,7 @@ dmg:
       y: 240
       type: 'file'
 linux:
-  artifactName: 'leafbook-linux-${version}.${ext}'
+  artifactName: 'leafbook-linux-${arch}-${version}.${ext}'
   executableName: 'leafbook'
   description: 'A local-first Markdown book reader and editor.'
   maintainer: 'LeafBook Contributors'
@@ -127,7 +129,6 @@ linux:
       Keywords: 'leafbook;markdown;book;'
   target:
     - AppImage
-    - snap
     - deb
     - rpm
     - tar.gz
@@ -135,21 +136,28 @@ linux:
     - ext: 'md'
       name: 'Markdown'
       description: 'Markdown document'
+      mimeType: 'text/markdown'
     - ext: 'markdown'
       name: 'Markdown'
       description: 'Markdown document'
+      mimeType: 'text/markdown'
     - ext: 'mmd'
       name: 'Markdown'
       description: 'Markdown document'
+      mimeType: 'text/markdown'
     - ext: 'mdown'
       name: 'Markdown'
       description: 'Markdown document'
+      mimeType: 'text/markdown'
     - ext: 'mdtxt'
       name: 'Markdown'
       description: 'Markdown document'
+      mimeType: 'text/markdown'
     - ext: 'mdtext'
       name: 'Markdown'
       description: 'Markdown document'
+      mimeType: 'text/markdown'
     - ext: 'mdx'
       name: 'Markdown'
       description: 'Markdown document'
+      mimeType: 'text/markdown'

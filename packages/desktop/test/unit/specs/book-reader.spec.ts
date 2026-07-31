@@ -98,6 +98,20 @@ import {
 } from 'main_renderer/ipc/books'
 
 const temporaryDirectories: string[] = []
+const testPng = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+  'base64'
+)
+const testGif = Buffer.from(
+  'R0lGODdhAQABAJEAAAAAACgsNP///wAAACH5BAkAAAMALAAAAAABAAEAAAICTAEAOw==',
+  'base64'
+)
+const largeCanvasGif = (): Buffer => {
+  const bytes = Buffer.from(testGif)
+  bytes.writeUInt16LE(6_000, 6)
+  bytes.writeUInt16LE(5_000, 8)
+  return bytes
+}
 const deferredValue = <T>(): {
   promise: Promise<T>
   resolve: (value: T) => void
@@ -117,6 +131,15 @@ const makeBook = async (files: Record<string, string>): Promise<string> => {
     await fs.mkdir(path.dirname(target), { recursive: true })
     await fs.writeFile(target, content)
   }
+  return root
+}
+const makeRasterBook = async (count: number): Promise<string> => {
+  const names = Array.from({ length: count }, (_, index) => `image-${index}.png`)
+  const root = await makeBook({
+    'SUMMARY.md': '- [Start](start.md)\n',
+    'start.md': ['# Start', ...names.map((name) => `![${name}](${name})`)].join('\n\n')
+  })
+  await Promise.all(names.map((name) => fs.writeFile(path.join(root, name), testPng)))
   return root
 }
 
@@ -450,13 +473,14 @@ describe('book session LRU', () => {
       const reached = deferredValue<void>()
       const release = deferredValue<void>()
       let loads = 0
+      let recover = false
       const loader: typeof loadBookFromDirectory = async (rootPath, options) => {
         const result = await loadBookFromDirectory(rootPath, options)
         loads++
         if (loads === 1) return result
         reached.resolve()
         await release.promise
-        if (outcome === 'success') return result
+        if (outcome === 'success' || recover) return result
         return {
           book: result.book,
           diagnostics: [
@@ -498,7 +522,15 @@ describe('book session LRU', () => {
       })
       await expect(
         manager.readChapter(opened.value.sessionId, opened.value.nodes[0].nodeId, ownerId)
-      ).resolves.toMatchObject({ ok: true })
+      ).resolves.toMatchObject(
+        outcome === 'success' ? { ok: true } : { ok: false, error: { code: 'session-not-found' } }
+      )
+      if (outcome === 'scan-failure') {
+        recover = true
+        await expect(manager.openLibrary(opened.value.libraryId, ownerId)).resolves.toMatchObject({
+          ok: true
+        })
+      }
       expect(await manager.reloadEdit(edit.value.editId, ownerId)).toMatchObject({
         ok: false,
         error: { code: 'edit-not-found' }
@@ -1431,6 +1463,61 @@ describe('book IPC trust boundary', () => {
     expect(save).not.toHaveBeenCalled()
   })
 
+  it('rejects malformed and untrusted resource requests before manager dispatch', async () => {
+    registerBookHandlers()
+    mocks.browserWindow = {
+      restoreBufferId: 'editor-buffer',
+      isDestroyed: () => false
+    }
+    const event = {
+      sender: {
+        id: 931,
+        isDestroyed: () => false,
+        getURL: () => 'file:///index.html?type=editor',
+        once: vi.fn()
+      }
+    }
+    const read = vi.spyOn(BookSessionManager.prototype, 'readResource')
+    const handler = mocks.ipcHandlers.get('lb::books::read-resource')
+    expect(
+      await handler?.(
+        event as never,
+        {
+          sessionId: randomUUID(),
+          resourceToken: randomUUID(),
+          nodeId: randomUUID(),
+          reference: 'x'.repeat(4_097)
+        } as never
+      )
+    ).toMatchObject({ ok: false, error: { code: 'invalid-request' } })
+    expect(read).not.toHaveBeenCalled()
+
+    mocks.browserWindow = {
+      restoreBufferId: 'settings-buffer',
+      isDestroyed: () => false
+    }
+    const untrusted = {
+      sender: {
+        id: 932,
+        isDestroyed: () => false,
+        getURL: () => 'file:///index.html?type=settings',
+        once: vi.fn()
+      }
+    }
+    expect(
+      await handler?.(
+        untrusted as never,
+        {
+          sessionId: randomUUID(),
+          resourceToken: randomUUID(),
+          nodeId: randomUUID(),
+          reference: 'cover.png'
+        } as never
+      )
+    ).toMatchObject({ ok: false, error: { code: 'invalid-request' } })
+    expect(read).not.toHaveBeenCalled()
+  })
+
   it('does not dispatch any arrangement handler for an untrusted sender', async () => {
     registerBookHandlers()
     const event = {
@@ -1650,6 +1737,1233 @@ describe('book IPC trust boundary', () => {
 })
 
 describe('BookSessionManager authorization boundary', () => {
+  it('lets only the latest concurrent readChapter authorize resource references', async () => {
+    const root = await makeBook({
+      'SUMMARY.md': '- [Start](start.md)\n',
+      'start.md': '# Start\n'
+    })
+    await fs.writeFile(path.join(root, 'old.png'), testPng)
+    await fs.writeFile(path.join(root, 'new.png'), testPng)
+    mocks.selectedPath = root
+    const oldRead = deferredValue<{ content: string } | null>()
+    const newRead = deferredValue<{ content: string } | null>()
+    const firstEntered = deferredValue<void>()
+    let readCount = 0
+    const manager = new BookSessionManager(
+      '/resource-chapter-nonce-user-data',
+      undefined,
+      async () => {
+        readCount += 1
+        if (readCount === 1) {
+          firstEntered.resolve()
+          return oldRead.promise
+        }
+        return newRead.promise
+      }
+    )
+    const opened = await manager.openPicker({ sender: { id: 103 } } as never)
+    expect(opened.ok).toBe(true)
+    if (!opened.ok || !opened.value.entryNodeId) return
+    const first = manager.readChapter(opened.value.sessionId, opened.value.entryNodeId, 103)
+    await firstEntered.promise
+    const second = manager.readChapter(opened.value.sessionId, opened.value.entryNodeId, 103)
+    newRead.resolve({ content: '# New\n\n![New](new.png)' })
+    expect(await second).toMatchObject({
+      ok: true,
+      value: { markdown: expect.stringContaining('New') }
+    })
+    oldRead.resolve({ content: '# Old\n\n![Old](old.png)' })
+    expect(await first).toMatchObject({
+      ok: true,
+      value: { markdown: expect.stringContaining('Old') }
+    })
+    const request = {
+      sessionId: opened.value.sessionId,
+      resourceToken: opened.value.resourceToken,
+      nodeId: opened.value.entryNodeId
+    }
+
+    expect(await manager.readResource({ ...request, reference: 'new.png' }, 103)).toMatchObject({
+      ok: true
+    })
+    expect(await manager.readResource({ ...request, reference: 'old.png' }, 103)).toMatchObject({
+      ok: false,
+      error: { code: 'resource-not-readable' }
+    })
+  }, 10_000)
+
+  it('binds resource reads to an owned session and current chapter, then revokes on close', async () => {
+    const root = await makeBook({
+      'SUMMARY.md': '- [Start](chapters/start.md)\n',
+      'chapters/start.md': '# Start\n![Cover](../assets/cover.png)\n'
+    })
+    await fs.mkdir(path.join(root, 'assets'))
+    await fs.writeFile(path.join(root, 'assets', 'cover.png'), testPng)
+    await fs.writeFile(path.join(root, 'assets', 'unreferenced.png'), testPng)
+    mocks.selectedPath = root
+    const manager = new BookSessionManager('/resource-user-data')
+    const opened = await manager.openPicker({ sender: { id: 104 } } as never)
+    expect(opened.ok).toBe(true)
+    if (!opened.ok || !opened.value.entryNodeId) return
+    expect(
+      await manager.readChapter(opened.value.sessionId, opened.value.entryNodeId, 104)
+    ).toMatchObject({ ok: true })
+    const request = {
+      sessionId: opened.value.sessionId,
+      resourceToken: opened.value.resourceToken,
+      nodeId: opened.value.entryNodeId,
+      reference: '../assets/cover.png'
+    }
+
+    const read = await manager.readResource(request, 104)
+    expect(read).toMatchObject({
+      ok: true,
+      value: {
+        mediaType: 'image/png',
+        byteLength: testPng.byteLength,
+        width: 1,
+        height: 1,
+        frameCount: 1,
+        decodePixels: 1
+      }
+    })
+    expect(JSON.stringify(read)).not.toContain(root)
+    expect(await manager.readResource(request, 104)).toMatchObject({
+      ok: false,
+      error: { code: 'resource-not-readable' }
+    })
+    expect(
+      await manager.readResource({ ...request, reference: '../assets/unreferenced.png' }, 104)
+    ).toMatchObject({
+      ok: false,
+      error: { code: 'resource-not-readable' }
+    })
+    expect(await manager.readResource(request, 105)).toMatchObject({
+      ok: false,
+      error: { code: 'session-not-found' }
+    })
+    expect(manager.closeSession(opened.value.sessionId, 104)).toEqual({ ok: true, value: true })
+    expect(await manager.readResource(request, 104)).toMatchObject({
+      ok: false,
+      error: { code: 'session-not-found' }
+    })
+  })
+
+  it('withholds resource bytes when the session closes after the file is pinned', async () => {
+    const root = await makeBook({
+      'SUMMARY.md': '- [Start](start.md)\n',
+      'start.md': '# Start\n\n![Cover](cover.png)\n'
+    })
+    await fs.writeFile(path.join(root, 'cover.png'), testPng)
+    mocks.selectedPath = root
+    const pinned = deferredValue<void>()
+    const release = deferredValue<void>()
+    const manager = new BookSessionManager(
+      '/resource-revoke-user-data',
+      undefined,
+      undefined,
+      undefined,
+      {
+        afterResourceOpen: async () => {
+          pinned.resolve()
+          await release.promise
+        }
+      }
+    )
+    const opened = await manager.openPicker({ sender: { id: 106 } } as never)
+    expect(opened.ok).toBe(true)
+    if (!opened.ok || !opened.value.entryNodeId) return
+    await manager.readChapter(opened.value.sessionId, opened.value.entryNodeId, 106)
+    const reading = manager.readResource(
+      {
+        sessionId: opened.value.sessionId,
+        resourceToken: opened.value.resourceToken,
+        nodeId: opened.value.entryNodeId,
+        reference: 'cover.png'
+      },
+      106
+    )
+    await pinned.promise
+    expect(manager.closeSession(opened.value.sessionId, 106)).toEqual({ ok: true, value: true })
+    release.resolve()
+    expect(await reading).toMatchObject({
+      ok: false,
+      error: { code: 'session-not-found' }
+    })
+  })
+
+  it('revokes a pinned resource read when refresh replaces its session', async () => {
+    const root = await makeBook({
+      'SUMMARY.md': '- [Start](start.md)\n',
+      'start.md': '# Start\n\n![Cover](cover.png)\n'
+    })
+    await fs.writeFile(path.join(root, 'cover.png'), testPng)
+    mocks.selectedPath = root
+    const pinned = deferredValue<void>()
+    const release = deferredValue<void>()
+    const manager = new BookSessionManager(
+      '/resource-refresh-user-data',
+      undefined,
+      undefined,
+      undefined,
+      {
+        afterResourceOpen: async () => {
+          pinned.resolve()
+          await release.promise
+        }
+      }
+    )
+    const opened = await manager.openPicker({ sender: { id: 107 } } as never)
+    expect(opened.ok).toBe(true)
+    if (!opened.ok || !opened.value.entryNodeId) return
+    await manager.readChapter(opened.value.sessionId, opened.value.entryNodeId, 107)
+    const oldRequest = {
+      sessionId: opened.value.sessionId,
+      resourceToken: opened.value.resourceToken,
+      nodeId: opened.value.entryNodeId,
+      reference: 'cover.png'
+    }
+    const reading = manager.readResource(oldRequest, 107)
+    await pinned.promise
+    const refreshed = await manager.refresh(opened.value.sessionId, 107)
+    expect(refreshed.ok).toBe(true)
+    release.resolve()
+    expect(await reading).toMatchObject({
+      ok: false,
+      error: { code: 'session-not-found' }
+    })
+    expect(await manager.readResource(oldRequest, 107)).toMatchObject({
+      ok: false,
+      error: { code: 'session-not-found' }
+    })
+    if (!refreshed.ok || !refreshed.value.entryNodeId) return
+    expect(refreshed.value.resourceToken).not.toBe(oldRequest.resourceToken)
+    await manager.readChapter(refreshed.value.sessionId, refreshed.value.entryNodeId, 107)
+    expect(
+      await manager.readResource(
+        {
+          sessionId: refreshed.value.sessionId,
+          resourceToken: refreshed.value.resourceToken,
+          nodeId: refreshed.value.entryNodeId,
+          reference: 'cover.png'
+        },
+        107
+      )
+    ).toMatchObject({ ok: true, value: { mediaType: 'image/png' } })
+  })
+
+  it('queues per-owner resource reads so slow prior work cannot starve a new chapter', async () => {
+    const root = await makeBook({
+      'SUMMARY.md': '- [Start](start.md)\n',
+      'start.md': [
+        '# Start',
+        '![Old one](old-1.png)',
+        '![Old two](old-2.png)',
+        '![New one](new-1.png)',
+        '![New two](new-2.png)'
+      ].join('\n\n')
+    })
+    for (const name of ['old-1.png', 'old-2.png', 'new-1.png', 'new-2.png']) {
+      await fs.writeFile(path.join(root, name), testPng)
+    }
+    mocks.selectedPath = root
+    const openedCount = deferredValue<void>()
+    const release = deferredValue<void>()
+    const openedReferences: string[] = []
+    let count = 0
+    const manager = new BookSessionManager(
+      '/resource-budget-user-data',
+      undefined,
+      undefined,
+      undefined,
+      {
+        afterResourceOpen: async () => {
+          count += 1
+          if (count === 2) openedCount.resolve()
+          if (count <= 2) await release.promise
+        }
+      }
+    )
+    const opened = await manager.openPicker({ sender: { id: 108 } } as never)
+    expect(opened.ok).toBe(true)
+    if (!opened.ok || !opened.value.entryNodeId) return
+    await manager.readChapter(opened.value.sessionId, opened.value.entryNodeId, 108)
+    const request = {
+      sessionId: opened.value.sessionId,
+      resourceToken: opened.value.resourceToken,
+      nodeId: opened.value.entryNodeId
+    }
+    const read = (reference: string) => {
+      openedReferences.push(reference)
+      return manager.readResource({ ...request, reference }, 108)
+    }
+    const first = read('old-1.png')
+    const second = read('old-2.png')
+    await openedCount.promise
+    const third = read('new-1.png')
+    const fourth = read('new-2.png')
+    await new Promise((resolve) => setTimeout(resolve, 700))
+    expect(count).toBe(2)
+    release.resolve()
+    expect((await Promise.all([first, second, third, fourth])).every((result) => result.ok)).toBe(
+      true
+    )
+    expect(openedReferences).toEqual(['old-1.png', 'old-2.png', 'new-1.png', 'new-2.png'])
+    expect(count).toBe(4)
+  }, 10_000)
+
+  it('admits another owner immediately while the first owner has two active and eight queued', async () => {
+    const root = await makeRasterBook(11)
+    mocks.selectedPath = root
+    const firstOwnerOpened = deferredValue<void>()
+    const releaseFirstOwner = deferredValue<void>()
+    const openedReferences: string[] = []
+    let firstOwnerOpenCount = 0
+    const manager = new BookSessionManager(
+      '/resource-fair-admission-user-data',
+      undefined,
+      undefined,
+      undefined,
+      {
+        afterResourceOpen: async (reference) => {
+          openedReferences.push(reference ?? '')
+          if (reference !== 'image-10.png') {
+            firstOwnerOpenCount += 1
+            if (firstOwnerOpenCount === 2) firstOwnerOpened.resolve()
+            await releaseFirstOwner.promise
+          }
+        }
+      }
+    )
+    const firstSession = await manager.openPicker({ sender: { id: 111 } } as never)
+    const secondSession = await manager.openPicker({ sender: { id: 112 } } as never)
+    expect(firstSession.ok && secondSession.ok).toBe(true)
+    if (
+      !firstSession.ok ||
+      !firstSession.value.entryNodeId ||
+      !secondSession.ok ||
+      !secondSession.value.entryNodeId
+    ) {
+      return
+    }
+    await manager.readChapter(firstSession.value.sessionId, firstSession.value.entryNodeId, 111)
+    await manager.readChapter(secondSession.value.sessionId, secondSession.value.entryNodeId, 112)
+    const requestFor = (session: BookSessionDto, reference: string) => ({
+      sessionId: session.sessionId,
+      resourceToken: session.resourceToken,
+      nodeId: session.entryNodeId as string,
+      reference
+    })
+    const firstOwnerReads = [
+      manager.readResource(requestFor(firstSession.value, 'image-0.png'), 111),
+      manager.readResource(requestFor(firstSession.value, 'image-1.png'), 111)
+    ]
+    await firstOwnerOpened.promise
+    for (let index = 2; index < 10; index += 1) {
+      firstOwnerReads.push(
+        manager.readResource(requestFor(firstSession.value, `image-${index}.png`), 111)
+      )
+    }
+
+    expect(
+      await manager.readResource(requestFor(secondSession.value, 'image-10.png'), 112)
+    ).toMatchObject({ ok: true })
+    expect(new Set(openedReferences.slice(0, 2))).toEqual(new Set(['image-0.png', 'image-1.png']))
+    expect(openedReferences[2]).toBe('image-10.png')
+
+    releaseFirstOwner.resolve()
+    expect((await Promise.all(firstOwnerReads)).every((result) => result.ok)).toBe(true)
+  }, 10_000)
+
+  it('caps each owner at eight queued reads without burning rejected references', async () => {
+    const root = await makeRasterBook(11)
+    mocks.selectedPath = root
+    const bothOpened = deferredValue<void>()
+    const release = deferredValue<void>()
+    const openedReferences: string[] = []
+    let openCount = 0
+    const manager = new BookSessionManager(
+      '/resource-owner-queue-cap-user-data',
+      undefined,
+      undefined,
+      undefined,
+      {
+        afterResourceOpen: async (reference) => {
+          openedReferences.push(reference ?? '')
+          openCount += 1
+          if (openCount === 2) bothOpened.resolve()
+          await release.promise
+        }
+      }
+    )
+    const opened = await manager.openPicker({ sender: { id: 113 } } as never)
+    expect(opened.ok).toBe(true)
+    if (!opened.ok || !opened.value.entryNodeId) return
+    await manager.readChapter(opened.value.sessionId, opened.value.entryNodeId, 113)
+    const request = (reference: string) => ({
+      sessionId: opened.value.sessionId,
+      resourceToken: opened.value.resourceToken,
+      nodeId: opened.value.entryNodeId as string,
+      reference
+    })
+    const reads = [
+      manager.readResource(request('image-0.png'), 113),
+      manager.readResource(request('image-1.png'), 113)
+    ]
+    await bothOpened.promise
+    for (let index = 2; index < 10; index += 1) {
+      reads.push(manager.readResource(request(`image-${index}.png`), 113))
+    }
+    expect(await manager.readResource(request('image-2.png'), 113)).toMatchObject({
+      ok: false,
+      error: { code: 'resource-not-readable' }
+    })
+    expect(await manager.readResource(request('image-10.png'), 113)).toMatchObject({
+      ok: false,
+      error: { code: 'resource-busy' }
+    })
+    expect(
+      (
+        manager as unknown as {
+          queuedResourceReadsByOwner: Map<number, number>
+        }
+      ).queuedResourceReadsByOwner.get(113)
+    ).toBe(8)
+
+    release.resolve()
+    expect((await Promise.all(reads)).every((result) => result.ok)).toBe(true)
+    expect(new Set(openedReferences.slice(0, 2))).toEqual(new Set(['image-0.png', 'image-1.png']))
+    expect(openedReferences.slice(2, 10)).toEqual(
+      Array.from({ length: 8 }, (_, index) => `image-${index + 2}.png`)
+    )
+    expect(await manager.readResource(request('image-10.png'), 113)).toMatchObject({ ok: true })
+  }, 10_000)
+
+  it('caps the global resource queue at 64 and keeps duplicate requests out of it', async () => {
+    const root = await makeRasterBook(9)
+    mocks.selectedPath = root
+    const allOpened = deferredValue<void>()
+    const release = deferredValue<void>()
+    let openCount = 0
+    const manager = new BookSessionManager(
+      '/resource-global-queue-cap-user-data',
+      undefined,
+      undefined,
+      undefined,
+      {
+        afterResourceOpen: async () => {
+          openCount += 1
+          if (openCount === 8) allOpened.resolve()
+          await release.promise
+        }
+      }
+    )
+    const sessions = new Map<number, BookSessionDto>()
+    for (let ownerId = 220; ownerId <= 232; ownerId += 1) {
+      const opened = await manager.openPicker({ sender: { id: ownerId } } as never)
+      expect(opened.ok).toBe(true)
+      if (!opened.ok || !opened.value.entryNodeId) return
+      await manager.readChapter(opened.value.sessionId, opened.value.entryNodeId, ownerId)
+      sessions.set(ownerId, opened.value)
+    }
+    const request = (ownerId: number, index: number) => {
+      const session = sessions.get(ownerId)
+      if (!session?.entryNodeId) throw new Error('missing resource test session')
+      return {
+        sessionId: session.sessionId,
+        resourceToken: session.resourceToken,
+        nodeId: session.entryNodeId,
+        reference: `image-${index}.png`
+      }
+    }
+    const active = []
+    for (let ownerId = 220; ownerId < 224; ownerId += 1) {
+      active.push(manager.readResource(request(ownerId, 0), ownerId))
+      active.push(manager.readResource(request(ownerId, 1), ownerId))
+    }
+    await allOpened.promise
+    const queued = []
+    for (let ownerId = 224; ownerId < 232; ownerId += 1) {
+      for (let index = 0; index < 8; index += 1) {
+        queued.push(manager.readResource(request(ownerId, index), ownerId))
+      }
+    }
+    expect(
+      (manager as unknown as { queuedResourceReads: unknown[] }).queuedResourceReads
+    ).toHaveLength(64)
+    expect(await manager.readResource(request(224, 0), 224)).toMatchObject({
+      ok: false,
+      error: { code: 'resource-not-readable' }
+    })
+    expect(
+      (manager as unknown as { queuedResourceReads: unknown[] }).queuedResourceReads
+    ).toHaveLength(64)
+    expect(await manager.readResource(request(232, 0), 232)).toMatchObject({
+      ok: false,
+      error: { code: 'resource-busy' }
+    })
+
+    for (let ownerId = 224; ownerId < 232; ownerId += 1) manager.cleanupOwner(ownerId)
+    expect((await Promise.all(queued)).every((result) => !result.ok)).toBe(true)
+    release.resolve()
+    await Promise.all(active)
+    expect(await manager.readResource(request(232, 0), 232)).toMatchObject({ ok: true })
+    manager.cleanupOwner(232)
+    expect(
+      (manager as unknown as { queuedResourceReadsByOwner: Map<number, number> })
+        .queuedResourceReadsByOwner.size
+    ).toBe(0)
+  }, 15_000)
+
+  it('never admits a timed-out read, retains its one-shot lease, and clears queue counters', async () => {
+    const root = await makeRasterBook(4)
+    mocks.selectedPath = root
+    const bothOpened = deferredValue<void>()
+    const release = deferredValue<void>()
+    const timers = new Map<number, { callback: () => void; delay: number }>()
+    let timerId = 0
+    let openCount = 0
+    const manager = new BookSessionManager(
+      '/resource-queue-timeout-user-data',
+      undefined,
+      undefined,
+      undefined,
+      {
+        afterResourceOpen: async () => {
+          openCount += 1
+          if (openCount === 2) bothOpened.resolve()
+          if (openCount <= 2) await release.promise
+        },
+        resourceQueueClock: {
+          setTimeout: (callback, delay) => {
+            const id = ++timerId
+            timers.set(id, { callback, delay })
+            return id
+          },
+          clearTimeout: (timer) => {
+            timers.delete(timer as number)
+          }
+        }
+      }
+    )
+    const opened = await manager.openPicker({ sender: { id: 114 } } as never)
+    expect(opened.ok).toBe(true)
+    if (!opened.ok || !opened.value.entryNodeId) return
+    await manager.readChapter(opened.value.sessionId, opened.value.entryNodeId, 114)
+    const request = (reference: string) => ({
+      sessionId: opened.value.sessionId,
+      resourceToken: opened.value.resourceToken,
+      nodeId: opened.value.entryNodeId as string,
+      reference
+    })
+    const first = manager.readResource(request('image-0.png'), 114)
+    const second = manager.readResource(request('image-1.png'), 114)
+    await bothOpened.promise
+    const timedOut = manager.readResource(request('image-2.png'), 114)
+    expect([...timers.values()].map(({ delay }) => delay)).toEqual([30_000])
+    timers.values().next().value?.callback()
+    expect(await timedOut).toMatchObject({
+      ok: false,
+      error: { code: 'resource-busy' }
+    })
+    expect(
+      (
+        manager as unknown as {
+          queuedResourceReadsByOwner: Map<number, number>
+        }
+      ).queuedResourceReadsByOwner.size
+    ).toBe(0)
+
+    release.resolve()
+    await Promise.all([first, second])
+    expect(openCount).toBe(2)
+    expect(await manager.readResource(request('image-2.png'), 114)).toMatchObject({
+      ok: false,
+      error: { code: 'resource-not-readable' }
+    })
+    expect(await manager.readResource(request('image-3.png'), 114)).toMatchObject({ ok: true })
+    expect(openCount).toBe(3)
+  }, 10_000)
+
+  it('binds pre-open handoff watchdogs to opaque generation tokens without ABA cleanup', async () => {
+    const root = await makeRasterBook(4)
+    mocks.selectedPath = root
+    const initialOpened = deferredValue<void>()
+    const releaseInitial = deferredValue<void>()
+    const oldPreOpenEntered = deferredValue<void>()
+    const releaseOldPreOpen = deferredValue<void>()
+    const newDirectOpened = deferredValue<void>()
+    const releaseNewDirect = deferredValue<void>()
+    const newPreOpenEntered = deferredValue<void>()
+    const releaseNewPreOpen = deferredValue<void>()
+    const timers = new Map<number, { callback: () => void; delay: number }>()
+    let timerId = 0
+    let initialOpenCount = 0
+    let holdInitial = true
+    let holdNewDirect = false
+    let holdNewQueued = false
+    const manager = new BookSessionManager(
+      '/resource-handoff-aba-user-data',
+      undefined,
+      undefined,
+      undefined,
+      {
+        beforeResourceOpen: async (reference) => {
+          if (reference === 'image-2.png') {
+            oldPreOpenEntered.resolve()
+            await releaseOldPreOpen.promise
+          } else if (reference === 'image-1.png' && holdNewQueued) {
+            newPreOpenEntered.resolve()
+            await releaseNewPreOpen.promise
+          }
+        },
+        afterResourceOpen: async (reference) => {
+          if (holdInitial && (reference === 'image-0.png' || reference === 'image-1.png')) {
+            initialOpenCount += 1
+            if (initialOpenCount === 2) initialOpened.resolve()
+            await releaseInitial.promise
+          } else if (holdNewDirect && reference === 'image-0.png') {
+            newDirectOpened.resolve()
+            await releaseNewDirect.promise
+          }
+        },
+        resourceQueueClock: {
+          setTimeout: (callback, delay) => {
+            const id = ++timerId
+            timers.set(id, { callback, delay })
+            return id
+          },
+          clearTimeout: (timer) => {
+            timers.delete(timer as number)
+          }
+        }
+      }
+    )
+    const opened = await manager.openPicker({ sender: { id: 115 } } as never)
+    expect(opened.ok).toBe(true)
+    if (!opened.ok || !opened.value.entryNodeId) return
+    await manager.readChapter(opened.value.sessionId, opened.value.entryNodeId, 115)
+    const requestFor = (session: BookSessionDto, reference: string) => ({
+      sessionId: session.sessionId,
+      resourceToken: session.resourceToken,
+      nodeId: session.entryNodeId as string,
+      reference
+    })
+
+    const initial = [
+      manager.readResource(requestFor(opened.value, 'image-0.png'), 115),
+      manager.readResource(requestFor(opened.value, 'image-1.png'), 115)
+    ]
+    await initialOpened.promise
+    const oldQueued = manager.readResource(requestFor(opened.value, 'image-2.png'), 115)
+    holdInitial = false
+    releaseInitial.resolve()
+    await oldPreOpenEntered.promise
+    await Promise.all(initial)
+
+    const handoffs = (
+      manager as unknown as {
+        pendingQueuedResourceStartsByOwner: Map<
+          number,
+          {
+            operationId: string
+            sessionId: string
+            resourceToken: string
+            nodeId: string
+            nodeNonce: number
+          }
+        >
+      }
+    ).pendingQueuedResourceStartsByOwner
+    const oldHandoff = handoffs.get(115)
+    expect(oldHandoff).toMatchObject({
+      sessionId: opened.value.sessionId,
+      resourceToken: opened.value.resourceToken,
+      nodeId: opened.value.entryNodeId,
+      nodeNonce: 1
+    })
+    expect(oldHandoff?.operationId).toMatch(/^[0-9a-f-]{36}$/u)
+    expect([...timers.values()].map(({ delay }) => delay)).toEqual([30_000])
+    timers.values().next().value?.callback()
+    expect(handoffs.has(115)).toBe(false)
+    expect(timers.size).toBe(0)
+
+    const refreshed = await manager.refresh(opened.value.sessionId, 115)
+    expect(refreshed.ok).toBe(true)
+    if (!refreshed.ok || !refreshed.value.entryNodeId) return
+    await manager.readChapter(refreshed.value.sessionId, refreshed.value.entryNodeId, 115)
+    holdNewDirect = true
+    const newDirect = manager.readResource(requestFor(refreshed.value, 'image-0.png'), 115)
+    await newDirectOpened.promise
+    holdNewQueued = true
+    const newQueued = manager.readResource(requestFor(refreshed.value, 'image-1.png'), 115)
+    holdNewDirect = false
+    releaseNewDirect.resolve()
+    expect(await newDirect).toMatchObject({ ok: true })
+    await newPreOpenEntered.promise
+    const newHandoff = handoffs.get(115)
+    expect(newHandoff).toBeDefined()
+    expect(newHandoff).not.toBe(oldHandoff)
+    expect(newHandoff?.operationId).not.toBe(oldHandoff?.operationId)
+
+    releaseOldPreOpen.resolve()
+    expect(await oldQueued).toMatchObject({
+      ok: false,
+      error: { code: 'session-not-found' }
+    })
+    expect(handoffs.get(115)).toBe(newHandoff)
+
+    expect(await manager.refresh(refreshed.value.sessionId, 115)).toMatchObject({ ok: true })
+    expect(handoffs.size).toBe(0)
+    expect(timers.size).toBe(0)
+    releaseNewPreOpen.resolve()
+    expect(await newQueued).toMatchObject({
+      ok: false,
+      error: { code: 'session-not-found' }
+    })
+    expect(
+      (
+        manager as unknown as {
+          queuedResourceReadsByOwner: Map<number, number>
+          activeResourceReadsByOwner: Map<number, number>
+        }
+      ).queuedResourceReadsByOwner.size
+    ).toBe(0)
+    expect(
+      (
+        manager as unknown as {
+          activeResourceReadsByOwner: Map<number, number>
+        }
+      ).activeResourceReadsByOwner.size
+    ).toBe(0)
+  }, 10_000)
+
+  it('allows same-generation liveness overtaking only after the pre-open watchdog', async () => {
+    const root = await makeRasterBook(4)
+    mocks.selectedPath = root
+    const initialOpened = deferredValue<void>()
+    const releaseInitial = deferredValue<void>()
+    const stuckEntered = deferredValue<void>()
+    const releaseStuck = deferredValue<void>()
+    const timers = new Map<number, () => void>()
+    const postWatchdogOpenOrder: string[] = []
+    let timerId = 0
+    let initialCount = 0
+    let holdInitial = true
+    const manager = new BookSessionManager(
+      '/resource-handoff-overtaking-user-data',
+      undefined,
+      undefined,
+      undefined,
+      {
+        beforeResourceOpen: async (reference) => {
+          if (reference === 'image-2.png') {
+            stuckEntered.resolve()
+            await releaseStuck.promise
+          }
+        },
+        afterResourceOpen: async (reference) => {
+          if (holdInitial && (reference === 'image-0.png' || reference === 'image-1.png')) {
+            initialCount += 1
+            if (initialCount === 2) initialOpened.resolve()
+            await releaseInitial.promise
+          } else if (reference) {
+            postWatchdogOpenOrder.push(reference)
+          }
+        },
+        resourceQueueClock: {
+          setTimeout: (callback) => {
+            const id = ++timerId
+            timers.set(id, callback)
+            return id
+          },
+          clearTimeout: (timer) => {
+            timers.delete(timer as number)
+          }
+        }
+      }
+    )
+    const opened = await manager.openPicker({ sender: { id: 116 } } as never)
+    expect(opened.ok).toBe(true)
+    if (!opened.ok || !opened.value.entryNodeId) return
+    await manager.readChapter(opened.value.sessionId, opened.value.entryNodeId, 116)
+    const request = (reference: string) => ({
+      sessionId: opened.value.sessionId,
+      resourceToken: opened.value.resourceToken,
+      nodeId: opened.value.entryNodeId as string,
+      reference
+    })
+    const initial = [
+      manager.readResource(request('image-0.png'), 116),
+      manager.readResource(request('image-1.png'), 116)
+    ]
+    await initialOpened.promise
+    const stuck = manager.readResource(request('image-2.png'), 116)
+    holdInitial = false
+    releaseInitial.resolve()
+    await stuckEntered.promise
+    await Promise.all(initial)
+    expect(postWatchdogOpenOrder).toEqual([])
+
+    expect(timers.size).toBe(1)
+    timers.values().next().value?.()
+    expect(timers.size).toBe(0)
+    expect(await manager.readResource(request('image-3.png'), 116)).toMatchObject({ ok: true })
+    expect(postWatchdogOpenOrder).toEqual(['image-3.png'])
+
+    releaseStuck.resolve()
+    expect(await stuck).toMatchObject({ ok: true })
+    expect(postWatchdogOpenOrder).toEqual(['image-3.png', 'image-2.png'])
+    expect(
+      (
+        manager as unknown as {
+          pendingQueuedResourceStartsByOwner: Map<number, unknown>
+          queuedResourceReadsByOwner: Map<number, number>
+          activeResourceReadsByOwner: Map<number, number>
+        }
+      ).pendingQueuedResourceStartsByOwner.size
+    ).toBe(0)
+    expect(
+      (manager as unknown as { queuedResourceReadsByOwner: Map<number, number> })
+        .queuedResourceReadsByOwner.size
+    ).toBe(0)
+    expect(
+      (manager as unknown as { activeResourceReadsByOwner: Map<number, number> })
+        .activeResourceReadsByOwner.size
+    ).toBe(0)
+  }, 10_000)
+
+  it('releases a pending pre-open handoff on chapter nonce replacement', async () => {
+    const root = await makeRasterBook(3)
+    mocks.selectedPath = root
+    const initialOpened = deferredValue<void>()
+    const releaseInitial = deferredValue<void>()
+    const pendingEntered = deferredValue<void>()
+    const releasePending = deferredValue<void>()
+    const timers = new Map<number, () => void>()
+    let timerId = 0
+    let initialCount = 0
+    const manager = new BookSessionManager(
+      '/resource-handoff-nonce-user-data',
+      undefined,
+      undefined,
+      undefined,
+      {
+        beforeResourceOpen: async (reference) => {
+          if (reference === 'image-2.png') {
+            pendingEntered.resolve()
+            await releasePending.promise
+          }
+        },
+        afterResourceOpen: async (reference) => {
+          if (reference === 'image-0.png' || reference === 'image-1.png') {
+            initialCount += 1
+            if (initialCount === 2) initialOpened.resolve()
+            await releaseInitial.promise
+          }
+        },
+        resourceQueueClock: {
+          setTimeout: (callback) => {
+            const id = ++timerId
+            timers.set(id, callback)
+            return id
+          },
+          clearTimeout: (timer) => {
+            timers.delete(timer as number)
+          }
+        }
+      }
+    )
+    const opened = await manager.openPicker({ sender: { id: 117 } } as never)
+    expect(opened.ok).toBe(true)
+    if (!opened.ok || !opened.value.entryNodeId) return
+    await manager.readChapter(opened.value.sessionId, opened.value.entryNodeId, 117)
+    const request = (reference: string) => ({
+      sessionId: opened.value.sessionId,
+      resourceToken: opened.value.resourceToken,
+      nodeId: opened.value.entryNodeId as string,
+      reference
+    })
+    const initial = [
+      manager.readResource(request('image-0.png'), 117),
+      manager.readResource(request('image-1.png'), 117)
+    ]
+    await initialOpened.promise
+    const pending = manager.readResource(request('image-2.png'), 117)
+    releaseInitial.resolve()
+    await pendingEntered.promise
+    await Promise.all(initial)
+    expect(timers.size).toBe(1)
+
+    expect(
+      await manager.readChapter(opened.value.sessionId, opened.value.entryNodeId, 117)
+    ).toMatchObject({ ok: true })
+    expect(timers.size).toBe(0)
+    releasePending.resolve()
+    expect(await pending).toMatchObject({
+      ok: false,
+      error: { code: 'session-not-found' }
+    })
+    const state = manager as unknown as {
+      pendingQueuedResourceStartsByOwner: Map<number, unknown>
+      queuedResourceReadsByOwner: Map<number, number>
+      activeResourceReadsByOwner: Map<number, number>
+    }
+    expect(state.pendingQueuedResourceStartsByOwner.size).toBe(0)
+    expect(state.queuedResourceReadsByOwner.size).toBe(0)
+    expect(state.activeResourceReadsByOwner.size).toBe(0)
+  }, 10_000)
+
+  it('releases a pending pre-open handoff when the generation budget fail-stops', async () => {
+    const names = Array.from({ length: 6 }, (_, index) => `budget-${index}.gif`)
+    const root = await makeBook({
+      'SUMMARY.md': '- [Start](start.md)\n',
+      'start.md': ['# Start', ...names.map((name) => `![${name}](${name})`)].join('\n\n')
+    })
+    for (const name of names) await fs.writeFile(path.join(root, name), largeCanvasGif())
+    mocks.selectedPath = root
+    const boundaryOpened = deferredValue<void>()
+    const releaseFourth = deferredValue<void>()
+    const releaseFifth = deferredValue<void>()
+    const pendingEntered = deferredValue<void>()
+    const releasePending = deferredValue<void>()
+    const timers = new Map<number, () => void>()
+    let timerId = 0
+    let boundaryCount = 0
+    const manager = new BookSessionManager(
+      '/resource-handoff-budget-user-data',
+      undefined,
+      undefined,
+      undefined,
+      {
+        beforeResourceOpen: async (reference) => {
+          if (reference === names[5]) {
+            pendingEntered.resolve()
+            await releasePending.promise
+          }
+        },
+        afterResourceOpen: async (reference) => {
+          if (reference === names[3] || reference === names[4]) {
+            boundaryCount += 1
+            if (boundaryCount === 2) boundaryOpened.resolve()
+            await (reference === names[3] ? releaseFourth.promise : releaseFifth.promise)
+          }
+        },
+        resourceQueueClock: {
+          setTimeout: (callback) => {
+            const id = ++timerId
+            timers.set(id, callback)
+            return id
+          },
+          clearTimeout: (timer) => {
+            timers.delete(timer as number)
+          }
+        }
+      }
+    )
+    const opened = await manager.openPicker({ sender: { id: 118 } } as never)
+    expect(opened.ok).toBe(true)
+    if (!opened.ok || !opened.value.entryNodeId) return
+    await manager.readChapter(opened.value.sessionId, opened.value.entryNodeId, 118)
+    const request = (reference: string) => ({
+      sessionId: opened.value.sessionId,
+      resourceToken: opened.value.resourceToken,
+      nodeId: opened.value.entryNodeId as string,
+      reference
+    })
+    for (const reference of names.slice(0, 3)) {
+      expect(await manager.readResource(request(reference), 118)).toMatchObject({ ok: true })
+    }
+    const fourth = manager.readResource(request(names[3] as string), 118)
+    const fifth = manager.readResource(request(names[4] as string), 118)
+    await boundaryOpened.promise
+    const pending = manager.readResource(request(names[5] as string), 118)
+    releaseFourth.resolve()
+    expect(await fourth).toMatchObject({ ok: true })
+    await pendingEntered.promise
+    expect(timers.size).toBe(1)
+    releaseFifth.resolve()
+    expect(await fifth).toMatchObject({
+      ok: false,
+      error: { code: 'resource-too-large' }
+    })
+    expect(timers.size).toBe(0)
+    releasePending.resolve()
+    expect(await pending).toMatchObject({
+      ok: false,
+      error: { code: 'resource-too-large' }
+    })
+    const state = manager as unknown as {
+      pendingQueuedResourceStartsByOwner: Map<number, unknown>
+      queuedResourceReadsByOwner: Map<number, number>
+      activeResourceReadsByOwner: Map<number, number>
+    }
+    expect(state.pendingQueuedResourceStartsByOwner.size).toBe(0)
+    expect(state.queuedResourceReadsByOwner.size).toBe(0)
+    expect(state.activeResourceReadsByOwner.size).toBe(0)
+  }, 15_000)
+
+  it.each(['closeSession', 'cleanupOwner'] as const)(
+    'releases a pending pre-open handoff on %s',
+    async (operation) => {
+      const root = await makeRasterBook(3)
+      mocks.selectedPath = root
+      const initialOpened = deferredValue<void>()
+      const releaseInitial = deferredValue<void>()
+      const pendingEntered = deferredValue<void>()
+      const releasePending = deferredValue<void>()
+      const timers = new Map<number, () => void>()
+      let timerId = 0
+      let initialCount = 0
+      const ownerId = operation === 'closeSession' ? 119 : 120
+      const manager = new BookSessionManager(
+        `/resource-handoff-${operation}-user-data`,
+        undefined,
+        undefined,
+        undefined,
+        {
+          beforeResourceOpen: async (reference) => {
+            if (reference === 'image-2.png') {
+              pendingEntered.resolve()
+              await releasePending.promise
+            }
+          },
+          afterResourceOpen: async (reference) => {
+            if (reference === 'image-0.png' || reference === 'image-1.png') {
+              initialCount += 1
+              if (initialCount === 2) initialOpened.resolve()
+              await releaseInitial.promise
+            }
+          },
+          resourceQueueClock: {
+            setTimeout: (callback) => {
+              const id = ++timerId
+              timers.set(id, callback)
+              return id
+            },
+            clearTimeout: (timer) => {
+              timers.delete(timer as number)
+            }
+          }
+        }
+      )
+      const opened = await manager.openPicker({ sender: { id: ownerId } } as never)
+      expect(opened.ok).toBe(true)
+      if (!opened.ok || !opened.value.entryNodeId) return
+      await manager.readChapter(opened.value.sessionId, opened.value.entryNodeId, ownerId)
+      const request = (reference: string) => ({
+        sessionId: opened.value.sessionId,
+        resourceToken: opened.value.resourceToken,
+        nodeId: opened.value.entryNodeId as string,
+        reference
+      })
+      const initial = [
+        manager.readResource(request('image-0.png'), ownerId),
+        manager.readResource(request('image-1.png'), ownerId)
+      ]
+      await initialOpened.promise
+      const pending = manager.readResource(request('image-2.png'), ownerId)
+      releaseInitial.resolve()
+      await pendingEntered.promise
+      await Promise.all(initial)
+      expect(timers.size).toBe(1)
+
+      if (operation === 'closeSession') {
+        expect(manager.closeSession(opened.value.sessionId, ownerId)).toEqual({
+          ok: true,
+          value: true
+        })
+      } else {
+        manager.cleanupOwner(ownerId)
+      }
+      expect(timers.size).toBe(0)
+      releasePending.resolve()
+      expect(await pending).toMatchObject({
+        ok: false,
+        error: { code: 'session-not-found' }
+      })
+      const state = manager as unknown as {
+        pendingQueuedResourceStartsByOwner: Map<number, unknown>
+        queuedResourceReadsByOwner: Map<number, number>
+        activeResourceReadsByOwner: Map<number, number>
+      }
+      expect(state.pendingQueuedResourceStartsByOwner.size).toBe(0)
+      expect(state.queuedResourceReadsByOwner.size).toBe(0)
+      expect(state.activeResourceReadsByOwner.size).toBe(0)
+    },
+    10_000
+  )
+
+  it('cancels queued and in-flight resource reads when the chapter nonce changes', async () => {
+    const root = await makeBook({
+      'SUMMARY.md': '- [Start](start.md)\n',
+      'start.md': '# Start\n\n![One](one.png)\n\n![Two](two.png)\n\n![Three](three.png)\n'
+    })
+    for (const name of ['one.png', 'two.png', 'three.png']) {
+      await fs.writeFile(path.join(root, name), testPng)
+    }
+    mocks.selectedPath = root
+    const bothOpened = deferredValue<void>()
+    const release = deferredValue<void>()
+    let openCount = 0
+    const manager = new BookSessionManager(
+      '/resource-queue-stale-user-data',
+      undefined,
+      undefined,
+      undefined,
+      {
+        afterResourceOpen: async () => {
+          openCount += 1
+          if (openCount === 2) bothOpened.resolve()
+          await release.promise
+        }
+      }
+    )
+    const opened = await manager.openPicker({ sender: { id: 110 } } as never)
+    expect(opened.ok).toBe(true)
+    if (!opened.ok || !opened.value.entryNodeId) return
+    await manager.readChapter(opened.value.sessionId, opened.value.entryNodeId, 110)
+    const request = {
+      sessionId: opened.value.sessionId,
+      resourceToken: opened.value.resourceToken,
+      nodeId: opened.value.entryNodeId
+    }
+    const first = manager.readResource({ ...request, reference: 'one.png' }, 110)
+    const second = manager.readResource({ ...request, reference: 'two.png' }, 110)
+    await bothOpened.promise
+    const queued = manager.readResource({ ...request, reference: 'three.png' }, 110)
+
+    expect(
+      await manager.readChapter(opened.value.sessionId, opened.value.entryNodeId, 110)
+    ).toMatchObject({ ok: true })
+    expect(await queued).toMatchObject({
+      ok: false,
+      error: { code: 'session-not-found' }
+    })
+    expect(openCount).toBe(2)
+    release.resolve()
+    expect(await Promise.all([first, second])).toEqual([
+      expect.objectContaining({ ok: false }),
+      expect.objectContaining({ ok: false })
+    ])
+  }, 10_000)
+
+  it('enforces the global resource concurrency budget across owners', async () => {
+    const root = await makeBook({
+      'SUMMARY.md': '- [Start](start.md)\n',
+      'start.md': '# Start\n\n![Cover](cover.png)\n'
+    })
+    await fs.writeFile(path.join(root, 'cover.png'), testPng)
+    mocks.selectedPath = root
+    const allOpened = deferredValue<void>()
+    const release = deferredValue<void>()
+    let count = 0
+    const manager = new BookSessionManager(
+      '/resource-global-budget-user-data',
+      undefined,
+      undefined,
+      undefined,
+      {
+        afterResourceOpen: async () => {
+          count += 1
+          if (count === 8) allOpened.resolve()
+          await release.promise
+        }
+      }
+    )
+    const sessions = []
+    for (let ownerId = 200; ownerId < 209; ownerId += 1) {
+      const opened = await manager.openPicker({ sender: { id: ownerId } } as never)
+      expect(opened.ok).toBe(true)
+      if (!opened.ok || !opened.value.entryNodeId) return
+      await manager.readChapter(opened.value.sessionId, opened.value.entryNodeId, ownerId)
+      sessions.push({ ownerId, session: opened.value })
+    }
+    const reads = sessions.slice(0, 8).map(({ ownerId, session }) =>
+      manager.readResource(
+        {
+          sessionId: session.sessionId,
+          resourceToken: session.resourceToken,
+          nodeId: session.entryNodeId as string,
+          reference: 'cover.png'
+        },
+        ownerId
+      )
+    )
+    await allOpened.promise
+    const ninth = sessions[8]
+    expect(ninth).toBeDefined()
+    if (!ninth || !ninth.session.entryNodeId) return
+    const ninthRead = manager.readResource(
+      {
+        sessionId: ninth.session.sessionId,
+        resourceToken: ninth.session.resourceToken,
+        nodeId: ninth.session.entryNodeId,
+        reference: 'cover.png'
+      },
+      ninth.ownerId
+    )
+    await Promise.resolve()
+    expect(count).toBe(8)
+    release.resolve()
+    expect((await Promise.all(reads)).every((result) => result.ok)).toBe(true)
+    expect(await ninthRead).toMatchObject({ ok: true })
+  })
+
+  it('atomically fail-stops a chapter generation at the cumulative decode budget', async () => {
+    const names = Array.from({ length: 6 }, (_, index) => `large-${index}.gif`)
+    const root = await makeBook({
+      'SUMMARY.md': '- [Start](start.md)\n',
+      'start.md': ['# Start', ...names.map((name) => `![${name}](${name})`)].join('\n\n')
+    })
+    for (const name of names) await fs.writeFile(path.join(root, name), largeCanvasGif())
+    mocks.selectedPath = root
+    let openedFiles = 0
+    const manager = new BookSessionManager(
+      '/resource-cumulative-budget-user-data',
+      undefined,
+      undefined,
+      undefined,
+      {
+        afterResourceOpen: async () => {
+          openedFiles += 1
+        }
+      }
+    )
+    const opened = await manager.openPicker({ sender: { id: 109 } } as never)
+    expect(opened.ok).toBe(true)
+    if (!opened.ok || !opened.value.entryNodeId) return
+    await manager.readChapter(opened.value.sessionId, opened.value.entryNodeId, 109)
+    const request = {
+      sessionId: opened.value.sessionId,
+      resourceToken: opened.value.resourceToken,
+      nodeId: opened.value.entryNodeId
+    }
+
+    for (const reference of names.slice(0, 3)) {
+      expect(await manager.readResource({ ...request, reference }, 109)).toMatchObject({
+        ok: true,
+        value: { decodePixels: 30_000_000 }
+      })
+    }
+    const boundary = await Promise.all(
+      names.slice(3, 5).map((reference) => manager.readResource({ ...request, reference }, 109))
+    )
+    expect(boundary.filter((result) => result.ok)).toHaveLength(1)
+    expect(boundary.filter((result) => !result.ok)).toHaveLength(1)
+    expect(boundary.find((result) => !result.ok)).toMatchObject({
+      ok: false,
+      error: { code: 'resource-too-large' }
+    })
+    expect(openedFiles).toBe(5)
+
+    expect(await manager.readResource({ ...request, reference: names[5] }, 109)).toMatchObject({
+      ok: false,
+      error: { code: 'resource-too-large' }
+    })
+    expect(openedFiles).toBe(5)
+  }, 15_000)
+
   it('keeps roots out of DTOs and reads only model-owned opaque nodes', async () => {
     const root = await makeBook({
       'SUMMARY.md': '- [Start](README.md)\n- [Next](guide/next.md)\n',
@@ -3417,7 +4731,7 @@ describe('BookSessionManager authorization boundary', () => {
     })
   })
 
-  it('keeps the previous session usable when refresh scanning fails without changing the root', async () => {
+  it('revokes the previous session when refresh scanning fails and recovers by reopening', async () => {
     const root = await makeBook({ 'README.md': '# Still here' })
     mocks.selectedPath = root
     let failScan = false
@@ -3447,7 +4761,57 @@ describe('BookSessionManager authorization boundary', () => {
     })
     expect(
       await manager.readChapter(opened.value.sessionId, opened.value.entryNodeId, 9)
-    ).toMatchObject({ ok: true, value: { title: 'Still here' } })
+    ).toMatchObject({ ok: false, error: { code: 'session-not-found' } })
+    failScan = false
+    expect(await manager.openLibrary(opened.value.libraryId, 9)).toMatchObject({
+      ok: true,
+      value: { title: 'Still here' }
+    })
+  })
+
+  it('contains a throwing refresh loader and revokes both observed resource tokens', async () => {
+    const root = await makeBook({
+      'README.md': '# Throwing refresh\n\n![Cover](cover.png)\n'
+    })
+    await fs.writeFile(path.join(root, 'cover.png'), testPng)
+    let loads = 0
+    const loader: typeof loadBookFromDirectory = async (rootPath, options) => {
+      loads += 1
+      if (loads > 1) throw new Error(`secret loader failure at ${rootPath}`)
+      return loadBookFromDirectory(rootPath, options)
+    }
+    mocks.selectedPath = root
+    const manager = new BookSessionManager('/throwing-refresh-user-data', loader)
+    const opened = await manager.openPicker({ sender: { id: 10 } } as never)
+    expect(opened.ok).toBe(true)
+    if (!opened.ok || !opened.value.entryNodeId) return
+    await manager.readChapter(opened.value.sessionId, opened.value.entryNodeId, 10)
+    const oldToken = opened.value.resourceToken
+
+    const refreshPromise = manager.refresh(opened.value.sessionId, 10)
+    await expect(refreshPromise).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'book-unavailable' }
+    })
+    const refreshResult = await refreshPromise
+    expect(JSON.stringify(refreshResult)).not.toContain(root)
+    expect(JSON.stringify(refreshResult)).not.toContain('secret loader failure')
+    const rotatedToken = opened.value.resourceToken
+    expect(rotatedToken).not.toBe(oldToken)
+
+    for (const resourceToken of [oldToken, rotatedToken]) {
+      expect(
+        await manager.readResource(
+          {
+            sessionId: opened.value.sessionId,
+            resourceToken,
+            nodeId: opened.value.entryNodeId,
+            reference: 'cover.png'
+          },
+          10
+        )
+      ).toMatchObject({ ok: false, error: { code: 'session-not-found' } })
+    }
   })
 
   it('serializes concurrent shelf open and remove mutations without losing either update', async () => {
@@ -3521,6 +4885,55 @@ describe('book HTML export lease', () => {
     if (prepared.ok) manager.cancelExport(prepared.value.exportId, 199)
   })
 
+  it('revokes an expired short-lived export lease before any output can be committed', async () => {
+    const root = await makeBook({ 'one.md': '# One\n' })
+    const destination = await fs.mkdtemp(path.join(os.tmpdir(), 'leafbook-export-expired-'))
+    temporaryDirectories.push(destination)
+    mocks.selectedPath = root
+    mocks.exportPath = path.join(destination, 'book.html')
+    const manager = new BookSessionManager('/export-expired-user-data')
+    const opened = await manager.openPicker({ sender: { id: 198 } } as never)
+    expect(opened.ok).toBe(true)
+    if (!opened.ok) return
+    vi.useFakeTimers({ now: Date.now() })
+    try {
+      const prepared = await manager.beginExport(
+        opened.value.sessionId,
+        { sender: { id: 198 } } as never,
+        198
+      )
+      expect(prepared.ok).toBe(true)
+      if (!prepared.ok) return
+      const internals = manager as unknown as {
+        exportLeases: Map<
+          string,
+          { parentFd: number | null; resourceLedger: { assets: unknown[] } }
+        >
+      }
+      const lease = internals.exportLeases.get(prepared.value.exportId)
+      expect(lease).toBeDefined()
+      await vi.advanceTimersByTimeAsync(120_001)
+      expect(internals.exportLeases.size).toBe(0)
+      expect(lease?.parentFd).toBeNull()
+      expect(lease?.resourceLedger.assets).toEqual([])
+      expect(manager.cancelExport(prepared.value.exportId, 198)).toMatchObject({
+        ok: false,
+        error: { code: 'cancelled' }
+      })
+      await expect(fs.stat(mocks.exportPath)).rejects.toMatchObject({ code: 'ENOENT' })
+      mocks.exportPath = path.join(destination, 'replacement.html')
+      const replacement = await manager.beginExport(
+        opened.value.sessionId,
+        { sender: { id: 198 } } as never,
+        198
+      )
+      expect(replacement).toMatchObject({ ok: true })
+      if (replacement.ok) manager.cancelExport(replacement.value.exportId, 198)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('freezes an opaque snapshot and atomically commits a validated offline export', async () => {
     const root = await makeBook({
       'SUMMARY.md': '- [一](one.md)\n- [一的别名](one.md#标题)\n- [二](two.md)\n',
@@ -3555,6 +4968,269 @@ describe('book HTML export lease', () => {
       ok: false,
       error: { code: 'cancelled' }
     })
+  })
+
+  it('embeds one main-validated data asset across duplicate chapter references', async () => {
+    const root = await makeBook({
+      'SUMMARY.md': '- [One](one.md)\n- [Two](two.md)\n',
+      'one.md': '# One\n\n![cover](cover.png)\n',
+      'two.md': '# Two\n\n![same](cover.png)\n'
+    })
+    await fs.writeFile(path.join(root, 'cover.png'), testPng)
+    const destination = await fs.mkdtemp(path.join(os.tmpdir(), 'leafbook-export-assets-'))
+    temporaryDirectories.push(destination)
+    mocks.selectedPath = root
+    mocks.exportPath = path.join(destination, 'book.html')
+    const manager = new BookSessionManager('/export-assets-user-data')
+    const opened = await manager.openPicker({ sender: { id: 214 } } as never)
+    expect(opened.ok).toBe(true)
+    if (!opened.ok) return
+    const prepared = await manager.beginExport(
+      opened.value.sessionId,
+      { sender: { id: 214 } } as never,
+      214
+    )
+    expect(prepared.ok).toBe(true)
+    if (!prepared.ok) return
+    const targets = prepared.value.documents.flatMap((document) => document.resourceTargets)
+    expect(targets).toHaveLength(2)
+    expect(new Set(targets).size).toBe(1)
+    expect(targets[0]).toMatch(/^data:image\/png;base64,/u)
+    expect(
+      JSON.stringify(prepared.value.documents.map((document) => document.resourceTargets))
+    ).not.toContain('cover.png')
+    const html = await generateBookExportHtml(prepared.value)
+    expect(html).not.toContain('cover.png')
+    expect(html).not.toContain(root)
+    expect(html.match(/data:image\/png;base64,/gu)).toHaveLength(2)
+    const saved = await manager.commitExport({ exportId: prepared.value.exportId, html }, 214)
+    if (!saved.ok) {
+      throw new Error(`${saved.error.code}: ${saved.error.message}`)
+    }
+  })
+
+  it('maps unique HTML targets while preserving duplicate and missing occurrence order', async () => {
+    const root = await makeBook({
+      'one.md': [
+        '# One',
+        '![a-1](a.png)',
+        '![a-2](a.png)',
+        '![b-1](b.gif)',
+        '![missing-1](missing.png)',
+        '![missing-2](missing.png)',
+        '![b-2](b.gif)'
+      ].join('\n\n')
+    })
+    await Promise.all([
+      fs.writeFile(path.join(root, 'a.png'), testPng),
+      fs.writeFile(path.join(root, 'b.gif'), testGif)
+    ])
+    const destination = await fs.mkdtemp(path.join(os.tmpdir(), 'leafbook-export-order-'))
+    temporaryDirectories.push(destination)
+    mocks.selectedPath = root
+    mocks.exportPath = path.join(destination, 'book.html')
+    const manager = new BookSessionManager('/export-order-user-data')
+    const opened = await manager.openPicker({ sender: { id: 216 } } as never)
+    expect(opened.ok).toBe(true)
+    if (!opened.ok) return
+    const prepared = await manager.beginExport(
+      opened.value.sessionId,
+      { sender: { id: 216 } } as never,
+      216
+    )
+    expect(prepared.ok).toBe(true)
+    if (!prepared.ok) return
+    const targets = prepared.value.documents[0]?.resourceTargets ?? []
+    expect(targets).toHaveLength(3)
+    expect(targets[2]).toBeNull()
+    const html = await generateBookExportHtml(prepared.value)
+    const sources = [...html.matchAll(/<img\b[^>]*\bsrc="([^"]+)"[^>]*>/giu)].map(
+      (match) => match[1]
+    )
+    expect(sources).toEqual([targets[0], targets[0], targets[1], targets[1]])
+    expect(html.match(/<span class="leafbook-media-placeholder"/gu)).toHaveLength(2)
+    await expect(
+      manager.commitExport({ exportId: prepared.value.exportId, html }, 216)
+    ).resolves.toMatchObject({ ok: true })
+  })
+
+  it('rejects a resource changed after the export ledger was prepared', async () => {
+    const root = await makeBook({
+      'SUMMARY.md': '- [One](one.md)\n',
+      'one.md': '# One\n\n![cover](cover.png)\n'
+    })
+    await fs.writeFile(path.join(root, 'cover.png'), testPng)
+    const destination = await fs.mkdtemp(path.join(os.tmpdir(), 'leafbook-export-asset-race-'))
+    temporaryDirectories.push(destination)
+    mocks.selectedPath = root
+    mocks.exportPath = path.join(destination, 'book.html')
+    const manager = new BookSessionManager('/export-asset-race-user-data')
+    const opened = await manager.openPicker({ sender: { id: 215 } } as never)
+    expect(opened.ok).toBe(true)
+    if (!opened.ok) return
+    const prepared = await manager.beginExport(
+      opened.value.sessionId,
+      { sender: { id: 215 } } as never,
+      215
+    )
+    expect(prepared.ok).toBe(true)
+    if (!prepared.ok) return
+    const html = await generateBookExportHtml(prepared.value)
+    await fs.writeFile(path.join(root, 'cover.png'), testGif)
+    await expect(
+      manager.commitExport({ exportId: prepared.value.exportId, html }, 215)
+    ).resolves.toMatchObject({ ok: false, error: { code: 'export-source-changed' } })
+    await expect(fs.stat(mocks.exportPath)).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  it.each([
+    ['missing-created', false, true, false],
+    ['invalid-replaced-with-valid', true, true, false],
+    ['unchanged-invalid', true, false, true]
+  ] as const)(
+    'binds the final HTML placeholder to its exact negative source state: %s',
+    async (_label, initiallyInvalid, replaceWithValid, succeeds) => {
+      const root = await makeBook({ 'one.md': '# One\n\n![cover](cover.png)\n' })
+      const imagePath = path.join(root, 'cover.png')
+      if (initiallyInvalid) await fs.writeFile(imagePath, 'not-a-png')
+      const destination = await fs.mkdtemp(path.join(os.tmpdir(), 'leafbook-export-negative-'))
+      temporaryDirectories.push(destination)
+      mocks.selectedPath = root
+      mocks.exportPath = path.join(destination, 'book.html')
+      const ownerId = 230 + (initiallyInvalid ? 1 : 0) + (replaceWithValid ? 2 : 0)
+      const manager = new BookSessionManager(
+        `/export-negative-${randomUUID()}`,
+        loadBookFromDirectory,
+        safelyReadBookChapter,
+        undefined,
+        {
+          beforeExportCommitCritical: () => {
+            if (replaceWithValid) fsSync.writeFileSync(imagePath, testPng)
+          }
+        }
+      )
+      const opened = await manager.openPicker({ sender: { id: ownerId } } as never)
+      expect(opened.ok).toBe(true)
+      if (!opened.ok) return
+      const prepared = await manager.beginExport(
+        opened.value.sessionId,
+        { sender: { id: ownerId } } as never,
+        ownerId
+      )
+      expect(prepared.ok).toBe(true)
+      if (!prepared.ok) return
+      expect(prepared.value.documents[0]?.resourceTargets).toEqual([null])
+      const html = await generateBookExportHtml(prepared.value)
+      const result = await manager.commitExport(
+        { exportId: prepared.value.exportId, html },
+        ownerId
+      )
+      expect(result.ok).toBe(succeeds)
+      if (!succeeds) {
+        expect(result).toMatchObject({ ok: false, error: { code: 'export-source-changed' } })
+        await expect(fs.stat(mocks.exportPath)).rejects.toMatchObject({ code: 'ENOENT' })
+      }
+    }
+  )
+
+  it('classifies an unverifiable negative image source as source-changed instead of too-large', async () => {
+    const root = await makeBook({ 'one.md': '# One\n\n![cover](cover.png)\n' })
+    const imagePath = path.join(root, 'cover.png')
+    await fs.writeFile(imagePath, 'not-a-png')
+    const destination = await fs.mkdtemp(path.join(os.tmpdir(), 'leafbook-export-unverifiable-'))
+    temporaryDirectories.push(destination)
+    mocks.selectedPath = root
+    mocks.exportPath = path.join(destination, 'book.html')
+    await fs.chmod(imagePath, 0o000)
+    try {
+      const manager = new BookSessionManager('/export-unverifiable-user-data')
+      const opened = await manager.openPicker({ sender: { id: 236 } } as never)
+      expect(opened.ok).toBe(true)
+      if (!opened.ok) return
+      await expect(
+        manager.beginExport(opened.value.sessionId, { sender: { id: 236 } } as never, 236)
+      ).resolves.toMatchObject({
+        ok: false,
+        error: { code: 'export-source-changed' }
+      })
+    } finally {
+      await fs.chmod(imagePath, 0o600)
+    }
+  })
+
+  it('rechecks HTML lease expiry after the final synchronous source validation', async () => {
+    const root = await makeBook({ 'one.md': '# One\n\n![cover](cover.png)\n' })
+    await fs.writeFile(path.join(root, 'cover.png'), testPng)
+    const destination = await fs.mkdtemp(path.join(os.tmpdir(), 'leafbook-export-final-ttl-'))
+    temporaryDirectories.push(destination)
+    mocks.selectedPath = root
+    mocks.exportPath = path.join(destination, 'book.html')
+    vi.useFakeTimers({ now: Date.now() })
+    try {
+      const manager = new BookSessionManager(
+        '/export-final-ttl-user-data',
+        loadBookFromDirectory,
+        safelyReadBookChapter,
+        undefined,
+        {
+          beforeExportCommitCritical: () => {
+            vi.setSystemTime(Date.now() + 120_001)
+          }
+        }
+      )
+      const opened = await manager.openPicker({ sender: { id: 235 } } as never)
+      expect(opened.ok).toBe(true)
+      if (!opened.ok) return
+      const prepared = await manager.beginExport(
+        opened.value.sessionId,
+        { sender: { id: 235 } } as never,
+        235
+      )
+      expect(prepared.ok).toBe(true)
+      if (!prepared.ok) return
+      const html = await generateBookExportHtml(prepared.value)
+      await expect(
+        manager.commitExport({ exportId: prepared.value.exportId, html }, 235)
+      ).resolves.toMatchObject({ ok: false, error: { code: 'cancelled' } })
+      await expect(fs.stat(mocks.exportPath)).rejects.toMatchObject({ code: 'ENOENT' })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('rechecks raw resource identity and bytes synchronously beside final HTML rename', async () => {
+    const root = await makeBook({
+      'SUMMARY.md': '- [One](one.md)\n',
+      'one.md': '# One\n\n![cover](cover.png)\n'
+    })
+    const imagePath = path.join(root, 'cover.png')
+    await fs.writeFile(imagePath, testPng)
+    const destination = await fs.mkdtemp(path.join(os.tmpdir(), 'leafbook-export-final-image-'))
+    temporaryDirectories.push(destination)
+    mocks.selectedPath = root
+    mocks.exportPath = path.join(destination, 'book.html')
+    const manager = new BookSessionManager(
+      '/export-final-image-user-data',
+      loadBookFromDirectory,
+      safelyReadBookChapter,
+      undefined,
+      { beforeExportCommitCritical: () => fsSync.writeFileSync(imagePath, testGif) }
+    )
+    const opened = await manager.openPicker({ sender: { id: 216 } } as never)
+    expect(opened.ok).toBe(true)
+    if (!opened.ok) return
+    const prepared = await manager.beginExport(
+      opened.value.sessionId,
+      { sender: { id: 216 } } as never,
+      216
+    )
+    expect(prepared.ok).toBe(true)
+    if (!prepared.ok) return
+    const html = await generateBookExportHtml(prepared.value)
+    await expect(
+      manager.commitExport({ exportId: prepared.value.exportId, html }, 216)
+    ).resolves.toMatchObject({ ok: false, error: { code: 'export-source-changed' } })
+    await expect(fs.stat(mocks.exportPath)).rejects.toMatchObject({ code: 'ENOENT' })
   })
 
   it('rejects source mutation and canonical source-root destinations', async () => {
@@ -3718,6 +5394,71 @@ describe('book HTML export lease', () => {
         (await fs.readdir(destination)).filter((name) => name.includes('leafbook-export'))
       ).toEqual([])
     }
+  })
+
+  it('removes a revoked active export from admission before disposing its in-flight ledger', async () => {
+    const root = await makeBook({ 'one.md': '# One\n\n![cover](cover.png)\n' })
+    await fs.writeFile(path.join(root, 'cover.png'), testPng)
+    const destination = await fs.mkdtemp(path.join(os.tmpdir(), 'leafbook-export-inflight-'))
+    temporaryDirectories.push(destination)
+    mocks.selectedPath = root
+    mocks.exportPath = path.join(destination, 'book.html')
+    const reached = deferredValue<void>()
+    const release = deferredValue<void>()
+    const manager = new BookSessionManager(
+      '/export-inflight-user-data',
+      loadBookFromDirectory,
+      safelyReadBookChapter,
+      undefined,
+      {
+        afterExportTempSync: async () => {
+          reached.resolve()
+          await release.promise
+        }
+      }
+    )
+    const opened = await manager.openPicker({ sender: { id: 217 } } as never)
+    expect(opened.ok).toBe(true)
+    if (!opened.ok) return
+    const prepared = await manager.beginExport(
+      opened.value.sessionId,
+      { sender: { id: 217 } } as never,
+      217
+    )
+    expect(prepared.ok).toBe(true)
+    if (!prepared.ok) return
+    const internals = manager as unknown as {
+      exportLeases: Map<
+        string,
+        {
+          parentFd: number | null
+          inFlight: number
+          disposed: boolean
+          resourceLedger: { assets: Array<{ bytes: Uint8Array }> }
+        }
+      >
+    }
+    const lease = internals.exportLeases.get(prepared.value.exportId)
+    const operation = manager.commitExport(
+      {
+        exportId: prepared.value.exportId,
+        html: await generateBookExportHtml(prepared.value)
+      },
+      217
+    )
+    await reached.promise
+    expect(manager.cancelExport(prepared.value.exportId, 217)).toEqual({ ok: true, value: true })
+    expect(internals.exportLeases.has(prepared.value.exportId)).toBe(false)
+    expect(lease?.inFlight).toBe(1)
+    expect(lease?.disposed).toBe(false)
+    expect(lease?.parentFd).not.toBeNull()
+    expect(lease?.resourceLedger.assets[0]?.bytes.byteLength).toBeGreaterThan(0)
+    release.resolve()
+    await expect(operation).resolves.toMatchObject({ ok: false, error: { code: 'cancelled' } })
+    expect(lease?.inFlight).toBe(0)
+    expect(lease?.disposed).toBe(true)
+    expect(lease?.parentFd).toBeNull()
+    expect(lease?.resourceLedger.assets).toEqual([])
   })
 
   it.each(['before-temp', 'before-rename'] as const)(
@@ -4053,6 +5794,104 @@ describe('book local website transaction', () => {
     return manager.commitWebsite({ websiteId: prepared.value.websiteId, html }, ownerId)
   }
 
+  it('revokes an expired website lease before staging any files', async () => {
+    const root = await makeBook({ 'one.md': '# One\n' })
+    const destination = await fs.mkdtemp(path.join(os.tmpdir(), 'leafbook-site-expired-'))
+    temporaryDirectories.push(destination)
+    const target = path.join(destination, 'LeafBook-site')
+    mocks.selectedPath = root
+    mocks.exportPath = target
+    const manager = new BookSessionManager('/website-expired-user-data')
+    const opened = await manager.openPicker({ sender: { id: 300 } } as never)
+    expect(opened.ok).toBe(true)
+    if (!opened.ok) return
+    vi.useFakeTimers({ now: Date.now() })
+    try {
+      const prepared = await manager.beginWebsite(
+        opened.value.sessionId,
+        { sender: { id: 300 } } as never,
+        300
+      )
+      expect(prepared.ok).toBe(true)
+      if (!prepared.ok) return
+      await vi.advanceTimersByTimeAsync(120_001)
+      expect(manager.cancelWebsite(prepared.value.websiteId, 300)).toMatchObject({
+        ok: false,
+        error: { code: 'cancelled' }
+      })
+      await expect(fs.stat(target)).rejects.toMatchObject({ code: 'ENOENT' })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it.each([
+    ['cancel-after-first-asset', 0, false],
+    ['cancel-after-middle-asset', 1, false],
+    ['ttl-after-first-asset', 0, true]
+  ] as const)('removes an exact partial stage on %s', async (_label, stopIndex, expire) => {
+    const root = await makeBook({
+      'one.md': '# One\n\n![a](a.png)\n\n![b](b.gif)\n\n![c](c.svg)\n'
+    })
+    await Promise.all([
+      fs.writeFile(path.join(root, 'a.png'), testPng),
+      fs.writeFile(path.join(root, 'b.gif'), testGif),
+      fs.writeFile(
+        path.join(root, 'c.svg'),
+        '<svg xmlns="http://www.w3.org/2000/svg" width="2" height="2"><rect width="2" height="2" fill="#123456"/></svg>'
+      )
+    ])
+    const destination = await fs.mkdtemp(path.join(os.tmpdir(), 'leafbook-site-partial-'))
+    temporaryDirectories.push(destination)
+    const target = path.join(destination, 'LeafBook-site')
+    mocks.selectedPath = root
+    mocks.exportPath = target
+    const ownerId = 316 + stopIndex + (expire ? 10 : 0)
+    let websiteId = ''
+    const manager = new BookSessionManager(
+      `/website-partial-${randomUUID()}`,
+      loadBookFromDirectory,
+      safelyReadBookChapter,
+      undefined,
+      {
+        afterWebsiteAssetWrite: async (assetIndex) => {
+          if (assetIndex !== stopIndex) return
+          if (expire) {
+            await vi.advanceTimersByTimeAsync(120_001)
+          } else {
+            expect(manager.cancelWebsite(websiteId, ownerId)).toEqual({ ok: true, value: true })
+          }
+        }
+      }
+    )
+    if (expire) vi.useFakeTimers({ now: Date.now() })
+    try {
+      const opened = await manager.openPicker({ sender: { id: ownerId } } as never)
+      expect(opened.ok).toBe(true)
+      if (!opened.ok) return
+      const prepared = await manager.beginWebsite(
+        opened.value.sessionId,
+        { sender: { id: ownerId } } as never,
+        ownerId
+      )
+      expect(prepared.ok).toBe(true)
+      if (!prepared.ok) return
+      websiteId = prepared.value.websiteId
+      const html = await generateBookExportHtml({
+        ...prepared.value,
+        exportId: prepared.value.websiteId
+      })
+      await expect(manager.commitWebsite({ websiteId, html }, ownerId)).resolves.toMatchObject({
+        ok: false,
+        error: { code: 'cancelled' }
+      })
+      await expect(fs.stat(target)).rejects.toMatchObject({ code: 'ENOENT' })
+      expect((await fs.readdir(destination)).filter((name) => name.includes('stage'))).toEqual([])
+    } finally {
+      if (expire) vi.useRealTimers()
+    }
+  })
+
   it('creates exactly index and a canonical main-owned manifest in an absent target', async () => {
     const root = await makeBook({
       'SUMMARY.md': '- [一](one.md)\n- [别名](one.md#标题)\n- [缺失](missing.md)\n',
@@ -4080,7 +5919,7 @@ describe('book local website transaction', () => {
     const manifestBytes = await fs.readFile(path.join(target, 'leafbook-manifest.json'))
     const manifest = JSON.parse(manifestBytes.toString())
     expect(manifest).toEqual({
-      schemaVersion: 1,
+      schemaVersion: 2,
       generator: 'LeafBook',
       files: [
         {
@@ -4092,6 +5931,173 @@ describe('book local website transaction', () => {
     })
     expect(html.toString()).toContain('中文正文')
     expect(html.toString()).not.toContain(root)
+  })
+
+  it('writes deduplicated hashed assets and binds every website file in the manifest', async () => {
+    const root = await makeBook({
+      'SUMMARY.md': '- [One](one.md)\n- [Two](two.md)\n',
+      'one.md': '# One\n\n![cover](cover.png)\n',
+      'two.md': '# Two\n\n![duplicate](duplicate.png)\n'
+    })
+    await Promise.all([
+      fs.writeFile(path.join(root, 'cover.png'), testPng),
+      fs.writeFile(path.join(root, 'duplicate.png'), testPng)
+    ])
+    const destination = await fs.mkdtemp(path.join(os.tmpdir(), 'leafbook-site-assets-'))
+    temporaryDirectories.push(destination)
+    const target = path.join(destination, 'LeafBook-site')
+    mocks.selectedPath = root
+    mocks.exportPath = target
+    const manager = new BookSessionManager('/website-assets-user-data')
+    const opened = await manager.openPicker({ sender: { id: 314 } } as never)
+    expect(opened.ok).toBe(true)
+    if (!opened.ok) return
+    const saved = await generate(manager, opened.value.sessionId, 314)
+    if (!saved.ok) {
+      throw new Error(`${saved.error.code}: ${saved.error.message}`)
+    }
+    if (!saved.ok) return
+    const assets = await fs.readdir(path.join(target, 'assets'))
+    expect(assets).toHaveLength(1)
+    expect(assets[0]).toMatch(/^[a-f0-9]{64}\.png$/u)
+    const html = await fs.readFile(path.join(target, 'index.html'), 'utf8')
+    expect(html).toContain(`assets/${assets[0]}`)
+    expect(html).not.toMatch(/cover\.png|duplicate\.png|file:|https?:/u)
+    const manifest = JSON.parse(
+      await fs.readFile(path.join(target, 'leafbook-manifest.json'), 'utf8')
+    ) as { files: Array<{ path: string; size: number; sha256: string }> }
+    expect(manifest.files.map((file) => file.path)).toEqual([`assets/${assets[0]}`, 'index.html'])
+    for (const file of manifest.files) {
+      const bytes = await fs.readFile(path.join(target, ...file.path.split('/')))
+      expect(file).toMatchObject({
+        size: bytes.byteLength,
+        sha256: createHash('sha256').update(bytes).digest('hex')
+      })
+    }
+  })
+
+  it('maps unique website targets while preserving duplicate and missing occurrence order', async () => {
+    const root = await makeBook({
+      'one.md': [
+        '# One',
+        '![a-1](a.png)',
+        '![a-2](a.png)',
+        '![b-1](b.gif)',
+        '![missing-1](missing.png)',
+        '![missing-2](missing.png)',
+        '![b-2](b.gif)'
+      ].join('\n\n')
+    })
+    await Promise.all([
+      fs.writeFile(path.join(root, 'a.png'), testPng),
+      fs.writeFile(path.join(root, 'b.gif'), testGif)
+    ])
+    const destination = await fs.mkdtemp(path.join(os.tmpdir(), 'leafbook-site-order-'))
+    temporaryDirectories.push(destination)
+    const target = path.join(destination, 'LeafBook-site')
+    mocks.selectedPath = root
+    mocks.exportPath = target
+    const manager = new BookSessionManager('/website-order-user-data')
+    const opened = await manager.openPicker({ sender: { id: 315 } } as never)
+    expect(opened.ok).toBe(true)
+    if (!opened.ok) return
+    const prepared = await manager.beginWebsite(
+      opened.value.sessionId,
+      { sender: { id: 315 } } as never,
+      315
+    )
+    expect(prepared.ok).toBe(true)
+    if (!prepared.ok) return
+    const targets = prepared.value.documents[0]?.resourceTargets ?? []
+    expect(targets).toHaveLength(3)
+    expect(targets[2]).toBeNull()
+    const html = await generateBookExportHtml({
+      ...prepared.value,
+      exportId: prepared.value.websiteId
+    })
+    const sources = [...html.matchAll(/<img\b[^>]*\bsrc="([^"]+)"[^>]*>/giu)].map(
+      (match) => match[1]
+    )
+    expect(sources).toEqual([targets[0], targets[0], targets[1], targets[1]])
+    expect(html.match(/<span class="leafbook-media-placeholder"/gu)).toHaveLength(2)
+    await expect(
+      manager.commitWebsite({ websiteId: prepared.value.websiteId, html }, 315)
+    ).resolves.toMatchObject({ ok: true })
+  })
+
+  it.each([
+    ['missing-created', false, true, false],
+    ['invalid-replaced-with-valid', true, true, false],
+    ['unchanged-invalid', true, false, true]
+  ] as const)(
+    'binds the final website placeholder to its exact negative source state: %s',
+    async (_label, initiallyInvalid, replaceWithValid, succeeds) => {
+      const root = await makeBook({ 'one.md': '# One\n\n![cover](cover.png)\n' })
+      const imagePath = path.join(root, 'cover.png')
+      if (initiallyInvalid) await fs.writeFile(imagePath, 'not-a-png')
+      const destination = await fs.mkdtemp(path.join(os.tmpdir(), 'leafbook-site-negative-'))
+      temporaryDirectories.push(destination)
+      const target = path.join(destination, 'LeafBook-site')
+      mocks.selectedPath = root
+      mocks.exportPath = target
+      const ownerId = 335 + (initiallyInvalid ? 1 : 0) + (replaceWithValid ? 2 : 0)
+      const manager = new BookSessionManager(
+        `/website-negative-${randomUUID()}`,
+        loadBookFromDirectory,
+        safelyReadBookChapter,
+        undefined,
+        {
+          beforeExportCommitCritical: () => {
+            if (replaceWithValid) fsSync.writeFileSync(imagePath, testPng)
+          }
+        }
+      )
+      const opened = await manager.openPicker({ sender: { id: ownerId } } as never)
+      expect(opened.ok).toBe(true)
+      if (!opened.ok) return
+      const result = await generate(manager, opened.value.sessionId, ownerId)
+      expect(result.ok).toBe(succeeds)
+      if (!succeeds) {
+        expect(result).toMatchObject({ ok: false, error: { code: 'website-source-changed' } })
+        await expect(fs.stat(target)).rejects.toMatchObject({ code: 'ENOENT' })
+        expect((await fs.readdir(destination)).filter((name) => name.includes('stage'))).toEqual([])
+      }
+    }
+  )
+
+  it('rechecks website lease expiry after final synchronous validation and removes the stage', async () => {
+    const root = await makeBook({ 'one.md': '# One\n\n![cover](cover.png)\n' })
+    await fs.writeFile(path.join(root, 'cover.png'), testPng)
+    const destination = await fs.mkdtemp(path.join(os.tmpdir(), 'leafbook-site-final-ttl-'))
+    temporaryDirectories.push(destination)
+    const target = path.join(destination, 'LeafBook-site')
+    mocks.selectedPath = root
+    mocks.exportPath = target
+    vi.useFakeTimers({ now: Date.now() })
+    try {
+      const manager = new BookSessionManager(
+        '/website-final-ttl-user-data',
+        loadBookFromDirectory,
+        safelyReadBookChapter,
+        undefined,
+        {
+          beforeWebsiteStageRename: () => {
+            vi.setSystemTime(Date.now() + 120_001)
+          }
+        }
+      )
+      const opened = await manager.openPicker({ sender: { id: 340 } } as never)
+      expect(opened.ok).toBe(true)
+      if (!opened.ok) return
+      await expect(generate(manager, opened.value.sessionId, 340)).resolves.toMatchObject({
+        ok: false,
+        error: { code: 'cancelled' }
+      })
+      await expect(fs.stat(target)).rejects.toMatchObject({ code: 'ENOENT' })
+      expect((await fs.readdir(destination)).filter((name) => name.includes('stage'))).toEqual([])
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('replaces empty and exact-owned targets, but refuses unknown or tampered targets', async () => {
@@ -4130,6 +6136,58 @@ describe('book local website transaction', () => {
       await manager.beginWebsite(opened.value.sessionId, { sender: { id: 302 } } as never, 302)
     ).toMatchObject({ ok: false, error: { code: 'website-unsafe-target' } })
   })
+
+  it.each(['missing-to-valid', 'corrupt-to-valid', 'markdown-change'] as const)(
+    'restores an owned website when %s is detected after the old target is backed up',
+    async (mutation) => {
+      const imageMarkdown = mutation === 'markdown-change' ? '' : '\n\n![cover](cover.png)\n'
+      const root = await makeBook({ 'one.md': `# One${imageMarkdown}` })
+      const imagePath = path.join(root, 'cover.png')
+      if (mutation === 'corrupt-to-valid') await fs.writeFile(imagePath, 'not-a-png')
+      const destination = await fs.mkdtemp(path.join(os.tmpdir(), 'leafbook-site-rollback-source-'))
+      temporaryDirectories.push(destination)
+      const target = path.join(destination, 'LeafBook-site')
+      mocks.selectedPath = root
+      mocks.exportPath = target
+      const ownerId =
+        mutation === 'missing-to-valid' ? 350 : mutation === 'corrupt-to-valid' ? 351 : 352
+      let armed = false
+      const manager = new BookSessionManager(
+        `/website-rollback-source-${randomUUID()}`,
+        loadBookFromDirectory,
+        safelyReadBookChapter,
+        undefined,
+        {
+          beforeWebsiteStageRename: () => {
+            if (!armed) return
+            if (mutation === 'markdown-change') {
+              fsSync.writeFileSync(path.join(root, 'one.md'), '# Changed\n')
+            } else {
+              fsSync.writeFileSync(imagePath, testPng)
+            }
+          }
+        }
+      )
+      const opened = await manager.openPicker({ sender: { id: ownerId } } as never)
+      expect(opened.ok).toBe(true)
+      if (!opened.ok) return
+      await expect(generate(manager, opened.value.sessionId, ownerId)).resolves.toMatchObject({
+        ok: true
+      })
+      const oldIndex = await fs.readFile(path.join(target, 'index.html'))
+      const oldManifest = await fs.readFile(path.join(target, 'leafbook-manifest.json'))
+      armed = true
+      await expect(generate(manager, opened.value.sessionId, ownerId)).resolves.toMatchObject({
+        ok: false,
+        error: { code: 'website-source-changed', committed: false }
+      })
+      expect(await fs.readFile(path.join(target, 'index.html'))).toEqual(oldIndex)
+      expect(await fs.readFile(path.join(target, 'leafbook-manifest.json'))).toEqual(oldManifest)
+      const leftovers = await fs.readdir(destination)
+      expect(leftovers.filter((name) => name.includes('stage'))).toEqual([])
+      expect(leftovers.filter((name) => name.includes('backup'))).toEqual([])
+    }
+  )
 
   it('refuses symlink, hardlink, and FIFO leaves without dispatching writes', async () => {
     const root = await makeBook({ 'SUMMARY.md': '- [One](one.md)\n', 'one.md': '# One\n' })
@@ -4232,7 +6290,7 @@ describe('book local website transaction', () => {
         expect(await fs.readFile(path.join(target, 'index.html'), 'utf8')).toBe(oldIndex)
       }
       const leftovers = await fs.readdir(destination)
-      expect(leftovers.filter((name) => name.includes('stage'))).toHaveLength(failRollback ? 1 : 0)
+      expect(leftovers.filter((name) => name.includes('stage'))).toEqual([])
       if (!failRollback && !failCleanup) {
         expect(leftovers.filter((name) => name.includes('backup'))).toEqual([])
       } else {
@@ -4708,9 +6766,9 @@ A -> B
     })
     const renderedDocument = new DOMParser().parseFromString(rendered.html, 'text/html')
     const renderedHeadings = [...renderedDocument.querySelectorAll('h1')]
-    expect(renderedHeadings[0].textContent).toBe(
-      '[Local image unavailable in this reader version: Logo] Final'
-    )
+    expect(renderedHeadings[0].textContent).toBe(' Final')
+    expect(renderedHeadings[0].querySelector('img')?.alt).toBe('Logo')
+    expect(renderedHeadings[0].querySelector('img')?.getAttribute('src')).toBeNull()
     expect(renderedHeadings[2].textContent).toBe(
       '[Local image unavailable in this reader version: Remote] Code'
     )
@@ -4718,7 +6776,7 @@ A -> B
       '[Local image unavailable in this reader version: Raw] HTML'
     )
     expect(rendered.html).toContain('Setext title')
-    expect(renderedDocument.querySelectorAll('.leafbook-media-placeholder')).toHaveLength(3)
+    expect(renderedDocument.querySelectorAll('.leafbook-media-placeholder')).toHaveLength(2)
     expect(rendered.outline[0].id).not.toContain('local-image-unavailable')
   })
 })
@@ -4727,6 +6785,7 @@ describe('book store async generations', () => {
   const sessionDto = (sessionId: string, title: string): BookSessionDto => ({
     libraryId: `${sessionId}-library`,
     sessionId,
+    resourceToken: `${sessionId}-resource`,
     title,
     navigationSource: 'inferred',
     nodes: [],

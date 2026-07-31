@@ -22,8 +22,10 @@ native directory picker / persisted main-only library
 
 The renderer cannot supply a chapter path. A chapter read succeeds only when
 the session exists and its node maps to a local chapter in the scanned model.
-Each session is bound to the creating editor `webContents.id`. Read, refresh,
-close, and link requests from another window fail as an expired session, and
+Each session is bound to the creating editor `webContents.id`. Every
+session-bound request—including chapter/resource reads, progress saves,
+refresh, close, search, and links—from another window fails as an expired
+session, and
 destroying a renderer removes all of its sessions. At open time the main
 process pins the canonical root plus bigint device/inode identity; read,
 refresh, and link operations recheck that identity and permanently invalidate
@@ -57,13 +59,16 @@ At most 20 live sessions are retained per renderer owner. Destroyed owners are
 cleaned immediately, and one window cannot evict another window's active
 sessions.
 
-Refresh keeps the same opaque `sessionId`. The newly scanned model and target
-maps are built off to the side, then replace the session map entry in one
-synchronous commit only if the original owned session is still current. A
-non-fatal scan failure leaves the prior session readable; a root identity
-failure is the only refresh failure that invalidates it. Concurrent refreshes
-for one owned session share one operation, and a close or library removal while
-that operation is running prevents the result from reviving the session.
+Refresh keeps the same opaque `sessionId` only when it succeeds. Starting a
+public refresh immediately invalidates the prior generation, resource token,
+queued resource work, and leases. The newly scanned model and target maps are
+built off to the side, then replace the session map entry in one synchronous
+commit only if the invalidated owned session is still current. A thrown scan,
+root-scan diagnostic, or root-identity failure deletes that session; recovery
+requires reopening the library and cannot revive its old token. Concurrent
+refreshes for one owned session share one operation, and a close or library
+removal while that operation is running prevents the result from reviving the
+session.
 
 Opaque navigation IDs are derived indirectly from the Phase 3 model's stable
 node identity and occurrence, never from a renderer path. This preserves
@@ -72,9 +77,9 @@ chapter and group component identity across refresh while keeping duplicate
 
 ## Typed IPC
 
-All book operations are invoke-only channels declared in
-`shared/types/ipc.ts` and exposed through the narrow `window.electron.books`
-preload API:
+The core Reader lifecycle, navigation, resource, progress, and search
+operations are invoke-only channels declared in `shared/types/ipc.ts` and
+exposed through the narrow `window.electron.books` preload API:
 
 - `list`
 - `openPicker`
@@ -83,7 +88,15 @@ preload API:
 - `refresh`
 - `closeSession`
 - `readChapter`
+- `readResource`
+- `saveReadingPosition`
 - `followLink`
+- `search`
+- `cancelSearch`
+
+Editing, arrangement, preparation, HTML export, and website-generation
+channels are specified in their respective sections and in the complete typed
+IPC contract; this list is intentionally limited to the live Reader surface.
 
 Input strings receive runtime type, size, and opaque-ID validation. Results are
 plain serializable DTOs. The preload exposes no book path, `file://` helper, or
@@ -121,9 +134,30 @@ strips every resource/navigation attribute (`src`, `srcset`, `poster`,
 `background`, `xlink:href`, `style`, `action`, `formaction`, and non-anchor
 `href`) before serialization.
 
-Local images and other attachments intentionally do not load in Phase 4.
-Images become visible placeholders. This avoids exposing an arbitrary
-filesystem protocol before a session-scoped resource transport is designed.
+Phase 10B2 displays validated local PNG/JPEG/GIF/WebP and sanitized SVG Markdown images in the
+live Reader through the session- and chapter-bound capability described in
+[RESOURCE_PIPELINE.md](./RESOURCE_PIPELINE.md). Main authorization and Muya
+rendering share one pure tokenizer-extension contract, including math and
+sub/sup token boundaries. Only inline and reference-style Markdown image
+tokens become path-free slots; raw HTML, code, math, sub/sup, remote/data/file
+URLs and unsupported media remain inert accessible placeholders. SVG is
+stream-parsed in the main process, reduced to a bounded static allowlist, and
+returned as deterministic, locale-independent canonical bytes; rejected SVG
+stays inert. Geometry is semantically bounded after relative-coordinate
+tracking and root-viewport plus parent-to-child CTM accumulation. Conservative
+shape and path-control bounds are checked in effective coordinates at
+every tree level, so nested cancellation cannot hide an excessive intermediate
+transform. Local fragment targets are type checked, and complete resource-
+subtree dependency graphs are cycle/depth checked.
+At most 256 image occurrences and 64 unique references are admitted per
+render; unsupported references consume neither quota. Repeated references
+share one IPC read and one Blob URL. The main process enforces one-shot
+reference leases, a bounded fair FIFO, and fail-stop cumulative
+byte/decode/frame budgets before returning bytes. Offline export uses a
+separate main-owned whole-book ledger: single HTML embeds verified bytes as
+safe data URLs, while website output writes deduplicated content-addressed
+assets and a complete hash manifest. No filesystem protocol or absolute-path
+renderer API is exposed.
 
 Anchors retain no native `href`; sanitized destinations are copied to
 `data-book-href`, receive link role/tab stop semantics, and are handled by
@@ -337,10 +371,29 @@ progress.
 
 ## Test coverage
 
+Reader image tests cover Markdown-token provenance, path-free DOM slots,
+PNG/JPEG/GIF/WebP and the static basic-graphics SVG subset, a strict two-request
+renderer queue, malformed response rejection, missing and unreferenced
+resources, raw HTML/remote/data/file URL and malicious or unsupported
+`text`/`tspan`/clipping SVG inertness, zero HTTP requests, decode failures, stale responses,
+chapter/session/refresh cancellation, object-URL revocation, Vue unmount,
+duplicate-occurrence caps, one-shot leases, FIFO progress after slow I/O, and
+atomic aggregate-budget fail-stop.
+The Electron release slice opens a temporary real book, decodes all four
+allowlisted formats from Blob URLs, verifies unsupported inputs remain
+accessible placeholders, and asserts that no reference, capability token, or
+native resource URL reaches the DOM.
+
+Export tests additionally cover deterministic cross-chapter content
+deduplication, exact data-URL and hashed-asset allowlists, complete canonical
+website manifests, source/resource mutation between preparation and commit,
+whole-book budgets, malicious-reference no-read behavior, atomic replacement
+and rollback, and offline loading with zero HTTP(S) requests.
+
 Unit tests cover opaque DTOs, model-only chapter authorization, cross-owner
 rejection/cleanup, root replacement invalidation, bookshelf persistence and
 non-destructive removal, landing de-duplication, external-link policy, inert
-PlantUML/static rendering, SVG and legacy resource-attribute sanitization,
+PlantUML/static rendering, safe SVG and legacy resource-attribute sanitization,
 media placeholders, flattened previous/next ordering, atomic same-session
 refresh, duplicate-target identity, deferred refresh/open ordering, stale
 renderer responses, unique duplicate-heading outline targets, legacy reading

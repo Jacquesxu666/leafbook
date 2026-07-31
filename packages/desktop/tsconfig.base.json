@@ -29,7 +29,8 @@
       "muya/*": ["../muyajs/*"],
       "@muyajs/core": ["./src/types/muya-core.d.ts"],
       "@shared/*": ["./src/shared/*"],
-      "main_renderer/*": ["./src/main/*"]
+      "main_renderer/*": ["./src/main/*"],
+      "leafbook-markdown-tokenizer-contract": ["../muya/src/utils/marked/tokenizerContract.ts"]
     }
   }
 }

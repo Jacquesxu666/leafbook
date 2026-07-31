@@ -4,6 +4,7 @@ import { defineStore } from 'pinia'
 import type {
   BookArrangementDto,
   BookArrangementOperationDto,
+  BookPreparationDraftOperationDto,
   BookPreparationDto,
   BookChapterDto,
   BookReaderError,
@@ -22,6 +23,7 @@ import bus from '@/bus'
 const SAVE_DEBOUNCE_MS = 2_000
 const SAVE_EPSILON = 0.002
 const SEARCH_DEBOUNCE_MS = 200
+const PREPARATION_DRAFT_DEBOUNCE_MS = 300
 const PREPARATION_REFRESH_REQUIRED =
   'SUMMARY may have been created. Inspect the book folder, then refresh before preparing again.'
 
@@ -105,6 +107,9 @@ export const useBooksStore = defineStore('books', () => {
   let activeSearch: { sessionId: string; searchId: string } | null = null
   let arrangementGeneration = 0
   let preparationGeneration = 0
+  let preparationDraftTimer: ReturnType<typeof setTimeout> | null = null
+  const pendingPreparationDraftRenames = new Map<string, BookPreparationDraftOperationDto>()
+  let preparationDraftFlush: Promise<boolean> | null = null
   let exportGeneration = 0
   let activeExportId: string | null = null
   let exportCancelSettlement: Promise<void> | null = null
@@ -172,18 +177,20 @@ export const useBooksStore = defineStore('books', () => {
       bus.emit('lb::prepare-return-to-book', resolve)
     })
 
-  const closePreparation = async (): Promise<void> => {
+  const closePreparation = async (): Promise<boolean> => {
+    if (!(await flushPreparationDraft())) return false
     const currentPreparation = preparation.value
     preparationGeneration += 1
     preparation.value = null
     preparationError.value = null
     preparationPending.value = false
-    if (!currentPreparation) return
+    if (!currentPreparation) return true
     try {
       await window.electron.books.closePreparation(currentPreparation.preparationId)
     } catch {
       // Main also revokes the lease with its owning session.
     }
+    return true
   }
 
   const beginPreparation = async (): Promise<void> => {
@@ -293,7 +300,156 @@ export const useBooksStore = defineStore('books', () => {
     }
   }
 
+  const applyPreparationDraft = async (
+    operationRequest: BookPreparationDraftOperationDto
+  ): Promise<boolean> => {
+    const currentPreparation = preparation.value
+    if (
+      !currentPreparation?.revision ||
+      refreshing.value ||
+      preparationPending.value ||
+      currentPreparation.recovery !== null
+    ) {
+      return false
+    }
+    const token = preparationGeneration
+    preparationPending.value = true
+    preparationError.value = null
+    try {
+      const result = await window.electron.books.applyPreparationDraft({
+        preparationId: currentPreparation.preparationId,
+        revision: currentPreparation.revision,
+        nonce: currentPreparation.draftNonce + 1,
+        operation: operationRequest
+      })
+      if (
+        token !== preparationGeneration ||
+        preparation.value?.preparationId !== currentPreparation.preparationId
+      ) {
+        return false
+      }
+      if (!result.ok) {
+        preparationError.value = result.error
+        return false
+      }
+      preparation.value = result.value
+      return true
+    } catch {
+      if (token === preparationGeneration) preparationError.value = unexpectedError()
+      return false
+    } finally {
+      if (token === preparationGeneration) preparationPending.value = false
+    }
+  }
+
+  const drainPreparationDraftRenames = async (): Promise<boolean> => {
+    while (pendingPreparationDraftRenames.size > 0) {
+      const next = pendingPreparationDraftRenames.entries().next().value
+      if (!next) return true
+      const [chapterId, operation] = next
+      if (!(await applyPreparationDraft(operation))) return false
+      if (pendingPreparationDraftRenames.get(chapterId) === operation) {
+        pendingPreparationDraftRenames.delete(chapterId)
+      }
+    }
+    return true
+  }
+
+  const flushPreparationDraft = async (): Promise<boolean> => {
+    if (preparationDraftTimer) clearTimeout(preparationDraftTimer)
+    preparationDraftTimer = null
+    if (!preparationDraftFlush) {
+      preparationDraftFlush = drainPreparationDraftRenames().finally(() => {
+        preparationDraftFlush = null
+      })
+    }
+    const flushed = await preparationDraftFlush
+    if (!flushed) return false
+    return pendingPreparationDraftRenames.size > 0 ? flushPreparationDraft() : true
+  }
+
+  const schedulePreparationDraft = async (
+    operationRequest: BookPreparationDraftOperationDto
+  ): Promise<boolean> => {
+    if (operationRequest.type !== 'rename') {
+      if (!(await flushPreparationDraft())) return false
+      return applyPreparationDraft(operationRequest)
+    }
+    pendingPreparationDraftRenames.set(operationRequest.chapterId, operationRequest)
+    if (preparationDraftTimer) clearTimeout(preparationDraftTimer)
+    preparationDraftTimer = setTimeout(() => {
+      preparationDraftTimer = null
+      flushPreparationDraft().catch(() => undefined)
+    }, PREPARATION_DRAFT_DEBOUNCE_MS)
+    return true
+  }
+
+  const resolvePreparationRecovery = async (restore: boolean): Promise<void> => {
+    const currentPreparation = preparation.value
+    const recovery = currentPreparation?.recovery
+    if (!currentPreparation || !recovery || refreshing.value || preparationPending.value) return
+    const token = preparationGeneration
+    preparationPending.value = true
+    preparationError.value = null
+    try {
+      const request = {
+        preparationId: currentPreparation.preparationId,
+        recoveryId: recovery.recoveryId
+      }
+      const result = restore
+        ? await window.electron.books.restorePreparationDraft(request)
+        : await window.electron.books.discardPreparationDraft(request)
+      if (
+        token !== preparationGeneration ||
+        preparation.value?.preparationId !== currentPreparation.preparationId
+      ) {
+        return
+      }
+      if (!result.ok) {
+        preparationError.value = result.error
+        return
+      }
+      preparation.value = result.value
+    } catch {
+      if (token === preparationGeneration) preparationError.value = unexpectedError()
+    } finally {
+      if (token === preparationGeneration) preparationPending.value = false
+    }
+  }
+
+  const discardCurrentPreparationDraft = async (): Promise<void> => {
+    if (!(await flushPreparationDraft())) return
+    const currentPreparation = preparation.value
+    if (
+      !currentPreparation?.draftPersisted ||
+      !currentPreparation.draftId ||
+      preparationPending.value
+    ) {
+      return
+    }
+    const token = preparationGeneration
+    preparationPending.value = true
+    try {
+      const result = await window.electron.books.discardPreparationDraft({
+        preparationId: currentPreparation.preparationId,
+        recoveryId: currentPreparation.draftId
+      })
+      if (
+        token === preparationGeneration &&
+        preparation.value?.preparationId === currentPreparation.preparationId
+      ) {
+        if (result.ok) preparation.value = result.value
+        else preparationError.value = result.error
+      }
+    } catch {
+      if (token === preparationGeneration) preparationError.value = unexpectedError()
+    } finally {
+      if (token === preparationGeneration) preparationPending.value = false
+    }
+  }
+
   const commitPreparation = async (): Promise<void> => {
+    if (!(await flushPreparationDraft())) return
     const currentPreparation = preparation.value
     const currentSession = session.value
     if (
@@ -1334,7 +1490,9 @@ export const useBooksStore = defineStore('books', () => {
   const showBookshelf = async (): Promise<void> => {
     if (outputPending.value) return
     if (arrangement.value || arrangementPending.value) await closeArrangement()
-    if (preparation.value || preparationPending.value) await closePreparation()
+    if (preparation.value || preparationPending.value) {
+      if (!(await closePreparation())) return
+    }
     cancelSearch(true)
     await flushReadingPosition()
     const { token, operationId } = start()
@@ -1382,9 +1540,11 @@ export const useBooksStore = defineStore('books', () => {
 
   const openPicker = async (): Promise<void> => {
     if (refreshing.value || outputPending.value) return
-    clearPreparationMessages()
     if (arrangement.value || arrangementPending.value) await closeArrangement()
-    if (preparation.value || preparationPending.value) await closePreparation()
+    if (preparation.value || preparationPending.value) {
+      if (!(await closePreparation())) return
+    }
+    clearPreparationMessages()
     cancelSearch(true)
     const oldSession = session.value
     const { token, operationId } = start()
@@ -1409,9 +1569,11 @@ export const useBooksStore = defineStore('books', () => {
 
   const openLibrary = async (libraryId: string): Promise<void> => {
     if (refreshing.value || outputPending.value) return
-    clearPreparationMessages()
     if (arrangement.value || arrangementPending.value) await closeArrangement()
-    if (preparation.value || preparationPending.value) await closePreparation()
+    if (preparation.value || preparationPending.value) {
+      if (!(await closePreparation())) return
+    }
+    clearPreparationMessages()
     cancelSearch(true)
     const oldSession = session.value
     const { token, operationId } = start()
@@ -1540,7 +1702,9 @@ export const useBooksStore = defineStore('books', () => {
 
   const performRefresh = async (): Promise<void> => {
     if (arrangement.value || arrangementPending.value) await closeArrangement()
-    if (preparation.value || preparationPending.value) await closePreparation()
+    if (preparation.value || preparationPending.value) {
+      if (!(await closePreparation())) return
+    }
     cancelSearch(true)
     await flushReadingPosition(true)
     const sessionSnapshot = session.value
@@ -1653,7 +1817,9 @@ export const useBooksStore = defineStore('books', () => {
       return
     }
     if (arrangement.value || arrangementPending.value) await closeArrangement()
-    if (preparation.value || preparationPending.value) await closePreparation()
+    if (preparation.value || preparationPending.value) {
+      if (!(await closePreparation())) return
+    }
     await cancelSearch(true)
     await flushReadingPosition()
     const sessionSnapshot = session.value
@@ -1696,7 +1862,9 @@ export const useBooksStore = defineStore('books', () => {
     sessionVerificationGeneration += 1
     clearPreparationMessages()
     if (arrangement.value || arrangementPending.value) await closeArrangement()
-    if (preparation.value || preparationPending.value) await closePreparation()
+    if (preparation.value || preparationPending.value) {
+      if (!(await closePreparation())) return
+    }
     cancelSearch(true)
     await flushReadingPosition()
     const { token, operationId } = start()
@@ -1786,6 +1954,11 @@ export const useBooksStore = defineStore('books', () => {
     closeArrangement,
     beginPreparation,
     selectPreparationSource,
+    applyPreparationDraft,
+    schedulePreparationDraft,
+    flushPreparationDraft,
+    resolvePreparationRecovery,
+    discardCurrentPreparationDraft,
     commitPreparation,
     closePreparation,
     exportBook,

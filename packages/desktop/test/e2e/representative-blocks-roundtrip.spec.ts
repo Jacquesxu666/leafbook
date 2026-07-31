@@ -1,3 +1,4 @@
+/* eslint-disable @stylistic/space-before-function-paren */
 import { expect, test } from '@playwright/test'
 import type { ElectronApplication, Page } from 'playwright'
 import * as fs from 'node:fs'
@@ -8,35 +9,35 @@ import {
   enterSourceMode,
   exitSourceMode,
   getMarkdownContent,
-  setSourceMarkdown,
+  typeIntoEditor,
   sendIpcToRenderer
 } from './helpers'
 
 // ---------------------------------------------------------------------------
 // Coverage backfill (checklist item 39). A single desktop document combining
-// every block type round-trips byte-stable across repeated source <-> WYSIWYG
+// representative high-risk blocks round-trip byte-stable across repeated source <-> WYSIWYG
 // toggles and a real on-disk save, with no false-dirty / reformat.
 //
 // Basic round-trip + the modified indicator are each covered in isolation
 // (editor-input.spec.ts, parity-source-undo-saved.spec.ts), and per-fixture
 // DOM render is covered by fixture-render.spec.ts. Engine-level byte stability
 // is covered in packages/muya/test/spec/roundTrip.spec.ts. The MISSING slice
-// is one desktop doc with all block types + the full desktop save path:
+// is one representative high-risk desktop doc + the full desktop save path:
 //   editor (loaded with a real file) -> Cmd/Ctrl+S (mt::editor-ask-file-save)
 //   -> store FILE_SAVE -> mt::response-file-save -> main writeMarkdownFile
 //   -> mt::tab-saved -> the tab's unsaved dot clears.
 //
-// The fixture lives at test/e2e/data/all-blocks.md. It is written in the
+// The fixture lives at test/e2e/data/representative-blocks.md. It is written in the
 // engine's canonical serialized form (default desktop prefs: listIndentation 1,
 // preferLooseListItem, ATX headings, fenced code, GitHub tables) so that a
 // load -> serialize round trip is the identity (modulo the trailing newline
 // the serializer always emits — the fixture already ends with one).
 // ---------------------------------------------------------------------------
 
-const FIXTURE_REL = 'test/e2e/data/all-blocks.md'
+const FIXTURE_REL = 'test/e2e/data/representative-blocks.md'
 // launchWithDoc passes the fixture as an Electron CLI arg resolved against the
 // desktop package root (cwd). helpers.ts sets projectRoot to packages/desktop.
-const FIXTURE_ABS = path.resolve(__dirname, 'data', 'all-blocks.md')
+const FIXTURE_ABS = path.resolve(__dirname, 'data', 'representative-blocks.md')
 
 const UNSAVED_DOT = '.editor-tabs li.unsaved'
 
@@ -44,7 +45,7 @@ const UNSAVED_DOT = '.editor-tabs li.unsaved'
 // item sends (`mt::editor-ask-file-save` -> store FILE_SAVE). The file was
 // opened from a real path so main takes the alreadyExistOnDisk branch: it
 // writes the markdown to disk and replies `mt::tab-saved`, clearing the dot.
-const save = async(app: ElectronApplication): Promise<void> => {
+const save = async (app: ElectronApplication): Promise<void> => {
   await sendIpcToRenderer(app, 'mt::editor-ask-file-save')
 }
 
@@ -53,12 +54,12 @@ const readDisk = (): string => fs.readFileSync(FIXTURE_ABS, 'utf-8')
 const isDirty = (page: Page): Promise<boolean> =>
   page.evaluate((sel) => !!document.querySelector(sel), UNSAVED_DOT)
 
-test.describe('All blocks round-trip + save byte-stability (item 39)', () => {
+test.describe('Representative blocks round-trip + save byte-stability (item 39)', () => {
   let app: ElectronApplication
   let page: Page
   let original: string
 
-  test.beforeAll(async() => {
+  test.beforeAll(async () => {
     // Snapshot the on-disk bytes BEFORE launching so we can restore them in
     // afterAll (the test saves into the real fixture file) and so we have the
     // exact baseline to compare the serialized + saved content against.
@@ -67,11 +68,11 @@ test.describe('All blocks round-trip + save byte-stability (item 39)', () => {
     app = launched.app
     page = launched.page
     await waitForMenuReady(app)
-    // Let muya finish the initial render of every block.
+    // Let Muya finish the fixture's initial render.
     await page.waitForTimeout(800)
   })
 
-  test.afterAll(async() => {
+  test.afterAll(async () => {
     if (app) await app.close()
     // Restore the fixture to its original bytes regardless of test outcome so
     // the working tree is left untouched.
@@ -82,8 +83,8 @@ test.describe('All blocks round-trip + save byte-stability (item 39)', () => {
     }
   })
 
-  test('every block type renders (sanity that the fixture loaded)', async() => {
-    // Front matter + the structural block types are all present in the DOM.
+  test('the asserted representative structures render (sanity that the fixture loaded)', async () => {
+    // The structural families asserted below are present in the DOM.
     await page.waitForSelector('.editor-component h1', { state: 'attached', timeout: 10000 })
     const counts = await page.evaluate(() => {
       const root = document.querySelector('.editor-component') as HTMLElement
@@ -111,7 +112,7 @@ test.describe('All blocks round-trip + save byte-stability (item 39)', () => {
     expect(counts.link).toBeGreaterThanOrEqual(1)
   })
 
-  test('the freshly loaded doc is clean and serializes back to the original bytes', async() => {
+  test('the freshly loaded doc is clean and serializes back to the original bytes', async () => {
     // A freshly opened (unedited) file must not be marked dirty.
     expect(await isDirty(page)).toBe(false)
 
@@ -122,7 +123,7 @@ test.describe('All blocks round-trip + save byte-stability (item 39)', () => {
     expect(serialized).toBe(original)
   })
 
-  test('repeated source <-> WYSIWYG toggles do not mutate or reformat the content', async() => {
+  test('repeated source <-> WYSIWYG toggles do not mutate or reformat the content', async () => {
     // Toggle source mode in and out twice; the content must be identical after
     // each handoff and must never diverge from the original.
     for (let i = 0; i < 2; i++) {
@@ -142,7 +143,7 @@ test.describe('All blocks round-trip + save byte-stability (item 39)', () => {
     expect(afterToggles).toBe(original)
   })
 
-  test('saving clears the unsaved indicator and writes the original bytes back to disk', async() => {
+  test('saving clears the unsaved indicator and writes the original bytes back to disk', async () => {
     // The toggles above should not have dirtied the tab, but a pure round trip
     // can legitimately leave the tab clean; either way, force a save and verify
     // the post-save state is clean and the on-disk bytes are unchanged.
@@ -159,11 +160,11 @@ test.describe('All blocks round-trip + save byte-stability (item 39)', () => {
     expect(await getMarkdownContent(page, app)).toBe(original)
   })
 
-  test('a dirty edit saves through the full IPC path and persists the exact editor serialization', async() => {
-    // Genuinely exercise the dirty -> save -> clean transition (test 4 may have
-    // saved an already-clean tab). A bulk source-mode edit that appends a
-    // paragraph dirties the tab; confirm the unsaved dot appears.
-    await setSourceMarkdown(page, app, original + '\nDIRTY EXTRA PARAGRAPH\n')
+  test('real keyboard input becomes dirty, saves through IPC, and matches disk bytes', async () => {
+    // Exercise the real DOM keyboard/input pipeline. Deliberately avoid
+    // CodeMirror.setValue and editor-model APIs.
+    const token = ' REAL_KEYBOARD_SAVE_SENTINEL'
+    await typeIntoEditor(page, token)
     await expect.poll(() => isDirty(page), { timeout: 5000 }).toBe(true)
 
     // What the editor will persist is its own serialization of the current
@@ -171,7 +172,7 @@ test.describe('All blocks round-trip + save byte-stability (item 39)', () => {
     // save and verify the on-disk bytes match it exactly (the desktop save path
     // does not reformat on top of the editor's serialization).
     const editorContent = await getMarkdownContent(page, app)
-    expect(editorContent).toContain('DIRTY EXTRA PARAGRAPH')
+    expect(editorContent).toContain(token.trim())
 
     await save(app)
     await expect.poll(() => isDirty(page), { timeout: 5000 }).toBe(false)

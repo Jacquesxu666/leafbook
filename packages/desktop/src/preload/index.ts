@@ -21,9 +21,12 @@ import type {
   BookArrangementApplyRequestDto,
   BookArrangementSaveRequestDto,
   BookPreparationCommitRequestDto,
+  BookPreparationDraftApplyRequestDto,
+  BookPreparationRecoveryRequestDto,
   BookExportCommitRequestDto,
   BookWebsiteCommitRequestDto,
   BookEditSaveRequestDto,
+  BookResourceRequestDto,
   BookSearchProgressDto,
   BookSearchRequestDto
 } from '@shared/types/bookReader'
@@ -245,6 +248,7 @@ const booksAPI = {
   closeSession: (sessionId: string) => invoke('lb::books::close-session', sessionId),
   readChapter: (sessionId: string, nodeId: string) =>
     invoke('lb::books::read-chapter', sessionId, nodeId),
+  readResource: (request: BookResourceRequestDto) => invoke('lb::books::read-resource', request),
   beginEdit: (sessionId: string, nodeId: string) =>
     invoke('lb::books::begin-edit', sessionId, nodeId),
   saveEdit: (request: BookEditSaveRequestDto) => invoke('lb::books::save-edit', request),
@@ -261,6 +265,12 @@ const booksAPI = {
   beginPreparation: (sessionId: string) => invoke('lb::books::begin-preparation', sessionId),
   selectPreparationSource: (preparationId: string, sourceNodeId: string) =>
     invoke('lb::books::select-preparation-source', preparationId, sourceNodeId),
+  applyPreparationDraft: (request: BookPreparationDraftApplyRequestDto) =>
+    invoke('lb::books::apply-preparation-draft', request),
+  restorePreparationDraft: (request: BookPreparationRecoveryRequestDto) =>
+    invoke('lb::books::restore-preparation-draft', request),
+  discardPreparationDraft: (request: BookPreparationRecoveryRequestDto) =>
+    invoke('lb::books::discard-preparation-draft', request),
   commitPreparation: (request: BookPreparationCommitRequestDto) =>
     invoke('lb::books::commit-preparation', request),
   closePreparation: (preparationId: string) =>

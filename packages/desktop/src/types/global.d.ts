@@ -18,7 +18,9 @@ import type {
   BookArrangementSaveDto,
   BookArrangementSaveRequestDto,
   BookPreparationCommitRequestDto,
+  BookPreparationDraftApplyRequestDto,
   BookPreparationDto,
+  BookPreparationRecoveryRequestDto,
   BookPreparationSaveDto,
   BookExportCommitRequestDto,
   BookExportSaveDto,
@@ -32,6 +34,8 @@ import type {
   BookEditSaveRequestDto,
   BookLinkNavigationDto,
   BookReadingProgressDto,
+  BookResourceDto,
+  BookResourceRequestDto,
   BookReaderResult,
   BookSearchProgressDto,
   BookSearchRequestDto,
@@ -129,6 +133,7 @@ declare global {
       refresh(sessionId: string): Promise<BookReaderResult<BookSessionDto>>
       closeSession(sessionId: string): Promise<BookReaderResult<true>>
       readChapter(sessionId: string, nodeId: string): Promise<BookReaderResult<BookChapterDto>>
+      readResource(request: BookResourceRequestDto): Promise<BookReaderResult<BookResourceDto>>
       beginEdit(sessionId: string, nodeId: string): Promise<BookReaderResult<BookEditDto>>
       saveEdit(request: BookEditSaveRequestDto): Promise<BookReaderResult<BookEditSaveDto>>
       reloadEdit(editId: string): Promise<BookReaderResult<BookEditDto>>
@@ -146,6 +151,15 @@ declare global {
       selectPreparationSource(
         preparationId: string,
         sourceNodeId: string
+      ): Promise<BookReaderResult<BookPreparationDto>>
+      applyPreparationDraft(
+        request: BookPreparationDraftApplyRequestDto
+      ): Promise<BookReaderResult<BookPreparationDto>>
+      restorePreparationDraft(
+        request: BookPreparationRecoveryRequestDto
+      ): Promise<BookReaderResult<BookPreparationDto>>
+      discardPreparationDraft(
+        request: BookPreparationRecoveryRequestDto
       ): Promise<BookReaderResult<BookPreparationDto>>
       commitPreparation(
         request: BookPreparationCommitRequestDto

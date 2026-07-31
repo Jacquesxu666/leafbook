@@ -29,6 +29,7 @@ const deferred = <T>(): { promise: Promise<T>; resolve: (value: T) => void } => 
 const session = (title = 'Book'): BookSessionDto => ({
   libraryId: 'library-id-0001',
   sessionId: 'session-id-00001',
+  resourceToken: 'resource-token-0001',
   title,
   navigationSource: 'summary',
   nodes: [
@@ -84,6 +85,7 @@ const arrangement = (dirty = false): BookArrangementDto => ({
 
 const exportSnapshot = (): BookExportSnapshotDto => ({
   exportId: 'export-id-00000001',
+  format: 'html',
   title: 'Book',
   nodes: [],
   landingNodeId: null,
@@ -93,7 +95,7 @@ const exportSnapshot = (): BookExportSnapshotDto => ({
 
 const websiteSnapshot = (): BookWebsiteSnapshotDto => {
   const { exportId: _exportId, ...value } = exportSnapshot()
-  return { websiteId: 'website-id-000001', ...value }
+  return { websiteId: 'website-id-000001', ...value, format: 'website' }
 }
 
 const allowBookGuard = (payload: unknown): void => {

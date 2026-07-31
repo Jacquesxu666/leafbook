@@ -10,9 +10,14 @@ expected_titles=(
   "opening untrusted Markdown stays offline, renders local images, and does not execute HTML"
   "Reader keeps local and remote images as inert placeholders without filesystem or network loads"
   "open book, navigate chapters, return to bookshelf, and preserve editor flow"
+  "Reader displays four safe local image formats without path or network exposure"
+  "Reader displays sanitized local SVG while malicious SVG stays inert and offline"
+  "real keyboard input becomes dirty, saves through IPC, and matches disk bytes"
   "arranges an existing SUMMARY with keyboard, buttons, undo, save and zero-write cancel"
   "exports one offline HTML book with scoped Chinese heading navigation"
   "generates an exact two-file offline website whose manifest hashes the loaded HTML"
+  "exports offline book images as embedded data and hashed website assets"
+  "recovers a private Prepare draft only after explicit restore and keeps books isolated"
 )
 selection='('
 separator=''
@@ -24,8 +29,8 @@ selection+=')$'
 
 verify_listing() {
   local listing="$1"
-  if ! grep -Eq '^Total: 6 tests in [12] files$' <<<"$listing"; then
-    echo "Release smoke selection must resolve to exactly six tests." >&2
+  if ! grep -Eq '^Total: 11 tests in [123] files$' <<<"$listing"; then
+    echo "Release smoke selection must resolve to exactly eleven tests." >&2
     return 1
   fi
   local title
@@ -63,6 +68,7 @@ fi
 test_args=(
   test/e2e/renderer-security.spec.ts \
   test/e2e/book-reader.spec.ts \
+  test/e2e/representative-blocks-roundtrip.spec.ts \
   --grep "$selection" \
   --workers=1
 )

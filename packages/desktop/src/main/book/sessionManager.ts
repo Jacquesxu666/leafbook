@@ -1,7 +1,7 @@
 /* eslint-disable @stylistic/indent, @stylistic/space-before-function-paren */
 import path from 'path'
 import fs from 'fs/promises'
-import fsSync, { constants as fsConstants, type BigIntStats } from 'fs'
+import fsSync, { constants as fsConstants, type BigIntStats, type Dir } from 'fs'
 import { createHash, randomUUID } from 'crypto'
 import {
   BrowserWindow,
@@ -14,12 +14,36 @@ import Store from 'electron-store'
 import { loadBookFromDirectory, safelyReadBookChapter } from './filesystem'
 import { BookArrangementManager } from './arrangementManager'
 import { BookPreparationManager } from './preparationManager'
+import { BookPreparationDraftStore } from './preparationDraftStore'
+import { readBookResourceFile } from './resourceReader'
+import { extractBookImageReferences } from './resourceReferences'
+import {
+  assetRelativePath,
+  BOOK_EXPORT_MAX_ASSETS,
+  BOOK_EXPORT_WEBSITE_MAX_ASSET_BYTES,
+  BookExportResourceLedgerError,
+  buildBookExportResourceLedger,
+  disposeBookExportResourceLedger,
+  exportResourcesCurrentSync,
+  sameBookExportResourceLedger,
+  type BookExportResourceDocument,
+  type BookExportResourceLedger
+} from './exportResources'
 import { resolveBookTarget } from 'common/book/path'
+import {
+  BOOK_IMAGE_GENERATION_MAX_BYTES,
+  BOOK_IMAGE_GENERATION_MAX_DECODE_PIXELS,
+  BOOK_IMAGE_GENERATION_MAX_FRAMES,
+  BOOK_IMAGE_MAX_UNIQUE
+} from 'common/book/imagePolicy'
 import { validateBookExportHtml } from 'common/book/exportPolicy'
 import {
-  BOOK_WEBSITE_FILES,
+  BOOK_WEBSITE_ASSETS,
   BOOK_WEBSITE_INDEX,
   BOOK_WEBSITE_MANIFEST,
+  BOOK_WEBSITE_MAX_ASSET_BYTES,
+  BOOK_WEBSITE_MAX_MANIFEST_BYTES,
+  BOOK_WEBSITE_MAX_TOTAL_ASSET_BYTES,
   createBookWebsiteManifest,
   parseBookWebsiteManifest,
   serializeBookWebsiteManifest,
@@ -39,7 +63,9 @@ import type {
   BookArrangementSaveDto,
   BookArrangementSaveRequestDto,
   BookPreparationCommitRequestDto,
+  BookPreparationDraftApplyRequestDto,
   BookPreparationDto,
+  BookPreparationRecoveryRequestDto,
   BookPreparationSaveDto,
   BookEditDto,
   BookEditFormatDto,
@@ -54,6 +80,8 @@ import type {
   BookWebsiteSnapshotDto,
   BookLinkNavigationDto,
   BookReadingProgressDto,
+  BookResourceDto,
+  BookResourceRequestDto,
   BookReaderNodeDto,
   BookReaderResult,
   BookSearchIndexStatusDto,
@@ -84,6 +112,12 @@ const MAX_EXPORT_DOCUMENTS = 2_000
 const MAX_EXPORT_SOURCE_BYTES = 32 * 1024 * 1024
 const MAX_EXPORT_HTML_BYTES = 64 * 1024 * 1024
 const MAX_ACTIVE_EXPORT_OWNERS = 4
+const EXPORT_LEASE_TTL_MS = 2 * 60 * 1000
+const MAX_ACTIVE_RESOURCE_READS = 8
+const MAX_ACTIVE_RESOURCE_READS_PER_OWNER = 2
+const MAX_QUEUED_RESOURCE_READS = 64
+const MAX_QUEUED_RESOURCE_READS_PER_OWNER = 8
+const RESOURCE_QUEUE_TIMEOUT_MS = 30_000
 const MAX_EXPORT_LINKS = 16_384
 const MAX_EXPORT_LINKS_PER_DOCUMENT = 1_024
 const EXPORT_HASH_CHUNK_BYTES = 64 * 1024
@@ -137,6 +171,42 @@ interface BookSession {
   readableNodeIds: string[]
   searchSources: SearchSource[]
   summaryPath: 'SUMMARY.md' | 'SUMMARY.markdown' | null
+  resourceReferences: Map<string, ReadonlySet<string>>
+  chapterReadNonces: Map<string, number>
+  resourceBudgets: Map<string, ResourceGenerationBudget>
+}
+
+interface ResourceGenerationBudget {
+  nodeNonce: number
+  failed: boolean
+  leasedReferences: Set<string>
+  requestCount: number
+  byteLength: number
+  decodePixels: number
+  frameCount: number
+}
+
+interface QueuedResourceRead {
+  session: BookSession
+  ownerId: number
+  sessionGeneration: number
+  nodeId: string
+  nodeNonce: number
+  resourceToken: string
+  timer: unknown
+  resolve: (result: ResourceStartHandoff | 'stale' | 'timeout' | 'budget-failed') => void
+}
+
+interface ResourceStartHandoff {
+  operationId: string
+  session: BookSession
+  sessionId: string
+  ownerId: number
+  sessionGeneration: number
+  resourceToken: string
+  nodeId: string
+  nodeNonce: number
+  timer: unknown | null
 }
 
 interface SearchSource {
@@ -253,6 +323,8 @@ interface BookExportLease {
   websiteTargetState: 'absent' | 'empty' | 'owned' | null
   websiteTargetFiles: WebsiteFileIdentities | null
   sources: ExportSourceRevision[]
+  resourceDocuments: Array<Pick<BookExportResourceDocument, 'documentId' | 'path'>>
+  resourceLedger: BookExportResourceLedger
   controller: AbortController
   parentFd: number | null
   generation: number
@@ -264,6 +336,11 @@ interface BookExportLease {
   state: 'ready' | 'validating' | 'writing' | 'committing'
   criticalCommit: boolean
   revokeAfterCommit: boolean
+  revoked: boolean
+  disposed: boolean
+  inFlight: number
+  expiresAt: number
+  expirationTimer: ReturnType<typeof setTimeout> | null
 }
 
 interface WebsiteDirectoryInspection {
@@ -274,13 +351,31 @@ interface WebsiteDirectoryInspection {
 }
 
 interface WebsiteFileIdentities {
-  index: FileIdentity
   manifest: FileIdentity
-  indexSha256: string
   manifestSha256: string
+  assetsDirectory: FileIdentity | null
+  assetsLinkCount: bigint | null
+  files: Array<{
+    path: string
+    identity: FileIdentity
+    sha256: string
+  }>
+}
+
+interface WebsiteStageJournal {
+  identity: FileIdentity
+  assetsDirectory: FileIdentity | null
+  files: Map<string, FileIdentity>
 }
 
 export interface BookSessionManagerTestHooks {
+  beforeResourceOpen?: (reference?: string) => void | Promise<void>
+  afterResourceOpen?: (reference?: string) => void | Promise<void>
+  beforeResourceRead?: () => void | Promise<void>
+  resourceQueueClock?: {
+    setTimeout: (callback: () => void, delay: number) => unknown
+    clearTimeout: (timer: unknown) => void
+  }
   afterEditRead?: (operation: 'begin' | 'reload') => void | Promise<void>
   afterEditTempSync?: () => void | Promise<void>
   beforeEditCommitCritical?: () => void | Promise<void>
@@ -291,6 +386,7 @@ export interface BookSessionManagerTestHooks {
   beforeExportParentPin?: () => void | Promise<void>
   afterExportSourcePass?: (pass: 1 | 2) => void | Promise<void>
   afterExportTempOpen?: (tempPath?: string) => void | Promise<void>
+  afterWebsiteAssetWrite?: (assetIndex: number, stagePath?: string) => void | Promise<void>
   afterExportTempSync?: (tempPath?: string) => void | Promise<void>
   beforeExportCommitCritical?: () => void | Promise<void>
   exportCommitCriticalStarted?: () => void
@@ -327,6 +423,11 @@ const structuredError = (
     | 'node-not-found'
     | 'node-not-readable'
     | 'chapter-read-failed'
+    | 'resource-not-found'
+    | 'resource-not-readable'
+    | 'resource-too-large'
+    | 'resource-type-mismatch'
+    | 'resource-busy'
     | 'unsafe-link'
     | 'link-not-found'
     | 'search-cancelled'
@@ -504,38 +605,133 @@ const readPinnedRegularFileSync = (
   }
 }
 
+const boundedDirectoryEntriesSync = (directoryPath: string, maximum: number): string[] | null => {
+  let directory: Dir | null = null
+  let result: string[] | null = null
+  try {
+    directory = fsSync.opendirSync(directoryPath)
+    const entries: string[] = []
+    let exceeded = false
+    for (;;) {
+      const entry = directory.readSync()
+      if (!entry) break
+      if (entries.length >= maximum) {
+        exceeded = true
+        break
+      }
+      entries.push(entry.name)
+    }
+    if (!exceeded) result = entries.sort()
+  } catch {
+    result = null
+  } finally {
+    try {
+      directory?.closeSync()
+    } catch {
+      result = null
+    }
+  }
+  return result
+}
+
 const inspectWebsiteDirectorySync = (targetPath: string): WebsiteDirectoryInspection | null => {
   try {
     const stat = fsSync.lstatSync(targetPath, { bigint: true })
     if (stat.isSymbolicLink() || !stat.isDirectory()) return null
     const identity = { dev: stat.dev, ino: stat.ino, mode: Number(stat.mode) }
-    const entries = fsSync.readdirSync(targetPath)
+    const entries = boundedDirectoryEntriesSync(targetPath, 3)
+    if (!entries) return null
     if (entries.length === 0) {
       return { state: 'empty', identity, linkCount: stat.nlink, files: null }
     }
+    const manifestRead = readPinnedRegularFileSync(
+      path.join(targetPath, BOOK_WEBSITE_MANIFEST),
+      BOOK_WEBSITE_MAX_MANIFEST_BYTES
+    )
+    if (!manifestRead) return null
+    const manifest = parseBookWebsiteManifest(manifestRead.bytes)
+    if (!manifest) return null
+    const assetEntries = manifest.files.filter((file) => file.path !== BOOK_WEBSITE_INDEX)
+    const indexEntry = manifest.files.find((file) => file.path === BOOK_WEBSITE_INDEX)
     if (
-      entries.length !== BOOK_WEBSITE_FILES.length ||
-      !BOOK_WEBSITE_FILES.every((name) => entries.includes(name))
+      !indexEntry ||
+      indexEntry.size > MAX_EXPORT_HTML_BYTES ||
+      assetEntries.some((file) => file.size > BOOK_WEBSITE_MAX_ASSET_BYTES) ||
+      assetEntries.reduce((sum, file) => sum + file.size, 0) > BOOK_WEBSITE_MAX_TOTAL_ASSET_BYTES
     ) {
       return null
     }
-    const manifestRead = readPinnedRegularFileSync(
-      path.join(targetPath, BOOK_WEBSITE_MANIFEST),
-      16 * 1024
-    )
-    const indexRead = readPinnedRegularFileSync(
-      path.join(targetPath, BOOK_WEBSITE_INDEX),
-      MAX_EXPORT_HTML_BYTES
-    )
-    if (!manifestRead || !indexRead) return null
-    const manifest = parseBookWebsiteManifest(manifestRead.bytes)
-    const file = manifest?.files[0]
+    const expectedRootEntries = [
+      BOOK_WEBSITE_INDEX,
+      BOOK_WEBSITE_MANIFEST,
+      ...(assetEntries.length ? [BOOK_WEBSITE_ASSETS] : [])
+    ].sort()
     if (
-      !file ||
-      file.path !== BOOK_WEBSITE_INDEX ||
-      file.size !== indexRead.bytes.byteLength ||
-      file.sha256 !== sha256Bytes(indexRead.bytes) ||
-      !validateBookExportHtml(indexRead.bytes.toString('utf8'))
+      entries.length !== expectedRootEntries.length ||
+      entries.some((entry, index) => entry !== expectedRootEntries[index])
+    ) {
+      return null
+    }
+    let assetsDirectory: FileIdentity | null = null
+    let assetsLinkCount: bigint | null = null
+    if (assetEntries.length) {
+      const assetsPath = path.join(targetPath, BOOK_WEBSITE_ASSETS)
+      const assetsStat = fsSync.lstatSync(assetsPath, { bigint: true })
+      if (assetsStat.isSymbolicLink() || !assetsStat.isDirectory()) return null
+      assetsDirectory = {
+        dev: assetsStat.dev,
+        ino: assetsStat.ino,
+        mode: Number(assetsStat.mode)
+      }
+      assetsLinkCount = assetsStat.nlink
+      const actualAssets = boundedDirectoryEntriesSync(assetsPath, BOOK_EXPORT_MAX_ASSETS)
+      if (!actualAssets) return null
+      const expectedAssets = assetEntries.map((file) => path.basename(file.path)).sort()
+      if (
+        actualAssets.length !== expectedAssets.length ||
+        actualAssets.some((entry, index) => entry !== expectedAssets[index])
+      ) {
+        return null
+      }
+    }
+    const files: WebsiteFileIdentities['files'] = []
+    let indexBytes: Buffer | null = null
+    for (const file of manifest.files) {
+      const maximum =
+        file.path === BOOK_WEBSITE_INDEX ? MAX_EXPORT_HTML_BYTES : BOOK_WEBSITE_MAX_ASSET_BYTES
+      const read = readPinnedRegularFileSync(
+        path.join(targetPath, ...file.path.split('/')),
+        maximum
+      )
+      if (!read || read.bytes.byteLength !== file.size || sha256Bytes(read.bytes) !== file.sha256) {
+        return null
+      }
+      if (file.path === BOOK_WEBSITE_INDEX) indexBytes = read.bytes
+      files.push({ path: file.path, identity: read.identity, sha256: file.sha256 })
+    }
+    const indexHtml = indexBytes?.toString('utf8') ?? ''
+    const expectedResourceSequence = [
+      ...indexHtml.matchAll(/<(img|span)\b(?:"[^"]*"|'[^']*'|[^'">])*>/giu)
+    ].flatMap((match) => {
+      const tag = (match[1] as string).toLocaleLowerCase('en-US')
+      const token = match[0]
+      if (tag === 'img') {
+        const source = /\bsrc=(?:"([^"]+)"|'([^']+)')/iu.exec(token)
+        return source ? [source[1] ?? source[2] ?? ''] : []
+      }
+      const placeholder = /\bdata-leafbook-export-placeholder=(?:"([^"]+)"|'([^']+)')/iu.exec(token)
+      return placeholder ? [`placeholder:${placeholder[1] ?? placeholder[2] ?? ''}`] : []
+    })
+    const expectedImageSources = expectedResourceSequence.filter(
+      (resource) => !resource.startsWith('placeholder:')
+    )
+    const declaredAssets = new Set(assetEntries.map((file) => file.path))
+    const usedAssets = new Set(expectedImageSources)
+    if (
+      !indexBytes ||
+      declaredAssets.size !== usedAssets.size ||
+      [...declaredAssets].some((asset) => !usedAssets.has(asset)) ||
+      !validateBookExportHtml(indexHtml, { format: 'website', expectedResourceSequence })
     ) {
       return null
     }
@@ -554,10 +750,11 @@ const inspectWebsiteDirectorySync = (targetPath: string): WebsiteDirectoryInspec
       identity,
       linkCount: stat.nlink,
       files: {
-        index: indexRead.identity,
         manifest: manifestRead.identity,
-        indexSha256: sha256Bytes(indexRead.bytes),
-        manifestSha256: sha256Bytes(manifestRead.bytes)
+        manifestSha256: sha256Bytes(manifestRead.bytes),
+        assetsDirectory,
+        assetsLinkCount,
+        files
       }
     }
   } catch (inspectionError) {
@@ -576,10 +773,23 @@ const sameWebsiteFiles = (
     ? right === null
     : Boolean(
         right &&
-        sameFileIdentity(left.index, right.index) &&
         sameFileIdentity(left.manifest, right.manifest) &&
-        left.indexSha256 === right.indexSha256 &&
-        left.manifestSha256 === right.manifestSha256
+        left.manifestSha256 === right.manifestSha256 &&
+        left.assetsLinkCount === right.assetsLinkCount &&
+        (left.assetsDirectory === null
+          ? right.assetsDirectory === null
+          : right.assetsDirectory !== null &&
+            sameFileIdentity(left.assetsDirectory, right.assetsDirectory)) &&
+        left.files.length === right.files.length &&
+        left.files.every((file, index) => {
+          const candidate = right.files[index]
+          return Boolean(
+            candidate &&
+            file.path === candidate.path &&
+            file.sha256 === candidate.sha256 &&
+            sameFileIdentity(file.identity, candidate.identity)
+          )
+        })
       )
 
 const sameWebsiteInspection = (
@@ -920,6 +1130,11 @@ export class BookSessionManager {
   private readonly preparations: BookPreparationManager
   private readonly exportLeases = new Map<string, BookExportLease>()
   private readonly exportPreparations = new Set<number>()
+  private activeResourceReads = 0
+  private readonly activeResourceReadsByOwner = new Map<number, number>()
+  private readonly queuedResourceReads: QueuedResourceRead[] = []
+  private readonly queuedResourceReadsByOwner = new Map<number, number>()
+  private readonly pendingQueuedResourceStartsByOwner = new Map<number, ResourceStartHandoff>()
   private searchCacheBytes = 0
   private searchBuildReservationBytes = 0
 
@@ -938,10 +1153,19 @@ export class BookSessionManager {
       cwd: userDataPath,
       defaults: { libraries: [] }
     })
-    this.preparations = new BookPreparationManager({
-      beforePrepareRead: this.testHooks.beforePreparationRead,
-      beforeOpen: this.testHooks.beforePreparationCommitOpen
-    })
+    let preparationDraftStore: BookPreparationDraftStore | null = null
+    try {
+      preparationDraftStore = new BookPreparationDraftStore(userDataPath)
+    } catch {
+      // Preparation remains available, but persistent drafts fail closed.
+    }
+    this.preparations = new BookPreparationManager(
+      {
+        beforePrepareRead: this.testHooks.beforePreparationRead,
+        beforeOpen: this.testHooks.beforePreparationCommitOpen
+      },
+      preparationDraftStore
+    )
     this.writeLibraries(this.readLibraries())
   }
 
@@ -1061,6 +1285,228 @@ export class BookSessionManager {
     this.revokeSessionExports(sessionId)
   }
 
+  private queuedResourceReadIsCurrent(item: QueuedResourceRead): boolean {
+    return (
+      this.sessions.get(item.session.dto.sessionId) === item.session &&
+      item.session.ownerId === item.ownerId &&
+      item.session.generation === item.sessionGeneration &&
+      item.session.dto.resourceToken === item.resourceToken &&
+      item.session.chapterReadNonces.get(item.nodeId) === item.nodeNonce
+    )
+  }
+
+  private clearResourceQueueTimer(timer: unknown): void {
+    if (this.testHooks.resourceQueueClock) {
+      this.testHooks.resourceQueueClock.clearTimeout(timer)
+    } else {
+      clearTimeout(timer as ReturnType<typeof setTimeout>)
+    }
+  }
+
+  private decrementQueuedResourceOwner(ownerId: number): void {
+    const remaining = (this.queuedResourceReadsByOwner.get(ownerId) ?? 1) - 1
+    if (remaining > 0) this.queuedResourceReadsByOwner.set(ownerId, remaining)
+    else this.queuedResourceReadsByOwner.delete(ownerId)
+  }
+
+  private removeQueuedResourceRead(index: number): QueuedResourceRead | undefined {
+    const [item] = this.queuedResourceReads.splice(index, 1)
+    if (!item) return undefined
+    this.decrementQueuedResourceOwner(item.ownerId)
+    this.clearResourceQueueTimer(item.timer)
+    return item
+  }
+
+  private cancelQueuedResourceReads(
+    predicate: (item: QueuedResourceRead) => boolean,
+    result: 'stale' | 'budget-failed' = 'stale'
+  ): void {
+    for (let index = this.queuedResourceReads.length - 1; index >= 0; index -= 1) {
+      const item = this.queuedResourceReads[index]
+      if (!item || !predicate(item)) continue
+      this.removeQueuedResourceRead(index)?.resolve(result)
+    }
+    this.drainQueuedResourceReads()
+  }
+
+  private drainQueuedResourceReads(): void {
+    while (
+      this.queuedResourceReads.length > 0 &&
+      this.activeResourceReads < MAX_ACTIVE_RESOURCE_READS
+    ) {
+      let admittedIndex = -1
+      for (let index = 0; index < this.queuedResourceReads.length; index += 1) {
+        const candidate = this.queuedResourceReads[index]
+        if (!candidate) continue
+        if (!this.queuedResourceReadIsCurrent(candidate)) {
+          this.removeQueuedResourceRead(index)?.resolve('stale')
+          index -= 1
+          continue
+        }
+        const ownerReads = this.activeResourceReadsByOwner.get(candidate.ownerId) ?? 0
+        if (
+          ownerReads < MAX_ACTIVE_RESOURCE_READS_PER_OWNER &&
+          !this.pendingQueuedResourceStartsByOwner.has(candidate.ownerId)
+        ) {
+          admittedIndex = index
+          break
+        }
+      }
+      if (admittedIndex < 0) return
+      const item = this.removeQueuedResourceRead(admittedIndex)
+      if (!item) return
+      const ownerReads = this.activeResourceReadsByOwner.get(item.ownerId) ?? 0
+      this.activeResourceReads += 1
+      this.activeResourceReadsByOwner.set(item.ownerId, ownerReads + 1)
+      const handoff: ResourceStartHandoff = {
+        operationId: randomUUID(),
+        session: item.session,
+        sessionId: item.session.dto.sessionId,
+        ownerId: item.ownerId,
+        sessionGeneration: item.sessionGeneration,
+        resourceToken: item.resourceToken,
+        nodeId: item.nodeId,
+        nodeNonce: item.nodeNonce,
+        timer: null
+      }
+      this.pendingQueuedResourceStartsByOwner.set(item.ownerId, handoff)
+      const onTimeout = (): void => {
+        this.releaseQueuedResourceStart(handoff)
+      }
+      const timer = this.testHooks.resourceQueueClock
+        ? this.testHooks.resourceQueueClock.setTimeout(onTimeout, RESOURCE_QUEUE_TIMEOUT_MS)
+        : setTimeout(onTimeout, RESOURCE_QUEUE_TIMEOUT_MS)
+      if (this.pendingQueuedResourceStartsByOwner.get(item.ownerId) === handoff) {
+        handoff.timer = timer
+      } else {
+        this.clearResourceQueueTimer(timer)
+      }
+      item.resolve(handoff)
+    }
+  }
+
+  private releaseQueuedResourceStart(handoff: ResourceStartHandoff): boolean {
+    if (this.pendingQueuedResourceStartsByOwner.get(handoff.ownerId) !== handoff) return false
+    this.pendingQueuedResourceStartsByOwner.delete(handoff.ownerId)
+    if (handoff.timer !== null) this.clearResourceQueueTimer(handoff.timer)
+    this.drainQueuedResourceReads()
+    return true
+  }
+
+  private releaseQueuedResourceStarts(predicate: (handoff: ResourceStartHandoff) => boolean): void {
+    for (const handoff of [...this.pendingQueuedResourceStartsByOwner.values()]) {
+      if (predicate(handoff)) this.releaseQueuedResourceStart(handoff)
+    }
+  }
+
+  private acquireResourceRead(
+    session: BookSession,
+    ownerId: number,
+    nodeId: string,
+    nodeNonce: number,
+    resourceToken: string,
+    budget: ResourceGenerationBudget,
+    reference: string
+  ): Promise<
+    ResourceStartHandoff | 'acquired' | 'stale' | 'timeout' | 'full' | 'budget-failed' | 'duplicate'
+  > {
+    const sessionGeneration = session.generation
+    this.drainQueuedResourceReads()
+    if (
+      this.sessions.get(session.dto.sessionId) !== session ||
+      session.ownerId !== ownerId ||
+      session.generation !== sessionGeneration ||
+      session.dto.resourceToken !== resourceToken ||
+      session.chapterReadNonces.get(nodeId) !== nodeNonce ||
+      session.resourceBudgets.get(nodeId) !== budget
+    ) {
+      return Promise.resolve('stale')
+    }
+    if (budget.failed) return Promise.resolve('budget-failed')
+    if (budget.leasedReferences.has(reference)) return Promise.resolve('duplicate')
+
+    const ownerQueued = this.queuedResourceReadsByOwner.get(ownerId) ?? 0
+    const immediate =
+      this.activeResourceReads < MAX_ACTIVE_RESOURCE_READS &&
+      (this.activeResourceReadsByOwner.get(ownerId) ?? 0) < MAX_ACTIVE_RESOURCE_READS_PER_OWNER &&
+      ownerQueued === 0 &&
+      !this.pendingQueuedResourceStartsByOwner.has(ownerId)
+    if (
+      !immediate &&
+      (this.queuedResourceReads.length >= MAX_QUEUED_RESOURCE_READS ||
+        ownerQueued >= MAX_QUEUED_RESOURCE_READS_PER_OWNER)
+    ) {
+      return Promise.resolve('full')
+    }
+    const nextRequestCount = budget.requestCount + 1
+    const nextUniqueCount = budget.leasedReferences.size + 1
+    if (nextRequestCount > BOOK_IMAGE_MAX_UNIQUE || nextUniqueCount > BOOK_IMAGE_MAX_UNIQUE) {
+      this.failResourceBudget(session, nodeId, budget)
+      return Promise.resolve('budget-failed')
+    }
+    budget.requestCount = nextRequestCount
+    budget.leasedReferences.add(reference)
+
+    if (immediate) {
+      this.activeResourceReads += 1
+      this.activeResourceReadsByOwner.set(
+        ownerId,
+        (this.activeResourceReadsByOwner.get(ownerId) ?? 0) + 1
+      )
+      return Promise.resolve('acquired')
+    }
+    return new Promise((resolve) => {
+      const item = {} as QueuedResourceRead
+      item.session = session
+      item.ownerId = ownerId
+      item.sessionGeneration = sessionGeneration
+      item.nodeId = nodeId
+      item.nodeNonce = nodeNonce
+      item.resourceToken = resourceToken
+      item.resolve = resolve
+      const onTimeout = (): void => {
+        const index = this.queuedResourceReads.indexOf(item)
+        if (index < 0) return
+        this.removeQueuedResourceRead(index)
+        resolve('timeout')
+        this.drainQueuedResourceReads()
+      }
+      item.timer = this.testHooks.resourceQueueClock
+        ? this.testHooks.resourceQueueClock.setTimeout(onTimeout, RESOURCE_QUEUE_TIMEOUT_MS)
+        : setTimeout(onTimeout, RESOURCE_QUEUE_TIMEOUT_MS)
+      this.queuedResourceReads.push(item)
+      this.queuedResourceReadsByOwner.set(ownerId, ownerQueued + 1)
+      this.drainQueuedResourceReads()
+    })
+  }
+
+  private releaseResourceRead(ownerId: number): void {
+    this.activeResourceReads = Math.max(0, this.activeResourceReads - 1)
+    const remaining = (this.activeResourceReadsByOwner.get(ownerId) ?? 1) - 1
+    if (remaining > 0) this.activeResourceReadsByOwner.set(ownerId, remaining)
+    else this.activeResourceReadsByOwner.delete(ownerId)
+    this.drainQueuedResourceReads()
+  }
+
+  private failResourceBudget(
+    session: BookSession,
+    nodeId: string,
+    budget: ResourceGenerationBudget
+  ): void {
+    budget.failed = true
+    this.cancelQueuedResourceReads(
+      (item) =>
+        item.session === session && item.nodeId === nodeId && item.nodeNonce === budget.nodeNonce,
+      'budget-failed'
+    )
+    this.releaseQueuedResourceStarts(
+      (handoff) =>
+        handoff.session === session &&
+        handoff.nodeId === nodeId &&
+        handoff.nodeNonce === budget.nodeNonce
+    )
+  }
+
   private invalidateSession(
     sessionId: string,
     session: BookSession,
@@ -1068,6 +1514,12 @@ export class BookSessionManager {
   ): boolean {
     if (this.sessions.get(sessionId) !== session) return false
     session.generation += 1
+    session.dto.resourceToken = randomUUID()
+    session.resourceReferences.clear()
+    session.chapterReadNonces.clear()
+    session.resourceBudgets.clear()
+    this.cancelQueuedResourceReads((item) => item.session === session)
+    this.releaseQueuedResourceStarts((handoff) => handoff.session === session)
     this.revokeSessionLeases(sessionId, session, retainedEdit)
     return true
   }
@@ -1404,6 +1856,7 @@ export class BookSessionManager {
     const dto: BookSessionDto = {
       libraryId,
       sessionId,
+      resourceToken: randomUUID(),
       title: result.book.metadata.title,
       navigationSource: result.book.navigation.source,
       nodes,
@@ -1429,7 +1882,10 @@ export class BookSessionManager {
         result.book.navigation.summaryPath === 'SUMMARY.md' ||
         result.book.navigation.summaryPath === 'SUMMARY.markdown'
           ? result.book.navigation.summaryPath
-          : null
+          : null,
+      resourceReferences: new Map(),
+      chapterReadNonces: new Map(),
+      resourceBudgets: new Map()
     }
   }
 
@@ -1513,7 +1969,16 @@ export class BookSessionManager {
       return error('book-unavailable', 'This book folder changed and the session was invalidated.')
     }
     this.revokeSessionSearch(session)
-    const result = await this.loadBook(session.rootPath)
+    let result: Awaited<ReturnType<typeof loadBookFromDirectory>>
+    try {
+      result = await this.loadBook(session.rootPath)
+    } catch {
+      this.deleteSession(sessionId, session)
+      return error(
+        'book-unavailable',
+        'LeafBook could not safely refresh this book. Reopen it to create a new session.'
+      )
+    }
     if (
       this.currentOwnedSession(sessionId, ownerId) !== session ||
       session.generation !== sessionGeneration
@@ -1528,7 +1993,11 @@ export class BookSessionManager {
       return error('book-unavailable', 'This book folder changed and the session was invalidated.')
     }
     if (result.diagnostics.some((item) => item.code === 'scan-root-error')) {
-      return error('book-unavailable', 'LeafBook could not safely refresh this book.')
+      this.deleteSession(sessionId, session)
+      return error(
+        'book-unavailable',
+        'LeafBook could not safely refresh this book. Reopen it to create a new session.'
+      )
     }
     if (
       this.currentOwnedSession(sessionId, ownerId) !== session ||
@@ -2225,6 +2694,27 @@ export class BookSessionManager {
     ownerId: number = 0
   ): Promise<BookReaderResult<BookPreparationDto>> {
     return this.preparations.select(preparationId, sourceNodeId, ownerId)
+  }
+
+  applyPreparationDraft(
+    request: BookPreparationDraftApplyRequestDto,
+    ownerId: number = 0
+  ): Promise<BookReaderResult<BookPreparationDto>> {
+    return this.preparations.applyDraft(request, ownerId)
+  }
+
+  restorePreparationDraft(
+    request: BookPreparationRecoveryRequestDto,
+    ownerId: number = 0
+  ): Promise<BookReaderResult<BookPreparationDto>> {
+    return this.preparations.restoreDraft(request, ownerId)
+  }
+
+  discardPreparationDraft(
+    request: BookPreparationRecoveryRequestDto,
+    ownerId: number = 0
+  ): Promise<BookReaderResult<BookPreparationDto>> {
+    return this.preparations.discardDraft(request, ownerId)
   }
 
   async commitPreparation(
@@ -3043,6 +3533,14 @@ export class BookSessionManager {
     if (target.kind !== 'chapter') {
       return error('node-not-readable', 'This navigation item is not a local chapter.')
     }
+    const readNonce = (session.chapterReadNonces.get(nodeId) ?? 0) + 1
+    session.chapterReadNonces.set(nodeId, readNonce)
+    session.resourceReferences.delete(nodeId)
+    session.resourceBudgets.delete(nodeId)
+    this.releaseQueuedResourceStarts(
+      (handoff) => handoff.session === session && handoff.nodeId === nodeId
+    )
+    this.cancelQueuedResourceReads((item) => item.session === session && item.nodeId === nodeId)
     const result = await this.readBookChapter(session.rootPath, target.path)
     if (this.ownedSession(sessionId, ownerId) !== session) {
       return error('session-not-found', 'This book session has expired.')
@@ -3055,6 +3553,18 @@ export class BookSessionManager {
       return error('book-unavailable', 'This book folder changed and the session was invalidated.')
     }
     if (!result) return error('chapter-read-failed', 'LeafBook could not safely read this chapter.')
+    if (session.chapterReadNonces.get(nodeId) === readNonce) {
+      session.resourceReferences.set(nodeId, extractBookImageReferences(result.content))
+      session.resourceBudgets.set(nodeId, {
+        nodeNonce: readNonce,
+        failed: false,
+        leasedReferences: new Set(),
+        requestCount: 0,
+        byteLength: 0,
+        decodePixels: 0,
+        frameCount: 0
+      })
+    }
     const savedPosition = this.readLibraries()
       .find((item) => item.libraryId === session.libraryId)
       ?.reading?.positions.find((item) => item.targetKey === target.stableKey)
@@ -3068,6 +3578,192 @@ export class BookSessionManager {
         readingPosition: savedPosition?.ratio ?? 0,
         hasReadingPosition: Boolean(savedPosition)
       }
+    }
+  }
+
+  async readResource(
+    request: unknown,
+    ownerId: number = 0
+  ): Promise<BookReaderResult<BookResourceDto>> {
+    const candidate = request as Partial<BookResourceRequestDto> | null
+    if (
+      !candidate ||
+      !validOpaqueId(candidate.sessionId) ||
+      !validOpaqueId(candidate.resourceToken) ||
+      !validOpaqueId(candidate.nodeId) ||
+      typeof candidate.reference !== 'string'
+    ) {
+      return error('invalid-request', 'Invalid book resource request.')
+    }
+    const session = this.ownedSession(candidate.sessionId, ownerId)
+    if (!session) return error('session-not-found', 'This book session has expired.')
+    if (candidate.resourceToken !== session.dto.resourceToken) {
+      return error('session-not-found', 'This book resource capability has expired.')
+    }
+    const target = session.targets.get(candidate.nodeId)
+    if (!target) return error('node-not-found', 'This chapter is not part of the current book.')
+    if (target.kind !== 'chapter') {
+      return error('node-not-readable', 'This navigation item is not a local chapter.')
+    }
+    if (!session.resourceReferences.get(candidate.nodeId)?.has(candidate.reference)) {
+      return error('resource-not-readable', 'LeafBook refused to read this book resource.')
+    }
+    const nodeNonce = session.chapterReadNonces.get(candidate.nodeId)
+    const initialBudget = session.resourceBudgets.get(candidate.nodeId)
+    if (
+      nodeNonce === undefined ||
+      !initialBudget ||
+      initialBudget.nodeNonce !== nodeNonce ||
+      initialBudget.failed
+    ) {
+      return error('resource-too-large', 'This chapter resource budget has expired.')
+    }
+    const admission = await this.acquireResourceRead(
+      session,
+      ownerId,
+      candidate.nodeId,
+      nodeNonce,
+      candidate.resourceToken,
+      initialBudget,
+      candidate.reference
+    )
+    if (admission === 'full' || admission === 'timeout') {
+      return error('resource-busy', 'LeafBook is already serving the maximum number of resources.')
+    }
+    if (admission === 'stale') {
+      return error('session-not-found', 'This book resource capability has expired.')
+    }
+    if (admission === 'budget-failed') {
+      return error('resource-too-large', 'This chapter resource budget was exceeded.')
+    }
+    if (admission === 'duplicate') {
+      return error('resource-not-readable', 'This book resource reference was already consumed.')
+    }
+    const queuedStartHandoff = typeof admission === 'object' ? admission : null
+    const generation = session.generation
+    try {
+      await this.testHooks.beforeResourceOpen?.(candidate.reference)
+      const currentSession = this.ownedSession(candidate.sessionId, ownerId)
+      const currentBudget = session.resourceBudgets.get(candidate.nodeId)
+      const currentTarget = session.targets.get(candidate.nodeId)
+      if (
+        currentSession !== session ||
+        session.generation !== generation ||
+        session.dto.resourceToken !== candidate.resourceToken ||
+        session.chapterReadNonces.get(candidate.nodeId) !== nodeNonce
+      ) {
+        return error('session-not-found', 'This book resource capability has expired.')
+      }
+      if (
+        currentTarget?.kind !== 'chapter' ||
+        !session.resourceReferences.get(candidate.nodeId)?.has(candidate.reference)
+      ) {
+        return error('resource-not-readable', 'LeafBook refused to read this book resource.')
+      }
+      if (
+        !currentBudget ||
+        currentBudget !== initialBudget ||
+        currentBudget.nodeNonce !== nodeNonce ||
+        currentBudget.failed
+      ) {
+        return error('resource-too-large', 'This chapter resource budget has expired.')
+      }
+      const initialRoot = await this.validateSessionRoot(candidate.sessionId, session)
+      if (initialRoot === 'revoked') {
+        return error('session-not-found', 'This book session has expired.')
+      }
+      if (initialRoot === 'invalid') {
+        return error(
+          'book-unavailable',
+          'This book folder changed and the session was invalidated.'
+        )
+      }
+      const result = await readBookResourceFile(
+        session.rootIdentity,
+        currentTarget.path,
+        candidate.reference,
+        {
+          afterOpen: async () => {
+            if (queuedStartHandoff) this.releaseQueuedResourceStart(queuedStartHandoff)
+            await this.testHooks.afterResourceOpen?.(candidate.reference)
+          },
+          beforeRead: async () => this.testHooks.beforeResourceRead?.()
+        }
+      )
+      if (
+        this.ownedSession(candidate.sessionId, ownerId) !== session ||
+        session.generation !== generation ||
+        session.dto.resourceToken !== candidate.resourceToken ||
+        session.chapterReadNonces.get(candidate.nodeId) !== nodeNonce
+      ) {
+        return error('session-not-found', 'This book session has expired.')
+      }
+      const finalRoot = await this.validateSessionRoot(candidate.sessionId, session)
+      if (finalRoot === 'revoked') {
+        return error('session-not-found', 'This book session has expired.')
+      }
+      if (finalRoot === 'invalid') {
+        return error(
+          'book-unavailable',
+          'This book folder changed and the session was invalidated.'
+        )
+      }
+      if (!result.ok) {
+        switch (result.reason) {
+          case 'not-found':
+            return error('resource-not-found', 'This book resource is unavailable.')
+          case 'too-large':
+            return error('resource-too-large', 'This book resource exceeds the safe size limit.')
+          case 'type-mismatch':
+            return error(
+              'resource-type-mismatch',
+              'This book resource does not match an allowed image type.'
+            )
+          case 'invalid-reference':
+          case 'unsafe-path':
+            return error('resource-not-readable', 'LeafBook refused to read this book resource.')
+        }
+      }
+      const finalBudget = session.resourceBudgets.get(candidate.nodeId)
+      if (
+        finalBudget !== currentBudget ||
+        finalBudget.nodeNonce !== nodeNonce ||
+        finalBudget.failed
+      ) {
+        return error('resource-too-large', 'This chapter resource budget was exceeded.')
+      }
+      const nextByteLength = finalBudget.byteLength + result.bytes.byteLength
+      const nextDecodePixels = finalBudget.decodePixels + result.metadata.decodePixels
+      const nextFrameCount = finalBudget.frameCount + result.metadata.frameCount
+      if (
+        !Number.isSafeInteger(nextByteLength) ||
+        !Number.isSafeInteger(nextDecodePixels) ||
+        !Number.isSafeInteger(nextFrameCount) ||
+        nextByteLength > BOOK_IMAGE_GENERATION_MAX_BYTES ||
+        nextDecodePixels > BOOK_IMAGE_GENERATION_MAX_DECODE_PIXELS ||
+        nextFrameCount > BOOK_IMAGE_GENERATION_MAX_FRAMES
+      ) {
+        this.failResourceBudget(session, candidate.nodeId, finalBudget)
+        return error('resource-too-large', 'This chapter resource budget was exceeded.')
+      }
+      finalBudget.byteLength = nextByteLength
+      finalBudget.decodePixels = nextDecodePixels
+      finalBudget.frameCount = nextFrameCount
+      return {
+        ok: true,
+        value: {
+          mediaType: result.mediaType,
+          byteLength: result.bytes.byteLength,
+          width: result.metadata.width,
+          height: result.metadata.height,
+          frameCount: result.metadata.frameCount,
+          decodePixels: result.metadata.decodePixels,
+          bytes: result.bytes
+        }
+      }
+    } finally {
+      if (queuedStartHandoff) this.releaseQueuedResourceStart(queuedStartHandoff)
+      this.releaseResourceRead(ownerId)
     }
   }
 
@@ -3172,18 +3868,22 @@ export class BookSessionManager {
   }
 
   private revokeExport(lease: BookExportLease): void {
+    if (lease.revoked) return
+    lease.revoked = true
     lease.generation += 1
     lease.controller.abort()
-    if (lease.operation || lease.criticalCommit) {
-      lease.revokeAfterCommit = true
-      if (this.exportLeases.get(lease.exportId) === lease) {
-        this.exportLeases.delete(lease.exportId)
-      }
-      return
-    }
+    lease.revokeAfterCommit = lease.operation !== null || lease.criticalCommit
+    if (lease.expirationTimer) clearTimeout(lease.expirationTimer)
+    lease.expirationTimer = null
     if (this.exportLeases.get(lease.exportId) === lease) {
       this.exportLeases.delete(lease.exportId)
     }
+    if (lease.inFlight === 0) this.disposeExportLease(lease)
+  }
+
+  private disposeExportLease(lease: BookExportLease): void {
+    if (lease.disposed) return
+    lease.disposed = true
     if (lease.parentFd !== null) {
       try {
         fsSync.closeSync(lease.parentFd)
@@ -3191,6 +3891,19 @@ export class BookSessionManager {
         // A prior revocation may already have closed this pinned descriptor.
       }
       lease.parentFd = null
+    }
+    disposeBookExportResourceLedger(lease.resourceLedger)
+  }
+
+  private releaseExportInFlight(lease: BookExportLease): void {
+    if (lease.inFlight > 0) lease.inFlight -= 1
+    if (lease.revoked && lease.inFlight === 0) this.disposeExportLease(lease)
+  }
+
+  private pruneExpiredExports(): void {
+    const now = Date.now()
+    for (const lease of this.exportLeases.values()) {
+      if (now > lease.expiresAt) this.revokeExport(lease)
     }
   }
 
@@ -3213,6 +3926,7 @@ export class BookSessionManager {
   ): boolean {
     return (
       !lease.controller.signal.aborted &&
+      Date.now() <= lease.expiresAt &&
       lease.generation === generation &&
       lease.operationGeneration === operationGeneration &&
       this.exportLeases.get(lease.exportId) === lease &&
@@ -3231,6 +3945,19 @@ export class BookSessionManager {
         pinned.isDirectory() &&
         pinned.dev === lease.parentIdentity.dev &&
         pinned.ino === lease.parentIdentity.ino &&
+        pathname !== null &&
+        sameFileIdentity(pathname, lease.parentIdentity) &&
+        fsSync.realpathSync(lease.parentPath) === lease.parentPath
+      )
+    } catch {
+      return false
+    }
+  }
+
+  private exportCleanupParentCurrentSync(lease: BookExportLease): boolean {
+    try {
+      const pathname = fileIdentitySync(lease.parentPath, true)
+      return (
         pathname !== null &&
         sameFileIdentity(pathname, lease.parentIdentity) &&
         fsSync.realpathSync(lease.parentPath) === lease.parentPath
@@ -3285,11 +4012,14 @@ export class BookSessionManager {
     return true
   }
 
-  private safeExportHtml(html: string): boolean {
+  private safeExportHtml(lease: BookExportLease, html: string): boolean {
     return (
       typeof html === 'string' &&
       Buffer.byteLength(html, 'utf8') <= MAX_EXPORT_HTML_BYTES &&
-      validateBookExportHtml(html)
+      validateBookExportHtml(html, {
+        format: lease.kind,
+        expectedResourceSequence: lease.resourceLedger.expectedResourceSequence
+      })
     )
   }
 
@@ -3318,6 +4048,7 @@ export class BookSessionManager {
     event: IpcMainInvokeEvent,
     ownerId: number
   ): Promise<BookReaderResult<BookExportSnapshotDto>> {
+    this.pruneExpiredExports()
     if (this.exportPreparations.has(ownerId)) {
       return error(
         kind === 'website' ? 'website-busy' : 'export-busy',
@@ -3530,6 +4261,7 @@ export class BookSessionManager {
     const documentIdByPath = new Map<string, string>()
     sources.forEach((source, index) => documentIdByPath.set(source.path, `${index + 1}`))
     const documents: BookExportDocumentDto[] = []
+    const resourceDocuments: BookExportResourceDocument[] = []
     const revisions: ExportSourceRevision[] = []
     let sourceBytes = 0
     let linkCount = 0
@@ -3574,8 +4306,10 @@ export class BookSessionManager {
         nodeIds,
         title: source.title,
         markdown,
-        linkTargets
+        linkTargets,
+        resourceTargets: []
       })
+      resourceDocuments.push({ documentId, path: source.path, markdown })
       revisions.push({
         path: source.path,
         revision: markdown === null ? null : hashBytes(Buffer.from(markdown, 'utf8')),
@@ -3603,12 +4337,52 @@ export class BookSessionManager {
     if (finalRoot !== 'valid' || session.generation !== sessionGeneration) {
       return error(sourceCode, 'The book changed while the export was prepared.')
     }
+    let resourceLedger: BookExportResourceLedger
+    try {
+      resourceLedger = await buildBookExportResourceLedger(
+        session.rootIdentity,
+        resourceDocuments,
+        kind
+      )
+    } catch (ledgerError) {
+      if (ledgerError instanceof BookExportResourceLedgerError && ledgerError.code === 'budget') {
+        return error(tooLargeCode, 'This book has too many or too-large image resources to export.')
+      }
+      return error(sourceCode, 'An image source could not be verified for export.')
+    }
+    for (const document of documents) {
+      document.resourceTargets = resourceLedger.targetsByDocument.get(document.documentId) ?? []
+    }
+    let aggregateVerificationBytes = 0
+    let sourcesChanged = false
+    for (const source of revisions) {
+      const verified = exportSourceRevisionSync(
+        session.rootIdentity,
+        source,
+        aggregateVerificationBytes
+      )
+      if (!verified || verified.revision !== source.revision) {
+        sourcesChanged = true
+        break
+      }
+      aggregateVerificationBytes = verified.aggregateBytes
+    }
+    if (
+      this.ownedSession(sessionId, ownerId) !== session ||
+      session.generation !== sessionGeneration ||
+      (await this.validateSessionRoot(sessionId, session, false)) !== 'valid' ||
+      sourcesChanged
+    ) {
+      disposeBookExportResourceLedger(resourceLedger)
+      return error(sourceCode, 'The book changed while image resources were prepared.')
+    }
     await this.testHooks.beforeExportParentPin?.()
     if (
       !this.ownerIsCurrent(ownerId, ownerGeneration) ||
       this.ownedSession(sessionId, ownerId) !== session ||
       session.generation !== sessionGeneration
     ) {
+      disposeBookExportResourceLedger(resourceLedger)
       return error('cancelled', 'The export was cancelled.')
     }
     let parentFd: number | null = null
@@ -3620,6 +4394,7 @@ export class BookSessionManager {
         pathname.dev !== parentIdentity.dev ||
         pathname.ino !== parentIdentity.ino
       ) {
+        disposeBookExportResourceLedger(resourceLedger)
         return error(writeCode, 'The export destination folder changed.')
       }
       parentFd = fsSync.openSync(
@@ -3640,6 +4415,7 @@ export class BookSessionManager {
         fsSync.realpathSync(parentRealPath) !== parentRealPath
       ) {
         fsSync.closeSync(parentFd)
+        disposeBookExportResourceLedger(resourceLedger)
         return error(writeCode, 'The export destination folder changed.')
       }
     } catch {
@@ -3650,6 +4426,7 @@ export class BookSessionManager {
           // Ignore a close failure while rejecting the destination.
         }
       }
+      disposeBookExportResourceLedger(resourceLedger)
       return error(writeCode, 'The export destination folder is unavailable.')
     }
     const exportId = randomUUID()
@@ -3669,6 +4446,8 @@ export class BookSessionManager {
       websiteTargetState,
       websiteTargetFiles,
       sources: revisions,
+      resourceDocuments: resourceDocuments.map(({ documentId, path }) => ({ documentId, path })),
+      resourceLedger,
       controller: new AbortController(),
       parentFd,
       generation: 0,
@@ -3676,9 +4455,20 @@ export class BookSessionManager {
       operation: null,
       state: 'ready',
       criticalCommit: false,
-      revokeAfterCommit: false
+      revokeAfterCommit: false,
+      revoked: false,
+      disposed: false,
+      inFlight: 0,
+      expiresAt: Date.now() + EXPORT_LEASE_TTL_MS,
+      expirationTimer: null
     }
     this.exportLeases.set(exportId, lease)
+    lease.expirationTimer = setTimeout(() => {
+      if (this.exportLeases.get(exportId) === lease && Date.now() >= lease.expiresAt) {
+        this.revokeExport(lease)
+      }
+    }, EXPORT_LEASE_TTL_MS)
+    lease.expirationTimer.unref?.()
     const navigationTargets: Record<string, { documentId: string; fragment: string | null }> = {}
     for (const [nodeId, target] of session.targets) {
       if (target.kind !== 'chapter') continue
@@ -3689,6 +4479,7 @@ export class BookSessionManager {
       ok: true,
       value: {
         exportId,
+        format: kind,
         title: session.dto.title,
         nodes: session.dto.nodes,
         landingNodeId: session.dto.landingNodeId,
@@ -3703,13 +4494,17 @@ export class BookSessionManager {
     ownerId: number = 0
   ): Promise<BookReaderResult<BookExportSaveDto>> {
     const lease = this.exportLease(request?.exportId, ownerId)
-    if (!lease || lease.kind !== 'html' || !this.exportLeaseCurrent(lease)) {
+    if (!lease || lease.kind !== 'html') {
+      return error('cancelled', 'This export has expired.')
+    }
+    if (!this.exportLeaseCurrent(lease)) {
+      this.revokeExport(lease)
       return error('cancelled', 'This export has expired.')
     }
     if (lease.operation) {
       return error('export-busy', 'This export is already being saved.')
     }
-    if (!this.safeExportHtml(request.html)) {
+    if (!this.safeExportHtml(lease, request.html)) {
       this.revokeExport(lease)
       return error('export-invalid-output', 'LeafBook rejected unsafe generated HTML.')
     }
@@ -3717,6 +4512,7 @@ export class BookSessionManager {
     const generation = lease.generation
     const operationGeneration = ++lease.operationGeneration
     lease.state = 'validating'
+    lease.inFlight += 1
     const operation = (async () => {
       await Promise.resolve()
       return this.performExportCommit(lease, bytes, generation, operationGeneration)
@@ -3729,6 +4525,7 @@ export class BookSessionManager {
       lease.criticalCommit = false
       lease.state = 'ready'
       this.revokeExport(lease)
+      this.releaseExportInFlight(lease)
     }
   }
 
@@ -3737,13 +4534,17 @@ export class BookSessionManager {
     ownerId: number = 0
   ): Promise<BookReaderResult<BookWebsiteSaveDto>> {
     const lease = this.exportLease(request?.websiteId, ownerId)
-    if (!lease || lease.kind !== 'website' || !this.exportLeaseCurrent(lease)) {
+    if (!lease || lease.kind !== 'website') {
+      return error('cancelled', 'This website generation has expired.')
+    }
+    if (!this.exportLeaseCurrent(lease)) {
+      this.revokeExport(lease)
       return error('cancelled', 'This website generation has expired.')
     }
     if (lease.operation) {
       return error('website-busy', 'This website is already being saved.')
     }
-    if (!this.safeExportHtml(request.html)) {
+    if (!this.safeExportHtml(lease, request.html)) {
       this.revokeExport(lease)
       return error('website-invalid-output', 'LeafBook rejected unsafe generated HTML.')
     }
@@ -3751,6 +4552,7 @@ export class BookSessionManager {
     const generation = lease.generation
     const operationGeneration = ++lease.operationGeneration
     lease.state = 'validating'
+    lease.inFlight += 1
     const operation = (async () => {
       await Promise.resolve()
       return this.performWebsiteCommit(lease, bytes, generation, operationGeneration)
@@ -3763,6 +4565,7 @@ export class BookSessionManager {
       lease.criticalCommit = false
       lease.state = 'ready'
       this.revokeExport(lease)
+      this.releaseExportInFlight(lease)
     }
   }
 
@@ -3778,7 +4581,8 @@ export class BookSessionManager {
       lease.session.generation === lease.sessionGeneration &&
       this.exportParentCurrentSync(lease) &&
       this.exportRootCurrentSync(lease) &&
-      this.exportSourcesCurrentSync(lease)
+      this.exportSourcesCurrentSync(lease) &&
+      exportResourcesCurrentSync(lease.resourceLedger)
     )
   }
 
@@ -3803,8 +4607,13 @@ export class BookSessionManager {
       linkCount: bigint | null
       files: WebsiteFileIdentities | null
     },
-    allowCleanupHook = false
+    allowCleanupHook = false,
+    allowRevokedBoundary = false
   ): boolean {
+    const cleanupBoundaryCurrent = (): boolean =>
+      allowRevokedBoundary
+        ? this.exportCleanupParentCurrentSync(lease)
+        : this.websiteCommonBoundaryCurrentSync(lease)
     const targetCurrent = (): boolean =>
       sameWebsiteInspection(
         inspectWebsiteDirectorySync(lease.targetPath),
@@ -3814,7 +4623,13 @@ export class BookSessionManager {
         targetExpectation.files
       )
     const minimalParentAndDirectoryCurrent = (expectedLinkCount: bigint): boolean => {
-      if (!this.exportParentCurrentSync(lease)) return false
+      if (
+        allowRevokedBoundary
+          ? !this.exportCleanupParentCurrentSync(lease)
+          : !this.exportParentCurrentSync(lease)
+      ) {
+        return false
+      }
       try {
         const pathname = fsSync.lstatSync(directoryPath, { bigint: true })
         return (
@@ -3831,7 +4646,7 @@ export class BookSessionManager {
     try {
       if (state === 'empty') {
         if (
-          !this.websiteCommonBoundaryCurrentSync(lease) ||
+          !cleanupBoundaryCurrent() ||
           !targetCurrent() ||
           !minimalParentAndDirectoryCurrent(linkCount)
         ) {
@@ -3847,7 +4662,7 @@ export class BookSessionManager {
         return true
       }
       if (!files) return false
-      if (!this.websiteCommonBoundaryCurrentSync(lease) || !targetCurrent()) {
+      if (!cleanupBoundaryCurrent() || !targetCurrent()) {
         return false
       }
       if (allowCleanupHook) this.testHooks.beforeWebsiteIndexFinalInspection?.(directoryPath)
@@ -3859,17 +4674,44 @@ export class BookSessionManager {
         return false
       }
       if (allowCleanupHook) this.testHooks.afterWebsiteIndexFinalInspection?.(directoryPath)
+      const indexRecord = files.files.find((file) => file.path === BOOK_WEBSITE_INDEX)
+      if (!indexRecord) return false
       fsSync.unlinkSync(path.join(directoryPath, BOOK_WEBSITE_INDEX))
-      const afterIndexLinkCount = fsSync.lstatSync(directoryPath, { bigint: true }).nlink
       if (allowCleanupHook) this.testHooks.duringWebsiteBackupCleanup?.(directoryPath)
-      if (!this.websiteCommonBoundaryCurrentSync(lease) || !targetCurrent()) {
+      if (!cleanupBoundaryCurrent() || !targetCurrent()) {
         return false
+      }
+      for (const file of files.files) {
+        if (file.path === BOOK_WEBSITE_INDEX) continue
+        const pathname = path.join(directoryPath, ...file.path.split('/'))
+        const read = readPinnedRegularFileSync(pathname, BOOK_EXPORT_WEBSITE_MAX_ASSET_BYTES)
+        if (
+          !read ||
+          !sameFileIdentity(read.identity, file.identity) ||
+          sha256Bytes(read.bytes) !== file.sha256 ||
+          !minimalParentAndDirectoryCurrent(fsSync.lstatSync(directoryPath, { bigint: true }).nlink)
+        ) {
+          return false
+        }
+        fsSync.unlinkSync(pathname)
+      }
+      if (files.assetsDirectory) {
+        const assetsPath = path.join(directoryPath, BOOK_WEBSITE_ASSETS)
+        const assetsIdentity = fileIdentitySync(assetsPath, true)
+        if (
+          !assetsIdentity ||
+          !sameFileIdentity(assetsIdentity, files.assetsDirectory) ||
+          fsSync.readdirSync(assetsPath).length !== 0
+        ) {
+          return false
+        }
+        fsSync.rmdirSync(assetsPath)
       }
       if (allowCleanupHook) this.testHooks.beforeWebsiteManifestFinalInspection?.(directoryPath)
       const remaining = fsSync.readdirSync(directoryPath)
       const manifest = readPinnedRegularFileSync(
         path.join(directoryPath, BOOK_WEBSITE_MANIFEST),
-        16 * 1024
+        BOOK_WEBSITE_MAX_MANIFEST_BYTES
       )
       if (
         remaining.length !== 1 ||
@@ -3877,7 +4719,7 @@ export class BookSessionManager {
         !manifest ||
         !sameFileIdentity(manifest.identity, files.manifest) ||
         sha256Bytes(manifest.bytes) !== files.manifestSha256 ||
-        !minimalParentAndDirectoryCurrent(afterIndexLinkCount)
+        !minimalParentAndDirectoryCurrent(fsSync.lstatSync(directoryPath, { bigint: true }).nlink)
       ) {
         return false
       }
@@ -3885,7 +4727,7 @@ export class BookSessionManager {
       fsSync.unlinkSync(path.join(directoryPath, BOOK_WEBSITE_MANIFEST))
       const afterManifestLinkCount = fsSync.lstatSync(directoryPath, { bigint: true }).nlink
       if (
-        !this.websiteCommonBoundaryCurrentSync(lease) ||
+        !cleanupBoundaryCurrent() ||
         !targetCurrent() ||
         !minimalParentAndDirectoryCurrent(afterManifestLinkCount)
       ) {
@@ -3898,6 +4740,103 @@ export class BookSessionManager {
         return false
       }
       fsSync.rmdirSync(directoryPath)
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  private cleanupWebsiteStageJournalSync(
+    lease: BookExportLease,
+    stagePath: string,
+    journal: WebsiteStageJournal
+  ): boolean {
+    try {
+      if (!this.exportCleanupParentCurrentSync(lease)) return false
+      const stage = fsSync.lstatSync(stagePath, { bigint: true })
+      if (
+        stage.isSymbolicLink() ||
+        !stage.isDirectory() ||
+        !sameFileIdentity(
+          { dev: stage.dev, ino: stage.ino, mode: Number(stage.mode) },
+          journal.identity
+        )
+      ) {
+        return false
+      }
+      const topLevelFiles = [...journal.files.keys()]
+        .filter((relative) => !relative.includes('/'))
+        .sort()
+      const expectedRootEntries = [
+        ...topLevelFiles,
+        ...(journal.assetsDirectory ? [BOOK_WEBSITE_ASSETS] : [])
+      ].sort()
+      const rootEntries = boundedDirectoryEntriesSync(stagePath, 3)
+      if (
+        !rootEntries ||
+        rootEntries.length !== expectedRootEntries.length ||
+        rootEntries.some((entry, index) => entry !== expectedRootEntries[index])
+      ) {
+        return false
+      }
+      const assetFiles = [...journal.files.keys()]
+        .filter((relative) => relative.startsWith(`${BOOK_WEBSITE_ASSETS}/`))
+        .sort()
+      if (journal.assetsDirectory) {
+        const assetsPath = path.join(stagePath, BOOK_WEBSITE_ASSETS)
+        const assets = fsSync.lstatSync(assetsPath, { bigint: true })
+        const entries = boundedDirectoryEntriesSync(assetsPath, BOOK_EXPORT_MAX_ASSETS)
+        if (
+          assets.isSymbolicLink() ||
+          !assets.isDirectory() ||
+          !sameFileIdentity(
+            { dev: assets.dev, ino: assets.ino, mode: Number(assets.mode) },
+            journal.assetsDirectory
+          ) ||
+          !entries ||
+          entries.length !== assetFiles.length ||
+          entries.some((entry, index) => entry !== path.basename(assetFiles[index] as string))
+        ) {
+          return false
+        }
+      } else if (assetFiles.length) {
+        return false
+      }
+      for (const [relative, identity] of journal.files) {
+        const pathname = path.join(stagePath, ...relative.split('/'))
+        const current = fsSync.lstatSync(pathname, { bigint: true })
+        if (
+          current.isSymbolicLink() ||
+          !current.isFile() ||
+          current.nlink !== 1n ||
+          !sameFileIdentity(
+            { dev: current.dev, ino: current.ino, mode: Number(current.mode) },
+            identity
+          )
+        ) {
+          return false
+        }
+      }
+      for (const relative of assetFiles) {
+        fsSync.unlinkSync(path.join(stagePath, ...relative.split('/')))
+      }
+      if (journal.assetsDirectory) {
+        fsSync.rmdirSync(path.join(stagePath, BOOK_WEBSITE_ASSETS))
+      }
+      for (const relative of topLevelFiles) {
+        fsSync.unlinkSync(path.join(stagePath, relative))
+      }
+      const finalStage = fsSync.lstatSync(stagePath, { bigint: true })
+      if (
+        !sameFileIdentity(
+          { dev: finalStage.dev, ino: finalStage.ino, mode: Number(finalStage.mode) },
+          journal.identity
+        ) ||
+        fsSync.readdirSync(stagePath).length !== 0
+      ) {
+        return false
+      }
+      fsSync.rmdirSync(stagePath)
       return true
     } catch {
       return false
@@ -3925,6 +4864,11 @@ export class BookSessionManager {
         ? error('website-source-changed', 'A source chapter changed before generation.')
         : error('cancelled', 'Website generation was cancelled.')
     }
+    if (!(await this.validateExportResources(lease, generation, operationGeneration))) {
+      return current()
+        ? error('website-source-changed', 'An image resource changed before generation.')
+        : error('cancelled', 'Website generation was cancelled.')
+    }
     await this.testHooks.afterExportSourcePass?.(1)
     if (!current()) return error('cancelled', 'Website generation was cancelled.')
     if (
@@ -3939,17 +4883,20 @@ export class BookSessionManager {
     const stagePath = path.join(lease.parentPath, `.leafbook-site-stage-${token}`)
     const backupPath = path.join(lease.parentPath, `.leafbook-site-backup-${token}`)
     let stageIdentity: FileIdentity | null = null
+    let stageJournal: WebsiteStageJournal | null = null
     let stageLinkCount: bigint | null = null
     let stageFiles: WebsiteFileIdentities | null = null
     let stagePresent = false
     let backupPresent = false
     let targetCommitted = false
     let durabilityUncertain = false
+    let finalCommitFailure: 'cancelled' | 'source-changed' | null = null
     try {
       await fs.mkdir(stagePath, { mode: 0o700 })
       stagePresent = true
       stageIdentity = fileIdentitySync(stagePath, true)
       if (!stageIdentity) throw new Error('Could not pin the staging directory.')
+      stageJournal = { identity: stageIdentity, assetsDirectory: null, files: new Map() }
       await this.testHooks.afterExportTempOpen?.(stagePath)
       const writeKnownFile = async (name: string, bytes: Buffer): Promise<FileIdentity> => {
         const pathname = path.join(stagePath, name)
@@ -3963,8 +4910,29 @@ export class BookSessionManager {
           0o600
         )
         try {
+          const pathnameBefore = fsSync.lstatSync(pathname, { bigint: true })
+          if (
+            pathnameBefore.isSymbolicLink() ||
+            !pathnameBefore.isFile() ||
+            pathnameBefore.nlink !== 1n
+          ) {
+            throw new Error('Unsafe staging file.')
+          }
+          const identity = {
+            dev: pathnameBefore.dev,
+            ino: pathnameBefore.ino,
+            mode: Number(pathnameBefore.mode)
+          }
+          stageJournal?.files.set(name, identity)
           const before = await handle.stat({ bigint: true })
-          if (!before.isFile() || before.nlink !== 1n) throw new Error('Unsafe staging file.')
+          if (
+            !before.isFile() ||
+            before.nlink !== 1n ||
+            before.dev !== pathnameBefore.dev ||
+            before.ino !== pathnameBefore.ino
+          ) {
+            throw new Error('Unsafe staging file.')
+          }
           await handle.writeFile(bytes)
           await handle.sync()
           const after = await handle.stat({ bigint: true })
@@ -3982,22 +4950,81 @@ export class BookSessionManager {
           ) {
             throw new Error('The staging file identity changed.')
           }
-          return { dev: after.dev, ino: after.ino, mode: Number(after.mode) }
+          return identity
         } finally {
           await handle.close()
         }
       }
+      let assetsDirectoryIdentity: FileIdentity | null = null
+      let assetsDirectoryLinkCount: bigint | null = null
+      if (lease.resourceLedger.assets.length) {
+        const assetsPath = path.join(stagePath, BOOK_WEBSITE_ASSETS)
+        await fs.mkdir(assetsPath, { mode: 0o700 })
+        const assetsStat = fsSync.lstatSync(assetsPath, { bigint: true })
+        if (assetsStat.isSymbolicLink() || !assetsStat.isDirectory()) {
+          throw new Error('Could not pin the assets staging directory.')
+        }
+        assetsDirectoryIdentity = {
+          dev: assetsStat.dev,
+          ino: assetsStat.ino,
+          mode: Number(assetsStat.mode)
+        }
+        stageJournal.assetsDirectory = assetsDirectoryIdentity
+      }
       const stageIndexIdentity = await writeKnownFile(BOOK_WEBSITE_INDEX, html)
+      const stagedAssetFiles: WebsiteFileIdentities['files'] = []
+      for (const [assetIndex, asset] of lease.resourceLedger.assets.entries()) {
+        const assetPath = assetRelativePath(asset)
+        const identity = await writeKnownFile(assetPath, Buffer.from(asset.bytes))
+        stagedAssetFiles.push({ path: assetPath, identity, sha256: asset.sha256 })
+        await this.testHooks.afterWebsiteAssetWrite?.(assetIndex, stagePath)
+        if (!current()) return error('cancelled', 'Website generation was cancelled.')
+      }
+      if (assetsDirectoryIdentity) {
+        assetsDirectoryLinkCount = fsSync.lstatSync(path.join(stagePath, BOOK_WEBSITE_ASSETS), {
+          bigint: true
+        }).nlink
+      }
       const manifest = Buffer.from(
-        serializeBookWebsiteManifest(createBookWebsiteManifest(html)),
+        serializeBookWebsiteManifest(
+          createBookWebsiteManifest(
+            html,
+            lease.resourceLedger.assets.map((asset) => ({
+              path: assetRelativePath(asset),
+              bytes: asset.bytes
+            }))
+          )
+        ),
         'utf8'
       )
       const stageManifestIdentity = await writeKnownFile(BOOK_WEBSITE_MANIFEST, manifest)
       stageFiles = {
-        index: stageIndexIdentity,
         manifest: stageManifestIdentity,
-        indexSha256: sha256Bytes(html),
-        manifestSha256: sha256Bytes(manifest)
+        manifestSha256: sha256Bytes(manifest),
+        assetsDirectory: assetsDirectoryIdentity,
+        assetsLinkCount: assetsDirectoryLinkCount,
+        files: [
+          ...stagedAssetFiles,
+          {
+            path: BOOK_WEBSITE_INDEX,
+            identity: stageIndexIdentity,
+            sha256: sha256Bytes(html)
+          }
+        ].sort((left, right) => (left.path < right.path ? -1 : left.path > right.path ? 1 : 0))
+      }
+      if (lease.resourceLedger.assets.length) {
+        const assetsFd = fsSync.openSync(
+          path.join(stagePath, BOOK_WEBSITE_ASSETS),
+          fsConstants.O_RDONLY |
+            (fsConstants.O_DIRECTORY ?? 0) |
+            (fsConstants.O_NOFOLLOW ?? 0) |
+            (fsConstants.O_NONBLOCK ?? 0)
+        )
+        try {
+          fsSync.fsyncSync(assetsFd)
+        } finally {
+          fsSync.closeSync(assetsFd)
+        }
       }
       stageLinkCount = fsSync.lstatSync(stagePath, { bigint: true }).nlink
       const stageFd = fsSync.openSync(
@@ -4029,7 +5056,8 @@ export class BookSessionManager {
         !this.exportParentCurrentSync(lease) ||
         !this.exportRootCurrentSync(lease) ||
         !this.exportTargetCurrentSync(lease) ||
-        !(await this.validateExportSources(lease, generation, operationGeneration))
+        !(await this.validateExportSources(lease, generation, operationGeneration)) ||
+        !(await this.validateExportResources(lease, generation, operationGeneration))
       ) {
         return current()
           ? error('website-source-changed', 'The source or destination changed before commit.')
@@ -4038,7 +5066,6 @@ export class BookSessionManager {
 
       await this.testHooks.beforeExportCommitCritical?.()
       if (!current()) return error('cancelled', 'Website generation was cancelled.')
-      lease.criticalCommit = true
       lease.state = 'committing'
       this.testHooks.exportCommitCriticalStarted?.()
       const stageCurrent = (): boolean =>
@@ -4098,40 +5125,95 @@ export class BookSessionManager {
             stageFiles
           )
         )
-      const preRenameBoundaryCurrent = (): boolean =>
-        this.websiteCommonBoundaryCurrentSync(lease) && stageCurrent()
+      const preRenameBoundaryState = (
+        targetCurrent: () => boolean
+      ): 'valid' | 'cancelled' | 'source-changed' | 'boundary-changed' => {
+        if (
+          !stageCurrent() ||
+          !targetCurrent() ||
+          !this.exportParentCurrentSync(lease) ||
+          !this.exportRootCurrentSync(lease)
+        ) {
+          return 'boundary-changed'
+        }
+        if (
+          !this.exportSourcesCurrentSync(lease) ||
+          !exportResourcesCurrentSync(lease.resourceLedger)
+        ) {
+          return 'source-changed'
+        }
+        return current() ? 'valid' : 'cancelled'
+      }
+      const rollbackBoundaryCurrent = (): boolean =>
+        lease.generation === generation &&
+        lease.operationGeneration === operationGeneration &&
+        this.ownerIsCurrent(lease.ownerId, lease.ownerGeneration) &&
+        this.ownedSession(lease.session.dto.sessionId, lease.ownerId) === lease.session &&
+        lease.session.generation === lease.sessionGeneration &&
+        this.exportParentCurrentSync(lease) &&
+        stageCurrent() &&
+        targetAbsent() &&
+        backupOriginalCurrent()
       if (lease.websiteTargetState === 'absent') {
         this.testHooks.beforeWebsiteStageRename?.(stagePath, lease.targetPath)
-        if (!preRenameBoundaryCurrent() || !originalTargetCurrent()) {
+        const boundary = preRenameBoundaryState(originalTargetCurrent)
+        if (boundary === 'cancelled') {
+          return error('cancelled', 'Website generation was cancelled.')
+        }
+        if (boundary === 'source-changed') {
+          return error('website-source-changed', 'The source changed at website commit.')
+        }
+        if (boundary === 'boundary-changed') {
           throw new Error('The website boundary changed before rename.')
         }
+        lease.criticalCommit = true
         fsSync.renameSync(stagePath, lease.targetPath)
         stagePresent = false
         targetCommitted = true
       } else {
         this.testHooks.beforeWebsiteFirstRename?.(stagePath, lease.targetPath)
-        if (!preRenameBoundaryCurrent() || !originalTargetCurrent()) {
+        const firstBoundary = preRenameBoundaryState(originalTargetCurrent)
+        if (firstBoundary === 'cancelled') {
+          return error('cancelled', 'Website generation was cancelled.')
+        }
+        if (firstBoundary === 'source-changed') {
+          return error('website-source-changed', 'The source changed at website commit.')
+        }
+        if (firstBoundary === 'boundary-changed') {
           throw new Error('The website boundary changed before backup rename.')
         }
+        lease.criticalCommit = true
         fsSync.renameSync(lease.targetPath, backupPath)
         backupPresent = true
         try {
-          if (
-            !this.websiteCommonBoundaryCurrentSync(lease) ||
-            !stageCurrent() ||
-            !targetAbsent() ||
-            !backupOriginalCurrent()
-          ) {
+          const backupBoundary = backupOriginalCurrent()
+            ? preRenameBoundaryState(targetAbsent)
+            : 'boundary-changed'
+          if (backupBoundary === 'cancelled') {
+            finalCommitFailure = 'cancelled'
+            throw new Error('The website expired after backup rename.')
+          }
+          if (backupBoundary === 'source-changed') {
+            finalCommitFailure = 'source-changed'
+            throw new Error('The source changed after backup rename.')
+          }
+          if (backupBoundary === 'boundary-changed') {
             throw new Error('The backup directory identity changed.')
           }
           this.syncExportParent(lease)
           this.testHooks.beforeWebsiteStageRename?.(stagePath, lease.targetPath)
-          if (
-            !this.websiteCommonBoundaryCurrentSync(lease) ||
-            !stageCurrent() ||
-            !targetAbsent() ||
-            !backupOriginalCurrent()
-          ) {
+          const secondBoundary = backupOriginalCurrent()
+            ? preRenameBoundaryState(targetAbsent)
+            : 'boundary-changed'
+          if (secondBoundary === 'cancelled') {
+            finalCommitFailure = 'cancelled'
+            throw new Error('The website expired before stage rename.')
+          }
+          if (secondBoundary === 'source-changed') {
+            finalCommitFailure = 'source-changed'
+            throw new Error('The source changed before stage rename.')
+          }
+          if (secondBoundary === 'boundary-changed') {
             throw new Error('The website boundary changed before stage rename.')
           }
           fsSync.renameSync(stagePath, lease.targetPath)
@@ -4140,12 +5222,7 @@ export class BookSessionManager {
         } catch (commitError) {
           try {
             this.testHooks.beforeWebsiteRollback?.(backupPath, lease.targetPath)
-            if (
-              !this.websiteCommonBoundaryCurrentSync(lease) ||
-              !stageCurrent() ||
-              !targetAbsent() ||
-              !backupOriginalCurrent()
-            ) {
+            if (!rollbackBoundaryCurrent()) {
               throw new Error('The rollback boundary changed.')
             }
             fsSync.renameSync(backupPath, lease.targetPath)
@@ -4158,6 +5235,17 @@ export class BookSessionManager {
               'LeafBook could not confirm whether the previous website was restored.',
               undefined,
               true
+            )
+          }
+          if (finalCommitFailure === 'cancelled') {
+            return error('cancelled', 'Website generation was cancelled.')
+          }
+          if (finalCommitFailure === 'source-changed') {
+            return error(
+              'website-source-changed',
+              'The source changed at website commit.',
+              undefined,
+              false
             )
           }
           throw commitError
@@ -4240,8 +5328,15 @@ export class BookSessionManager {
         ok: true,
         value: {
           directoryName: path.basename(lease.targetPath),
-          files: [BOOK_WEBSITE_INDEX, BOOK_WEBSITE_MANIFEST],
-          byteLength: html.byteLength + manifest.byteLength,
+          files: [
+            BOOK_WEBSITE_INDEX,
+            ...lease.resourceLedger.assets.map(assetRelativePath),
+            BOOK_WEBSITE_MANIFEST
+          ],
+          byteLength:
+            html.byteLength +
+            manifest.byteLength +
+            lease.resourceLedger.assets.reduce((sum, asset) => sum + asset.byteLength, 0),
           durabilityUncertain
         }
       }
@@ -4255,33 +5350,8 @@ export class BookSessionManager {
         targetCommitted
       )
     } finally {
-      if (
-        stagePresent &&
-        stageIdentity &&
-        stageLinkCount !== null &&
-        stageFiles &&
-        this.websiteCommonBoundaryCurrentSync(lease)
-      ) {
-        const currentStage = fileIdentitySync(stagePath, true)
-        if (currentStage && sameFileIdentity(currentStage, stageIdentity)) {
-          const targetState = lease.websiteTargetState
-          if (targetState) {
-            this.cleanupRecordedWebsiteDirectorySync(
-              lease,
-              stagePath,
-              'owned',
-              stageIdentity,
-              stageLinkCount,
-              stageFiles,
-              {
-                state: targetState,
-                identity: lease.targetIdentity,
-                linkCount: lease.targetLinkCount,
-                files: lease.websiteTargetFiles
-              }
-            )
-          }
-        }
+      if (stagePresent && stageJournal) {
+        this.cleanupWebsiteStageJournalSync(lease, stagePath, stageJournal)
       }
       // Unknown or changed backups are deliberately left untouched. Phase 8C
       // does not scan for or recover orphaned transaction directories.
@@ -4310,6 +5380,36 @@ export class BookSessionManager {
     return true
   }
 
+  private async validateExportResources(
+    lease: BookExportLease,
+    generation: number,
+    operationGeneration: number
+  ): Promise<boolean> {
+    const documents: BookExportResourceDocument[] = []
+    for (const source of lease.resourceDocuments) {
+      if (!this.exportLeaseCurrent(lease, generation, operationGeneration)) return false
+      const chapter = await this.readBookChapter(lease.session.rootPath, source.path)
+      if (!this.exportLeaseCurrent(lease, generation, operationGeneration)) return false
+      documents.push({
+        documentId: source.documentId,
+        path: source.path,
+        markdown: chapter?.content ?? null
+      })
+    }
+    let rebuilt: BookExportResourceLedger | null = null
+    try {
+      rebuilt = await buildBookExportResourceLedger(lease.rootIdentity, documents, lease.kind)
+      return (
+        this.exportLeaseCurrent(lease, generation, operationGeneration) &&
+        sameBookExportResourceLedger(lease.resourceLedger, rebuilt)
+      )
+    } catch {
+      return false
+    } finally {
+      if (rebuilt) disposeBookExportResourceLedger(rebuilt)
+    }
+  }
+
   private async performExportCommit(
     lease: BookExportLease,
     bytes: Buffer,
@@ -4329,6 +5429,11 @@ export class BookSessionManager {
     if (!(await this.validateExportSources(lease, generation, operationGeneration))) {
       return current()
         ? error('export-source-changed', 'A source chapter changed before the export was saved.')
+        : error('cancelled', 'This export was cancelled.')
+    }
+    if (!(await this.validateExportResources(lease, generation, operationGeneration))) {
+      return current()
+        ? error('export-source-changed', 'An image resource changed before the export was saved.')
         : error('cancelled', 'This export was cancelled.')
     }
     await this.testHooks.afterExportSourcePass?.(1)
@@ -4401,6 +5506,14 @@ export class BookSessionManager {
             )
           : error('cancelled', 'This export was cancelled.')
       }
+      if (!(await this.validateExportResources(lease, generation, operationGeneration))) {
+        return current()
+          ? error(
+              'export-source-changed',
+              'An image resource changed before the export was committed.'
+            )
+          : error('cancelled', 'This export was cancelled.')
+      }
       await this.testHooks.afterExportSourcePass?.(2)
       if (!current()) return error('cancelled', 'This export was cancelled.')
       if (
@@ -4420,6 +5533,8 @@ export class BookSessionManager {
       // synchronous event-loop turn as renameSync. This prevents renderer
       // cancellation/cleanup from interleaving and fails closed on observed
       // parent/root/source swaps.
+      lease.state = 'committing'
+      this.testHooks.exportCommitCriticalStarted?.()
       if (
         !this.exportParentCurrentSync(lease) ||
         !this.exportRootCurrentSync(lease) ||
@@ -4435,9 +5550,9 @@ export class BookSessionManager {
       if (!this.exportSourcesCurrentSync(lease)) {
         return error('export-source-changed', 'A source chapter changed at export commit.')
       }
-
-      lease.state = 'committing'
-      this.testHooks.exportCommitCriticalStarted?.()
+      if (!exportResourcesCurrentSync(lease.resourceLedger)) {
+        return error('export-source-changed', 'An image resource changed at export commit.')
+      }
       if (!current()) return error('cancelled', 'This export was cancelled.')
       lease.criticalCommit = true
       fsSync.renameSync(tempPath, lease.targetPath)
@@ -4495,7 +5610,7 @@ export class BookSessionManager {
       if (
         !committed &&
         tempIdentity &&
-        this.exportParentCurrentSync(lease) &&
+        this.exportCleanupParentCurrentSync(lease) &&
         sameFileIdentity(
           fileIdentitySync(tempPath) ?? { dev: -1n, ino: -1n, mode: 0 },
           tempIdentity

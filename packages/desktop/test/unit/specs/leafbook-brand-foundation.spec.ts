@@ -154,12 +154,18 @@ describe('LeafBook public identity', () => {
     expect(repositoryFile('.github/workflows/build.yml')).toMatch(
       /name: leafbook-\$\{\{ matrix\.name \}\}/
     )
-    expect(repositoryFile('.github/workflows/release.yml')).toContain('/Applications/LeafBook.app')
-    expect(repositoryFile('.github/workflows/release.yml')).toContain(
+    const releaseWorkflow = repositoryFile('.github/workflows/release.yml')
+    const signedEvidenceWorkflow = repositoryFile('.github/workflows/macos-signed-evidence.yml')
+    expect(signedEvidenceWorkflow).toContain('/Applications/LeafBook.app')
+    expect(signedEvidenceWorkflow).toContain('spctl --assess')
+    expect(signedEvidenceWorkflow).toContain('open -n /Applications/LeafBook.app')
+    expect(releaseWorkflow).toContain('.github/workflows/macos-signed-evidence.yml')
+    expect(releaseWorkflow).not.toContain('xattr -cr')
+    expect(releaseWorkflow).toContain(
       'node scripts/validate-release-tag.mjs "$' + '{GITHUB_REF_NAME}"'
     )
-    expect(repositoryFile('.github/workflows/release.yml')).not.toContain('dist/*.blockmap')
-    expect(repositoryFile('.github/workflows/release.yml')).not.toContain('dist/*.yml')
+    expect(releaseWorkflow).not.toContain('dist/*.blockmap')
+    expect(releaseWorkflow).not.toContain('dist/*.yml')
     expect(repositoryFile('.github/ISSUE_TEMPLATE/bug_report.yml')).toContain(
       `placeholder: 'e.g. ${desktopPackage.version}'`
     )
@@ -186,9 +192,7 @@ describe('LeafBook public identity', () => {
     expect(fs.existsSync(`${repositoryRoot}/packages/website/open-next.config.ts`)).toBe(false)
     expect(fs.existsSync(`${repositoryRoot}/packages/website/src/middleware.ts`)).toBe(false)
     expect(fs.existsSync(`${repositoryRoot}/packages/website/src/app/sitemap.ts`)).toBe(false)
-    expect(repositoryFile('packages/website/next.config.ts')).not.toContain(
-      "output: 'standalone'"
-    )
+    expect(repositoryFile('packages/website/next.config.ts')).not.toContain("output: 'standalone'")
     for (const websiteRuntimeFile of websiteRuntimeFiles) {
       const content = repositoryFile(websiteRuntimeFile)
       expect(content).not.toContain('marktext.me')

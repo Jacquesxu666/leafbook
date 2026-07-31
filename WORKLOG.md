@@ -3617,3 +3617,3106 @@ book_structure_ready=true code=0`. The harness verified the original sample
   syscall/path window, and pinned Unicode case-fold drift.
 - Git commit: Phase 9C is `4edcfec2`; this log-only handoff is committed
   separately so the functional commit remains reviewable.
+
+## 2026-07-30 — Apple Silicon local Beta DMG
+
+- User goal: produce an installable LeafBook DMG now, without waiting for the
+  formally signed and notarized stable release.
+- Completed: built and verified
+  `dist/leafbook-mac-arm64-0.1.0.dmg` for Apple Silicon. Prevented
+  electron-builder from inferring the inherited GitHub repository as an
+  updater channel, restored the KaTeX ESM runtime file required by `mhchem`,
+  made the packaged-editor smoke flow accept both valid initial editor states,
+  normalized trailing-slash `TMPDIR` values in the artifact audit, and added
+  static/runtime packaging assertions. Applied an ad-hoc signature to the
+  application and rebuilt the DMG directly from the signed app bundle.
+- Files: `packages/desktop/electron-builder.yml`,
+  `packages/desktop/test/e2e/book-reader.spec.ts`,
+  `packages/desktop/test/unit/specs/release-gate-static.spec.ts`,
+  `scripts/audit-mac-artifact.sh`, and this log. Generated artifacts remain
+  under ignored `dist/`.
+- Tests: macOS app/ZIP/DMG artifact audit passed; unpacked app audit and receipt
+  verification passed; all six packaged release-smoke tests passed; the
+  focused source editor-flow E2E passed; the static release gate passed 16/16;
+  desktop typecheck, shell syntax validation, and `git diff --check` passed.
+  `hdiutil verify` confirmed a valid DMG checksum, and strict deep code-sign
+  verification passed against the app mounted from the final DMG.
+- Artifact: 150,441,312 bytes; SHA-256
+  `0a08874a837c34b47f236feec5d0fe33856305fb07c3fbb21310fe0d5ba865e2`.
+- Key decisions: this is a local Beta installer, not a public production
+  release. Ad-hoc signing improves bundle integrity for local testing but does
+  not replace an Apple Developer ID signature or Apple notarization. Invalid
+  intermediate packages and transient test output were moved to isolated
+  system-temporary directories rather than retained in the project.
+- Unresolved: Gatekeeper may require Control-click → Open or approval in
+  Privacy & Security on first launch. Public distribution still requires a
+  Developer ID certificate, hardened-runtime signing, notarization, release
+  matrix coverage, and the remaining declared product-readiness work.
+- Git commit: not created; HEAD remains `e88b3107` and nothing was pushed.
+
+## 2026-07-30 — Phase 10A fail-closed release candidate baseline
+
+- User goal: continue from the verified Apple Silicon Beta toward a formal
+  release, beginning with a release workflow that cannot publish before its
+  executable quality gates and a separate human approval.
+- Completed: replaced the tag-only validation job with a quality gate covering
+  the repository's frozen-lockfile setup, tag/version validation, generated
+  metadata, Windows association policy, dependency-license validation,
+  deterministic third-party notice generation, ESLint, TypeScript, desktop
+  unit tests, and a production build. Added a separate Linux/Xvfb Electron E2E
+  gate by copying the existing E2E workflow's system dependency, postinstall,
+  build, and Playwright pattern. Every platform build now explicitly depends on
+  both gates, and draft creation explicitly depends on both gates plus the full
+  platform matrix.
+- Release policy: removed the automatic `gh release edit --draft=false`
+  promotion. A `v*` tag can now create only a GitHub draft; SemVer prerelease
+  tags, including RC tags, retain prerelease metadata, while stable tags also
+  remain drafts. Public promotion requires a separate reviewed human action.
+- Files: `.github/workflows/release.yml`, `docs/RELEASE_GATE.md`,
+  `packages/desktop/test/unit/specs/release-gate-static.spec.ts`, and this log.
+  The five pre-existing local Beta changes were preserved.
+- Tests: release workflow YAML parsed successfully; focused static release
+  tests passed 17/17; desktop unit tests passed 1216/1216; tag/version,
+  generated metadata, Windows association, dependency licenses, and generated
+  third-party notice consistency passed; ESLint passed with 134 pre-existing
+  warnings and no errors; typecheck and production build passed; Prettier and
+  `git diff --check` passed. Electron E2E execution is an explicit required CI
+  job matching `.github/workflows/e2e.yml`; Phase 10A did not simulate Linux
+  Xvfb execution on the local macOS host.
+- Key decisions: candidate creation remains fail-closed and draft-only even for
+  a stable tag. The workflow uses the repository's pinned setup action and
+  existing commands rather than introducing a new publishing API or bypass.
+- Unresolved: no tag rehearsal has run on GitHub yet. Developer ID signing,
+  notarization, Gatekeeper download validation, Windows/Linux runtime evidence,
+  trusted provenance/SBOM review, credentials and repository-settings review,
+  and the final human approval all remain public-release blockers.
+- Git commit: not created; no tag, GitHub Release, push, or publication was
+  performed.
+
+## 2026-07-30 — Phase 10A independent review fixes
+
+- User goal: resolve all P1/P2 findings from the independent Phase 10A review
+  without committing, tagging, pushing, creating a Release, or publishing.
+- Completed: replaced the write-capable third-party release action with the
+  runner-provided GitHub CLI. The release job now enumerates all Releases
+  visible to the repository token immediately before creation and fails on an
+  existing same-tag Release, API failure, or JSON failure. Its sole creation
+  command uses `--draft --verify-tag`, preserves generated notes, the composed
+  notes prefix, title and `dist/*` assets, and conditionally adds
+  `--prerelease`; it has no edit or public-promotion path. Reworked the static
+  test to parse the workflow with the repository's `yaml` package and assert
+  the trigger, dependency graph, permissions, ordered preflight, unique
+  creation command, arguments, and absence of release-edit behavior from
+  parsed step data. Replaced the packaged/source E2E count-based skip with an
+  explicit wait for either the New File welcome state or an initialized editor,
+  verifying the selected branch before entering the editor. The macOS artifact
+  audit now applies the same updater-free ASAR listing, KaTeX runtime, and
+  packaged-metadata checks independently to the source app, ZIP app, and DMG
+  app.
+- Files: `.github/workflows/release.yml`, `package.json`, `pnpm-lock.yaml`,
+  `packages/desktop/test/e2e/book-reader.spec.ts`,
+  `packages/desktop/test/unit/specs/release-gate-static.spec.ts`,
+  `scripts/audit-mac-artifact.sh`, `docs/RELEASE_GATE.md`, and this log.
+  All earlier local Beta and Phase 10A changes were preserved.
+- Tests: release workflow YAML AST parsing passed; static release-gate tests
+  passed 17/17; arm64 source-app/ZIP/DMG artifact audit passed with all three
+  ASAR audits; the focused book/editor-flow Electron E2E passed in both source
+  and packaged modes; desktop typecheck, focused ESLint, Shell syntax, and
+  `git diff --check` passed.
+- Key decisions: authenticated pagination over the Releases collection makes
+  the preflight cover drafts as well as published Releases without treating an
+  expected 404 as success. Shell `pipefail` and `set -e` make API/JQ errors
+  abort before the only write step. Parsed YAML tests avoid comments or
+  unrelated jobs satisfying release-policy assertions.
+- Unresolved: the GitHub-hosted tag rehearsal and the broader formal-release
+  blockers in `docs/RELEASE_GATE.md` remain outstanding.
+- Git commit: not created; no tag, push, GitHub Release, or publication was
+  performed.
+
+## 2026-07-30 — Phase 10A final release-hardening review
+
+- User goal: close the remaining Phase 10A release-gate findings while
+  preserving all existing work and without committing, tagging, pushing, or
+  creating/publishing a Release.
+- Completed: added a fail-closed GitHub server-tag verifier that handles
+  lightweight and recursively nested annotated tags, requires the peeled
+  commit to equal `GITHUB_SHA`, rejects malformed/API/error responses and any
+  existing same-tag Release, and runs both before release assembly and again
+  immediately before the workflow's sole draft-create command. Strengthened
+  the parsed-YAML static contract to require exact gate names, actions,
+  commands, dependencies, conditions and ordering; reject
+  `continue-on-error`; ignore shell comments when counting writes; and prove
+  the sole `gh release create` structure. Added lightweight/annotated,
+  mismatch, existing-Release and API-error negative tests.
+- Quality and macOS gates: the release quality job now runs Muya's package
+  `lint:types` and complete `test` commands as well as the desktop gates. Each
+  macOS matrix build must pass the app/ZIP/DMG artifact audit, unpacked receipt
+  audit, and exact six packaged smoke tests before upload. The mac artifact
+  audit now applies the same full identity, complete Info.plist/document
+  association, canonical license-content, updater, KaTeX runtime, ASAR and
+  packaged-metadata invariants to source, ZIP and DMG bundles, and requires
+  their Info.plist and ASAR hashes to match.
+- Cross-platform carriers: Linux tar.gz, deb, rpm, AppImage and snap are now
+  independently extracted and bundle-audited; native package metadata,
+  AppImage desktop metadata and snap metadata are also checked. Windows ZIP is
+  fully bundle-audited. Prerelease NSIS setup receives PE and 7-Zip integrity
+  checks and is explicitly labelled incomplete evidence; stable Windows
+  candidates fail closed until native install/run/uninstall and
+  installed-bundle auditing exists.
+- Reader evidence: after returning from Reader/Bookshelf to Editor, the smoke
+  E2E now enters a unique sentinel through the editor UI and reads it back with
+  `getMarkdownContent`, proving the returned editor is actually editable. The
+  new Muya type gate exposed one obsolete `plantumlServer` destructuring
+  binding in the already-disabled offline PlantUML path; removing that unused
+  binding made the real package command pass without changing behavior.
+- Files: `.github/workflows/release.yml`, `docs/RELEASE_GATE.md`,
+  `scripts/verify-release-preconditions.mjs`,
+  `scripts/audit-mac-artifact.sh`,
+  `scripts/audit-platform-artifacts.sh`,
+  `packages/desktop/test/e2e/book-reader.spec.ts`,
+  `packages/desktop/test/unit/specs/release-gate-static.spec.ts`,
+  `packages/muya/src/block/extra/diagram/diagramPreview.ts`, and this log.
+  Earlier Phase 10A/Beta changes in `package.json`, `pnpm-lock.yaml`, and
+  `packages/desktop/electron-builder.yml` were preserved.
+- Tests: parsed release/static gate 20/20; desktop typecheck; Muya
+  `lint:types`; complete Muya unit suite 1454/1454 across 213 files; six source
+  release-smoke E2Es; six packaged arm64 release-smoke E2Es; macOS source
+  app/ZIP/DMG audit; unpacked audit and receipt verification; focused desktop
+  ESLint; focused Muya ESLint; Prettier; Bash syntax; Node syntax; and
+  `git diff --check` all passed.
+- Key decisions: the GitHub API cannot atomically bind a tag check to Release
+  creation, so the remaining check/create micro-window is not silently
+  accepted. A protected tag ruleset that prevents the workflow credential from
+  moving or deleting stable tags is a stable blocker. RC drafts may retain
+  clearly labelled incomplete NSIS evidence; stable candidates may not.
+- Unresolved external gates: no GitHub-hosted rehearsal has run; Windows native
+  install/run/uninstall and signing, Linux runtime/desktop integration,
+  Developer ID signing/hardened runtime/notarization/Gatekeeper download
+  validation, SBOM/provenance/attestation review, protected tags/environments,
+  credential review, soak testing, and explicit human publication approval
+  remain required.
+- Git commit: not created; HEAD remains `e88b3107`. No tag, push, Release, or
+  publication was performed.
+
+## 2026-07-30 — Phase 10A P1 final acceptance closure
+
+- **User goal**: close the remaining P1 release-candidate findings without
+  committing, tagging, pushing, or creating a release.
+- **Completed**:
+  - Reproduced the Reader → Bookshelf → Editor packaged readback failure: a
+    zero-delay synthetic keyboard burst entered only a prefix of
+    `LEAFBOOK_READER_RETURN_EDITOR_EDITABLE_SENTINEL` before the source-mode
+    readback. `typeIntoEditor` now keeps real keyboard interaction at a
+    human-realistic event cadence, waits for the complete visible input, and
+    crosses two rendered frames before readback. The full-sentinel
+    `expect.poll` assertion remains unchanged and fail-closed.
+  - Replaced every tag-string hyphen heuristic with one strict SemVer parser
+    output, `is_prerelease`. Stable build metadata containing hyphens remains
+    stable, RC identifiers select prerelease, and malformed tags fail. Build
+    audits, release notes, and draft flags consume the same quality-gate
+    output; stable Windows candidates still fail before assembly.
+  - Pinned every release-path external Action to the full 40-character commit
+    behind its documented version tag and set `persist-credentials: false` on
+    every checkout. Split read-only candidate assembly from the
+    minimum-permission draft-creation job. The final job rechecks the official
+    server tag target immediately before its only repository write,
+    `gh release create --draft`; it has no edit or publication path.
+  - Added an extracted-application layout auditor that rejects decoys and
+    multiple bundles, requires exactly one executable beside exactly one
+    `resources/app.asar`, validates x64/arm64 ELF or PE headers, and hashes the
+    complete normalized application payload. Linux tar/deb/rpm/AppImage/snap
+    carriers are tied to the same payload digest, with architecture also bound
+    through executable and package metadata; Windows ZIP receives the same
+    root/PE audit.
+  - Upgraded the macOS source/ZIP/DMG comparison from two selected file hashes
+    to the complete application tree, including the main executable,
+    Frameworks, `app.asar.unpacked`, Resources, modes, symlinks, and every file
+    hash. The stale pre-ad-hoc-signing ZIP was moved recoverably to
+    `/tmp/leafbook-stale-zip.EIWVXR` and rebuilt from the signed prepackaged
+    app; source, rebuilt ZIP, and DMG now match exactly.
+  - Expanded the fixed release smoke gate from six to seven tests by adding the
+    existing real editor → save IPC → disk-byte readback scenario.
+- **Files**:
+  - `.github/actions/setup/action.yml`, `.github/workflows/release.yml`
+  - `scripts/validate-release-tag.mjs`,
+    `scripts/verify-release-preconditions.mjs`,
+    `scripts/audit-application-layout.mjs`,
+    `scripts/audit-platform-artifacts.sh`, `scripts/audit-mac-artifact.sh`,
+    `scripts/smoke-mac-unpacked.sh`
+  - `packages/desktop/test/e2e/helpers.ts`,
+    `packages/desktop/test/e2e/book-reader.spec.ts`,
+    `packages/desktop/test/unit/specs/release-gate-static.spec.ts`
+  - `docs/RELEASE_GATE.md`, `WORKLOG.md` (plus the other already-present
+    Phase 10A packaging changes retained in the worktree).
+- **Verification**:
+  - release/static/fixture suite: 22/22; includes stable build metadata with
+    hyphens, RC, invalid SemVer, positive x64/arm64 ELF/PE trees, duplicate
+    bundle rejection, and wrong-architecture rejection;
+  - full desktop unit: 72 files, 1221/1221; full Muya unit: 213 files,
+    1454/1454;
+  - desktop and Muya typechecks passed; production build passed; ESLint passed
+    with zero errors and 134 pre-existing warnings;
+  - complete Reader Electron suite: source 12/12 and packaged 12/12; packaged
+    Reader return focused test also passed three consecutive runs;
+  - exact release smoke: source 7/7 and packaged arm64 7/7, including real
+    edit/save/disk readback;
+  - unpacked macOS audit and receipt verification passed; complete-tree
+    source/ZIP/DMG audit passed; `hdiutil verify`, strict deep `codesign`
+    verification, shell syntax, Node syntax, YAML parsing through the static
+    suite, and `git diff --check` passed.
+  - DMG remains 150,441,312 bytes with SHA-256
+    `0a08874a837c34b47f236feec5d0fe33856305fb07c3fbb21310fe0d5ba865e2`;
+    rebuilt signed ZIP is 149,590,040 bytes with SHA-256
+    `df8f582d5bd2205e396a7d3a8e699bfcc58e356a9ff353f2bfb7673c633ef84f`.
+- **Key decisions**: carrier equality binds the complete executable payload
+  rather than a sample of identity files; RC may produce a labelled draft,
+  while stable cannot reach draft creation before native Windows evidence
+  exists; all publication remains a separate human action.
+- **Unresolved external blockers**: Developer ID signing, hardened runtime,
+  notarization and downloaded Gatekeeper testing; native Windows
+  install/run/uninstall plus installed-bundle audit and signing; real Linux
+  build/run evidence; protected stable-tag rules, protected/manual publication
+  controls, SBOM/provenance/attestations, and final human approval.
+- **Git**: not committed, tagged, pushed, or released.
+
+## 2026-07-30 — Phase 10A adversarial release-boundary closure
+
+- **User goal**: close all remaining P1/P2 adversarial findings in the release
+  carrier and draft-creation gates, without committing, tagging, pushing, or
+  publishing.
+- **Completed**:
+  - Removed checkout and all tag-controlled repository execution from the
+    `contents: write` job. Its immediately adjacent final preflight is fixed
+    inline shell that performs read-only GitHub API calls, recursively peels
+    annotated tags, binds the commit to `GITHUB_SHA`, and rejects an existing
+    same-tag Release. `GH_TOKEN` is scoped only to fixed preflight/create steps;
+    the only write command remains draft `gh release create`.
+  - Reworked extracted-carrier auditing around one format-specific topology
+    and the complete carrier manifest. Windows ZIP/tar portable roots and the
+    deb/rpm, AppImage, and snap launchers are bound to the audited application.
+    Unexpected roots, sibling payloads/executables, escaping or unmanifested
+    app symlinks, duplicate app roots, and carrier drift fail closed.
+  - Added complete native-tree scanning. Main binaries, helpers, shared
+    libraries and `.node` addons are identified by ELF/PE/Mach-O magic and
+    matched to the matrix architecture. Mixed architecture and foreign formats
+    are rejected; macOS may contain only a bounded x64/arm64 universal binary.
+  - Added pre-extraction archive budgets for tar, ZIP, deb, rpm and SquashFS
+    carriers: count, depth, path/target bytes, single and total uncompressed
+    bytes, compressed bytes, duplicate/traversal/link/type checks, plus bounded
+    external listing/extraction. macOS ZIP and DMG now also enforce an exact
+    carrier-root allowlist and reject executable payloads beside the app.
+  - Renamed the overstated `all-blocks` E2E fixture to
+    `representative-blocks`. The release smoke now makes its dirty mutation
+    through real keyboard input, saves over the production IPC path, and
+    compares the resulting on-disk bytes to the editor serialization.
+  - Corrected SemVer prerelease validation so alphanumeric identifiers such as
+    `1a` are valid while purely numeric identifiers still reject leading zeroes.
+- **Files**: `.github/workflows/release.yml`, `docs/RELEASE_GATE.md`,
+  `scripts/audit-application-layout.mjs`, `scripts/audit-native-tree.mjs`,
+  `scripts/audit-mac-carrier.mjs`, `scripts/preflight-archive.py`,
+  `scripts/preflight-entry-list.mjs`, `scripts/audit-platform-artifacts.sh`,
+  `scripts/audit-mac-artifact.sh`, `scripts/smoke-mac-unpacked.sh`,
+  `scripts/validate-release-tag.mjs`,
+  `packages/desktop/test/unit/specs/release-gate-static.spec.ts`,
+  `packages/desktop/test/e2e/representative-blocks-roundtrip.spec.ts`, its
+  renamed data fixture, and this log. All earlier Phase 10A changes were
+  preserved.
+- **Verification**:
+  - adversarial static/fixture gate 24/24, including decoy/sibling executable,
+    escaping symlink, mixed ELF/native-addon architecture, universal Mach-O,
+    traversal archive, oversized entry and SemVer `1a`;
+  - desktop unit 72 files / 1222 tests and Muya unit 213 files / 1454 tests;
+    desktop and Muya typechecks passed;
+  - source release smoke 7/7 and packaged arm64 smoke 7/7, including the real
+    keyboard → dirty → save IPC → exact disk-byte test; complete Reader source
+    12/12 and packaged arm64 12/12;
+  - complete macOS app/ZIP/DMG carrier audit, unpacked receipt audit,
+    `hdiutil verify`, strict deep `codesign`, production build, full ESLint
+    (zero errors; 134 existing warnings), focused Prettier, Node/Bash/Python
+    syntax checks, and `git diff --check` passed.
+- **Key decisions**: archive metadata must be rejected before extraction rather
+  than relying on a post-extraction walk; complete carrier topology is audited
+  separately from cross-format application-payload equality; the privileged
+  job may consume assembled bytes but may not execute tag-controlled code.
+- **Unresolved external blockers**: real Windows build/install/run/uninstall
+  and signing; real Linux build/run and desktop integration; Developer ID,
+  hardened runtime, notarization and downloaded Gatekeeper validation;
+  protected stable tags/environments, SBOM/provenance/attestation, credential
+  rehearsal, and explicit human publication approval.
+- **Git**: not committed, tagged, pushed, or released; HEAD remains `e88b3107`.
+
+## 2026-07-30 — Phase 10B2a Reader local-image integration
+
+- **User goal**: safely display local PNG/JPEG/GIF/WebP Markdown images in
+  Reader without adding SVG/export support or weakening Phase 10B1.
+- **Completed**:
+  - Added Markdown-token provenance to static Muya rendering. After strict
+    sanitization, only genuine Markdown images can become path-free `image-N`
+    slots; raw HTML, remote/data/file, SVG, malformed, and unsupported inputs
+    remain inert accessible placeholders and never enter resource IPC.
+  - Added a two-worker Reader hydrator with session/resource-token/node binding,
+    strict cross-realm `Uint8Array`/media/byte-length validation, Blob copying,
+    lazy async decode, and path-free error placeholders.
+  - Added generation cancellation and complete object-URL revocation for
+    chapter/session/token changes, refresh, Reader exit, component unmount,
+    renderer decode errors, and stale responses. Bytes, references, and URLs
+    are never persisted.
+  - Kept export explicitly inert; added no filesystem protocol, Node renderer
+    API, absolute path, raw native URL, fetch loader, SVG support, or new
+    main-process capability.
+  - Extended exact source/packaged smoke from seven to eight tests. The new
+    Electron case decodes four real formats, contains missing/remote/SVG/raw
+    HTML failures, and verifies zero HTTP requests, renderer errors, DOM paths,
+    or capability tokens.
+  - Updated `docs/RESOURCE_PIPELINE.md`, `docs/BOOK_READER.md`, and
+    `docs/RELEASE_GATE.md`.
+- **Files**: added
+  `packages/desktop/src/renderer/src/book/hydrateBookImages.ts` and
+  `packages/desktop/test/unit/specs/book-reader-images.spec.ts`; updated Reader
+  rendering/workspace/export, Muya's optional image-token renderer, Reader and
+  release-gate unit/E2E tests, `scripts/smoke-mac-unpacked.sh`, the three
+  documents above, and this log.
+- **Verification**:
+  - focused Reader/render/export/image unit: **3 files / 172 passed**;
+  - complete Desktop unit: **75 files / 1300 passed / 1 native-Windows-only
+    skipped**;
+  - Desktop and Muya typechecks, production build, focused ESLint/Prettier, and
+    complete ESLint (**0 errors / 134 existing warnings**) passed;
+  - exact source smoke: **8/8 passed**;
+  - final current-tree arm64 build, DMG/ZIP artifact audit, `hdiutil` checksum,
+    unpacked audit, receipt verification, and exact packaged smoke:
+    **8/8 passed**.
+- **Candidate**:
+  - `dist/leafbook-mac-arm64-0.1.0.dmg` (144 MiB), SHA-256
+    `43e7771abebefb2a1339c8bc00e24d1af983b08422e302b8245b870cc2bfb8b1`;
+  - `dist/leafbook-mac-arm64-0.1.0.zip` (144 MiB), SHA-256
+    `ddae32cac250342b717668c8a85e0893514f8bf378579a7c83f5eba5b0d9810f`;
+  - replaced candidates remain intact under
+    `/var/folders/kq/dz44fm994nz94zw2dfqnz_g00000gn/T/leafbook-pre-10b2a-candidate.7pGEVE`
+    and
+    `/var/folders/kq/dz44fm994nz94zw2dfqnz_g00000gn/T/leafbook-preformat-10b2a-candidate.qllqPm`.
+- **Key decisions**: remove the path-free slot before IPC; validate
+  structured-cloned typed arrays without realm-local `instanceof`; start
+  hydration only after Vue commits the `v-html` article and only while slots
+  remain.
+- **Unresolved**: the candidate is unsigned and unnotarized because no
+  Developer ID is installed; strict `codesign` therefore fails. Formal release
+  still requires signing, hardened runtime, notarization/Gatekeeper, native
+  Windows/Linux evidence, and the remaining release-gate blockers. SVG and
+  export image rewriting remain deferred.
+- **Git**: not committed, tagged, pushed, or released; HEAD remains `e88b3107`.
+
+## 2026-07-30 — Phase 10B1 review hardening
+
+- **User goal**: close the Phase 10B1 security-review findings before Reader UI
+  integration and preserve a fail-closed path toward the formal release.
+- **Completed**:
+  - Replaced path-shape-only resource authority with an exact per-chapter
+    Markdown AST allowlist. A pinned `readChapter` uses Marked's lexer to
+    authorize only inline and resolved reference-style image destinations; raw
+    HTML, code, links, remote/data/file sources, unsupported types, and
+    unreferenced in-root images do not gain authority.
+  - Made refresh invalidate the resource generation immediately. A failed
+    rescan deletes the invalidated session, so an old token cannot become live
+    again and recovery requires reopening the library.
+  - Added complete bounded PNG/JPEG/GIF/WebP container validation, including
+    PNG CRC/chunk structure, JPEG segment/entropy structure, GIF
+    frame/subblock structure, exact RIFF/WebP chunk structure, exact endings,
+    dimension/pixel/frame/aggregate-decode limits, and truncation/trailing-data
+    rejection.
+  - Added before/after snapshots for every resource ancestor plus final
+    target-realpath verification. Documented the residual P3 same-user
+    pathname micro-window because portable Node does not provide a complete
+    descriptor-relative `openat` walk.
+  - Corrected the renderer global Electron API type, bundled the ESM-only
+    Marked lexer into the CommonJS main output, and added a static build-contract
+    test for that requirement.
+  - Added actual PNG/JPEG/GIF/WebP fixtures and adversarial tests for exact AST
+    membership, polyglots, truncation, dimension/pixel/frame bombs, symlink and
+    ancestor races, hard links, case aliases, Windows drive/backslash input,
+    lifecycle revocation, refresh failure, and concurrency budgets. POSIX
+    symlink tests are platform-gated; the Windows case-alias test needs no
+    symlink privilege.
+- **Files**: added
+  `packages/desktop/src/main/book/imageContainer.ts` and
+  `packages/desktop/src/main/book/resourceReferences.ts`; updated
+  `packages/desktop/src/main/book/resourceReader.ts`,
+  `packages/desktop/src/main/book/sessionManager.ts`,
+  `packages/desktop/src/types/global.d.ts`,
+  `packages/desktop/electron.vite.config.ts`,
+  `packages/desktop/package.json`, `pnpm-lock.yaml`, the Phase 10B1 unit tests,
+  `docs/RESOURCE_PIPELINE.md`, `docs/BOOK_READER.md`,
+  `docs/RELEASE_GATE.md`, and this log.
+- **Verification**:
+  - focused resource/contract/manager suite: **3 files / 198 passed / 1
+    Windows-only skipped**;
+  - complete Desktop unit suite: **74 files / 1283 passed / 1 Windows-only
+    skipped**;
+  - Desktop typecheck and production `electron-vite` build passed; the main
+    output contains bundled Marked code and no runtime `require("marked")`;
+  - focused ESLint passed; complete ESLint passed with **0 errors** and the
+    existing **134 warnings**;
+  - focused Prettier passed; final `git diff --check` passed.
+- **Key decisions**: the chapter bytes returned to the renderer are the sole
+  source of image authority; refresh failures destroy rather than preserve an
+  unreturnable generation; animated WebP and SVG remain unsupported; full
+  image-container parsing stays in the main process.
+- **Unresolved**: Reader rendering/object-URL lifecycle and export rewriting
+  remain deferred. Native Windows NTFS execution plus privileged
+  reparse-point/symlink coverage is required before stable evidence; the
+  documented same-user `openat` limitation remains P3. Phase 10A's signing,
+  notarization, native installer, provenance, and publication blockers remain.
+- **Git**: not committed, tagged, pushed, or released; HEAD remains `e88b3107`.
+
+## 2026-07-30 — Phase 10A carrier/control and bounded-extraction closure
+
+- **User goal**: close the remaining installer/carrier attack surfaces before
+  treating the current release gate as formal-version evidence, while
+  preserving all existing Phase 10A work and making no commit, tag, push, or
+  Release.
+- **Completed**:
+  - Split Linux auditing into an application manifest containing only the
+    cross-carrier Electron payload and a complete carrier manifest. Added exact
+    carrier-metadata and launcher checks for archive, AppImage, snap, deb, and
+    rpm shapes; carrier-only `AppRun`, desktop/icon, snap metadata, and package
+    integration files no longer cause a false application-digest mismatch.
+  - Added real-shape positive fixtures proving identical application digests
+    across five Linux carrier forms, plus negative fixtures for an extra `usr`
+    tree, escaping symlink, and a launcher containing comments/side effects.
+  - Audited Debian `control.tar` before extraction. Only bounded regular
+    `control` and optional `md5sums` metadata are accepted; `preinst`,
+    `postinst`, `prerm`, `postrm`, `config`, `templates`, `triggers`, and any
+    other hook fail closed. RPM `--scripts` and `--triggers` must both be empty
+    before payload extraction.
+  - Added `safe-extract-zip.py`, which parses local ZIP headers and streams
+    stored/deflate output under actual single-entry and total-byte budgets,
+    validates CRC/declared-size equality before accepting output, rejects
+    duplicate/traversal/escaping or unmanifested link paths, and safely resolves
+    manifest-listed framework symlink chains. macOS and Windows ZIP auditing no
+    longer delegates extraction to `unzip`/`tar` or trusts central sizes.
+  - Added a portable bounded-command runner with wall-clock, CPU, output-file,
+    and process-group kill enforcement, and applied it to archive metadata
+    listing, ASAR, tar, dpkg, rpm/cpio, SquashFS, ZIP, and 7-Zip commands.
+  - Tightened DMG shape validation: `Applications` is exactly the
+    `/Applications` symlink; `LeafBook.app` and `.background` are real
+    directories; Finder/background metadata has a fixed type/content allowlist;
+    other root entries and root-escaping symlinks are rejected.
+  - Removed the remaining exhaustive “all block types” wording from the
+    deliberately representative E2E spec and documented these boundaries in
+    `docs/RELEASE_GATE.md`.
+- **Files**: `scripts/audit-application-layout.mjs`,
+  `scripts/audit-platform-artifacts.sh`, `scripts/audit-mac-artifact.sh`,
+  `scripts/audit-mac-carrier.mjs`, `scripts/preflight-archive.py`,
+  new `scripts/safe-extract-zip.py`, new `scripts/run-bounded.py`,
+  `packages/desktop/test/unit/specs/release-gate-static.spec.ts`,
+  `packages/desktop/test/e2e/representative-blocks-roundtrip.spec.ts`,
+  `docs/RELEASE_GATE.md`, and this log. All unrelated and preceding changes
+  remain preserved.
+- **Verification**:
+  - adversarial carrier/control/extraction gate: 29/29;
+  - final complete desktop unit run: **72 files / 1228/1228 tests** (this
+    supersedes the earlier interim Phase 10A count); Muya unit:
+    213 files / 1454/1454 tests;
+  - desktop and Muya typechecks passed;
+  - source release smoke 7/7 and packaged arm64 smoke 7/7; complete Reader E2E
+    source 12/12 and packaged arm64 12/12;
+  - the real arm64 source app, safely streamed ZIP, and mounted DMG passed the
+    complete macOS artifact audit; unpacked receipt audit, `hdiutil verify`, and
+    strict deep `codesign` verification passed;
+  - production build passed; full ESLint passed with zero errors and 134
+    existing warnings; focused Prettier, Node/Bash/Python syntax checks, and
+    `git diff --check` passed.
+- **Key decisions**: central-directory sizes are untrusted hints, not extraction
+  budgets; application equality excludes only strictly allowlisted carrier
+  metadata while the full carrier remains independently manifested; package
+  installation hooks default to rejection unless a separately reviewed exact
+  template is deliberately introduced.
+- **Unresolved external blockers**: no real Linux artifacts or Linux desktop
+  integration environment were available locally, so the stricter deb/rpm and
+  AppImage/snap gates still require CI execution against actual carriers. Real
+  Windows native install/run/uninstall and signing, Developer ID/hardened
+  runtime/notarization/downloaded Gatekeeper evidence, protected tags and
+  environments, SBOM/provenance/attestation, credential rehearsal, and explicit
+  human publication approval remain external stable-release blockers.
+- **Git**: not committed, tagged, pushed, or released; HEAD remains `e88b3107`.
+
+## 2026-07-30 — Phase 10A metadata and resource-bound closure
+
+- **User goal**: finish the remaining Phase 10A package-metadata and
+  resource-exhaustion defenses so the formal-release gate fails closed before
+  extracting or executing untrusted carriers.
+- **Completed**:
+  - Replaced permissive Debian metadata checks with a single-paragraph RFC 822
+    schema, exact LeafBook identity/version/architecture/dependency values, and
+    rejection of duplicate, unknown, maintainer-script, pre-dependency,
+    conflict, replacement, essential, and protected fields.
+  - Expanded RPM fail-closed inspection across scripts, triggers,
+    file-triggers, trans-file-triggers, and their corresponding header tags.
+  - Bound AppImage and snap launchers to the exact electron-builder 26.15.3
+    templates. Added strict snap YAML-AST validation, architecture binding,
+    exact plug descriptors, MIME metadata, desktop/icon paths, and rejection of
+    extra apps, daemons, hooks, layouts, aliases, and unknown keys.
+  - Added cumulative ASAR entry/depth/path/single-file/total-size and carrier
+    offset checks before extraction, including support for the real unpacked
+    directory header shape.
+  - Made ZIP symlink handling streaming and payload-independent during
+    preflight; added compressed-size budgets and a forged large-symlink
+    regression fixture.
+  - Hardened the bounded runner with streamed combined-output limits and POSIX
+    CPU/file/open-file limits; Linux dedicated CI additionally receives address
+    space and process-count limits.
+  - Added DMG compressed and Finder-presentation budgets, file magic checks,
+    and bounded `hdiutil` verification, mounting, and cleanup.
+- **Files**: `scripts/preflight-archive.py`,
+  `scripts/audit-platform-artifacts.sh`,
+  `scripts/audit-application-layout.mjs`, `scripts/run-bounded.py`,
+  `scripts/audit-mac-artifact.sh`, `scripts/audit-mac-carrier.mjs`, new
+  `scripts/preflight-asar.mjs`,
+  `packages/desktop/test/unit/specs/release-gate-static.spec.ts`,
+  `packages/desktop/electron-builder.yml`, `docs/RELEASE_GATE.md`, and this
+  log. Shared-worktree changes outside this scope remain preserved.
+- **Verification**:
+  - metadata/resource adversarial gate: **30/30 passed**;
+  - complete desktop unit: **72 files / 1229/1229 tests passed**; Muya unit:
+    **213 files / 1454/1454 tests passed**;
+  - desktop and Muya typechecks and production build passed;
+  - source and packaged arm64 release smoke: **7/7 each**; complete Reader E2E
+    source and packaged arm64: **12/12 each**;
+  - real arm64 ASAR preflight, unpacked audit, complete ZIP/DMG artifact audit,
+    strict deep `codesign`, and `hdiutil verify` passed;
+  - ESLint passed with zero errors and 134 existing warnings; focused Prettier,
+    Node/Bash/Python syntax validation, and `git diff --check` passed.
+- **Key decisions**: exact builder-version contracts are generated from the
+  installed builder implementation; untrusted declared sizes never replace
+  actual streamed-output budgets; Darwin does not receive unsafe shared-user
+  `RLIMIT_NPROC` or unreliable `RLIMIT_AS`; Windows remains wall/output bounded
+  until a native Job Object implementation is proven.
+- **Unresolved external blockers**: real Linux carriers and isolated Linux
+  resource-quota execution are still required; current electron-builder
+  Debian/RPM maintainer scripts must be deliberately removed or exactly
+  reviewed before those carriers can pass. Native Windows
+  install/run/uninstall, Job Object containment and signing; Developer ID,
+  hardened runtime, notarization and downloaded Gatekeeper validation;
+  protected stable tags/environments, SBOM/provenance/attestation, credential
+  rehearsal, and explicit human publication approval remain.
+- **Git**: not committed, tagged, pushed, or released; HEAD remains `e88b3107`.
+
+## 2026-07-30 — Phase 10A final generator and timeout-window closure
+
+- **User goal**: close the final explicit Linux metadata-generator,
+  post-exit resource-boundary, ASAR-prefix, AppImage-marker, snap-wrapper, and
+  DMG attach-timeout gaps without committing or publishing.
+- **Completed**:
+  - Linux desktop entries are now regenerated with the installed
+    electron-builder 26.15.3 `LinuxTargetHelper.computeDesktopEntry` and
+    compared byte-for-byte per carrier. AppImage version/Exec, deb/rpm absolute
+    Exec, snap Exec, Keywords, MIME values and every emitted key are bound to
+    the actual builder contract; tampered values fail.
+  - Snap accepts only a manifested executable regular `command.sh` whose bytes
+    equal the pinned core20 builder wrapper. The formerly tolerated
+    `app/leafbook` command and non-executable wrappers now fail.
+  - The bounded runner keeps monitoring output readers after the direct process
+    exits, checks output/wall state before returning, and kills the process
+    group when a descendant retains an inherited pipe through the shared
+    deadline. Fast 70 MiB output and retained-pipe fixtures cover both paths.
+  - ASAR preflight reads and validates the eight-byte pickle prefix before
+    invoking the ASAR library; a header over 64 MiB, truncated header, or header
+    outside the carrier is rejected. A sparse 70 MiB header fixture proves the
+    early budget failure.
+  - Added `find-squashfs-offset.py`, a fixed-memory streaming AppImage scanner
+    requiring exactly one `hsqs` marker, replacing unbounded grep/mapfile
+    output.
+  - DMG cleanup is armed before attach, performs bounded state inspection,
+    resolves the audited image path to its unique base `/dev/disk*`, and uses a
+    bounded detach in normal and timeout/error cleanup. The real artifact audit
+    verified the path and left no matching image mounted.
+- **Files**: `scripts/audit-application-layout.mjs`,
+  `scripts/run-bounded.py`, `scripts/preflight-asar.mjs`, new
+  `scripts/find-squashfs-offset.py`, `scripts/audit-platform-artifacts.sh`,
+  `scripts/audit-mac-artifact.sh`,
+  `packages/desktop/test/unit/specs/release-gate-static.spec.ts`,
+  `docs/RELEASE_GATE.md`, and this log. Other shared-worktree changes remain
+  preserved.
+- **Verification**:
+  - final focused metadata/resource/timeout gate: **34/34 passed**;
+  - complete Desktop unit: **72 files / 1233/1233 tests passed**; complete Muya
+    unit: **213 files / 1454/1454 tests passed**;
+  - Desktop and Muya typechecks, production build, and ESLint passed (zero
+    errors; 134 existing warnings);
+  - source and packaged arm64 release smoke: **7/7 each**; complete current
+    Reader/security/representative E2E: **19/19 source and 19/19 packaged**;
+  - real arm64 ASAR preflight, unpacked receipt audit, complete app/ZIP/DMG
+    artifact audit, strict deep `codesign`, and `hdiutil verify` passed;
+  - focused Prettier, Node/Bash/Python syntax checks, `git diff --check`, and
+    post-audit no-mounted-image check passed.
+- **Key decisions**: builder output is the source of truth rather than a
+  hand-written approximation; desktop entries are exact complete documents;
+  DMG cleanup identifies the actual attached image rather than assuming the
+  requested mount path; Windows remains honestly wall/output bounded and a
+  stable blocker until native Job Object process-tree containment is proven.
+- **Unresolved external blockers**: real isolated Linux carrier execution,
+  removal or exact approval of electron-builder deb/rpm maintainer scripts,
+  native Windows Job Object/install/run/uninstall/signing, Developer ID
+  hardened-runtime/notarization/downloaded Gatekeeper evidence, protected
+  release tags/environments, SBOM/provenance/attestation, credential rehearsal,
+  and explicit human publication approval remain.
+- **Git**: not committed, tagged, pushed, or released; HEAD remains `e88b3107`.
+
+## 2026-07-30 — Phase 10A seven-association P1 closure
+
+- **User goal**: remove the final mismatch between the desktop-entry audit and
+  the seven Linux Markdown file associations in electron-builder configuration.
+- **Completed**:
+  - Added `scripts/linux-file-associations.mjs` as the frozen seven-entry
+    contract for `md`, `markdown`, `mmd`, `mdown`, `mdtxt`, `mdtext`, and `mdx`.
+  - The real electron-builder 26.15.3 desktop generator now consumes that
+    contract, including the previously omitted `mdtext` and `mdx` MIME entries.
+  - Added a YAML-AST assertion that the complete
+    `linux.fileAssociations` configuration is identical to the shared contract,
+    plus real-helper negative fixtures proving that one missing association or
+    a changed MIME value fails exact desktop-file validation.
+- **Files**: new `scripts/linux-file-associations.mjs`,
+  `scripts/audit-application-layout.mjs`,
+  `packages/desktop/test/unit/specs/release-gate-static.spec.ts`,
+  `docs/RELEASE_GATE.md`, and this log.
+- **Verification**: focused release gate **35/35 passed**; real arm64 app/ZIP/DMG
+  audit and packaged smoke **7/7** passed; Desktop and Muya typechecks passed;
+  ESLint passed with zero errors and 134 existing warnings; focused Prettier,
+  Node/Bash syntax checks, and `git diff --check` passed.
+- **Key decision**: Linux file-association values have one executable source of
+  truth, while the non-importable builder YAML is required by test to remain an
+  exact structural copy.
+- **Unresolved external blockers**: unchanged from the preceding entry.
+- **Git**: not committed, tagged, pushed, or released; HEAD remains `e88b3107`.
+
+## 2026-07-30 — Phase 10B1 session-bound local book resources
+
+- **User goal**: establish the secure main-process foundation for reading local
+  Markdown-book resources without yet connecting images to Reader rendering or
+  export.
+- **Completed**:
+  - Added a typed resource request bound to the renderer owner, live book
+    session, per-generation resource token, and a model-owned chapter whose
+    exact content was successfully returned by `readChapter` in that same
+    generation.
+    Refresh rotates the token; refresh, close, root invalidation, and owner
+    teardown prevent in-flight reads from returning bytes.
+  - Added a path-free response containing only an allowlisted MIME, byte count,
+    and `Uint8Array`. No root/absolute path, Node filesystem object, custom
+    protocol, `file:` URL, or renderer filesystem capability was introduced.
+  - Added a descriptor-pinned reader for PNG/JPEG/GIF/WebP. It rejects SVG,
+    HTML/script/unknown types, remote/data/file references, authorities,
+    percent encoding, query/fragment tricks, NUL/control characters,
+    backslashes, non-NFC input, traversal outside the root, case-ambiguous
+    paths, symlinks, hard links, non-regular files, oversized files, and
+    extension/magic mismatches.
+  - Pinned and revalidated both the session root and resource descriptor using
+    realpath/lstat, `O_NOFOLLOW`, device/inode, mode, link count, size,
+    mtime/ctime, EOF, and final pathname checks. Reads are capped at 8 MiB, one
+    resource per request, two concurrent reads per owner, and eight globally.
+  - Wired the capability through the existing manager, editor-gated IPC,
+    shared typed contract, and sandboxed preload bridge. Added focused
+    filesystem, manager lifecycle, race, budget, IPC, preload, and static
+    security tests.
+  - Documented the threat model and deferred UI/export work in
+    `docs/RESOURCE_PIPELINE.md`; updated Reader and release-gate documentation
+    to state that images remain placeholders in this bounded phase.
+- **Files**: new
+  `packages/desktop/src/main/book/resourceReader.ts`,
+  `packages/desktop/test/unit/specs/book-resource.spec.ts`,
+  `packages/desktop/test/unit/specs/book-resource-contract.spec.ts`, and
+  `docs/RESOURCE_PIPELINE.md`; updated
+  `packages/desktop/src/main/book/sessionManager.ts`,
+  `packages/desktop/src/main/ipc/books.ts`,
+  `packages/desktop/src/preload/index.ts`,
+  `packages/desktop/src/shared/types/bookReader.ts`,
+  `packages/desktop/src/shared/types/ipc.ts`, relevant Reader/store/a11y unit
+  fixtures, `docs/BOOK_READER.md`, `docs/RELEASE_GATE.md`, and this log.
+- **Verification**:
+  - focused resource/manager/IPC/preload suite: **3 files / 187 tests passed**;
+  - complete Desktop unit: **74 files / 1272/1272 tests passed**;
+  - Desktop typecheck and production `electron-vite` build passed;
+  - focused ESLint passed; complete ESLint passed with **0 errors** and the
+    existing **134 warnings**;
+  - focused Prettier and `git diff --check` passed.
+- **Key decisions**: resource authority is a short-lived session-generation
+  capability rather than a renderer path; magic and extension must agree; SVG
+  remains a separate future sanitization problem; UI display, object-URL cache
+  lifecycle, and export rewriting remain outside Phase 10B1.
+- **Unresolved**: Reader and export integration are intentionally deferred.
+  Formal-release external blockers listed in Phase 10A remain unchanged.
+- **Git**: not committed, tagged, pushed, or released; HEAD remains `e88b3107`.
+
+## 2026-07-30 — Phase 10B1 final P2 closure
+
+- **User goal**: close the remaining PNG decode and refresh-exception P2
+  findings without committing or widening the renderer capability.
+- **Completed**:
+  - Restricted PNG to static, non-interlaced content. APNG `acTL`/`fcTL`/`fdAT`,
+    compressed metadata `iCCP`/`zTXt`/`iTXt`, unknown critical chunks, unknown
+    ancillary chunks, malformed CRC/order/schema, and oversized ancillary
+    payloads now fail closed.
+  - Added bit-depth/color-type-aware scanline sizing and a 64 MiB raw decode
+    budget. Contiguous IDAT is capped at 8 MiB, inflated with
+    `maxOutputLength`, required to consume the exact zlib input and produce the
+    exact expected bytes, and checked for valid PNG filter bytes on every row.
+  - Contained a thrown refresh loader: the exact invalidated session is
+    deleted, the caller receives a structured path-free `book-unavailable`
+    result instead of a rejected IPC promise, and neither the old nor rotated
+    resource token remains usable.
+  - Corrected the capability documentation: authority belongs to any
+    node-bound chapter successfully returned by `readChapter` in the same
+    session generation, not to a renderer-reported “current chapter”.
+- **Files**: updated
+  `packages/desktop/src/main/book/imageContainer.ts`,
+  `packages/desktop/src/main/book/sessionManager.ts`,
+  `packages/desktop/test/unit/specs/book-resource.spec.ts`,
+  `packages/desktop/test/unit/specs/book-reader.spec.ts`,
+  `docs/RESOURCE_PIPELINE.md`, and this log.
+- **Verification**:
+  - focused resource/contract/manager suite: **3 files / 209 passed / 1
+    Windows-only skipped**;
+  - complete Desktop unit suite: **74 files / 1294 passed / 1 Windows-only
+    skipped**;
+  - Desktop typecheck and production `electron-vite` build passed;
+  - focused ESLint passed; complete ESLint passed with **0 errors** and the
+    existing **134 warnings**;
+  - focused Prettier and final `git diff --check` passed.
+- **Key decisions**: no PNG path may cause hidden secondary decompression;
+  interlaced/APNG support requires a separately budgeted implementation;
+  refresh exceptions revoke instead of attempting to preserve an invalidated
+  generation.
+- **Unresolved**: Reader object-URL/rendering integration, native Windows
+  evidence, the documented same-user P3 pathname window, and Phase 10A's
+  external release blockers remain.
+- **Git**: not committed, tagged, pushed, or released; HEAD remains `e88b3107`.
+
+## 2026-07-30 — Phase 10B2a final verification supplement
+
+- The complete Phase 10B2a implementation and candidate record appears above;
+  this appended supplement records the final, post-format rebuild.
+- Final current-tree macOS arm64 artifact/unpacked audits and bound receipt
+  verification passed; exact packaged smoke passed **8/8**.
+- DMG SHA-256:
+  `43e7771abebefb2a1339c8bc00e24d1af983b08422e302b8245b870cc2bfb8b1`.
+  ZIP SHA-256:
+  `ddae32cac250342b717668c8a85e0893514f8bf378579a7c83f5eba5b0d9810f`.
+- The candidate remains unsigned/unnotarized and is not a formal release.
+- Git remains uncommitted, untagged, unpushed, and unpublished at
+  `e88b3107`.
+
+## 2026-07-30 — Phase 10B2a review-fix closure
+
+- **User goal**: close the Reader raster review findings while preserving the
+  complete existing diff and without committing, tagging, pushing, or
+  releasing.
+- **Completed**:
+  - Added one pure Marked tokenizer-extension contract shared by Muya Reader,
+    Muya block lexing, and main-process image-reference authorization. Math
+    block/inline and sub/sup boundaries can no longer drift; ordinary inline
+    and reference images remain authoritative while math, sub/sup, code, and
+    raw HTML do not. Main-process heading analysis now follows direct pure
+    imports, and the production main bundle contains no DOMPurify, KaTeX, or
+    Prism runtime.
+  - Added per-node `readChapter` nonces so only the latest concurrent response
+    can commit the node's resource-reference set.
+  - Changed PNG validation from synchronous inflate to asynchronous Node
+    zlib/libuv inflate. All accepted containers now return trusted width,
+    height, frame count, and decode-pixel metadata through the path-free DTO.
+  - Deduplicated repeated references to one IPC read, Blob URL, and revoke.
+    Each generation now admits at most 64 unique images, 32 MiB compressed
+    bytes, 120 million decode pixels, and 512 frames, while retaining the
+    two-read concurrency limit.
+  - Added bounded cancellation/staleness-aware retry for `resource-busy` only,
+    allowing two draining old-chapter reads and two new-chapter reads to
+    converge without retrying permanent failures.
+  - Added a real compiled `bookWorkspace/index.vue` mount test covering chapter
+    and token replacement, refresh, Reader exit, unmount, late-response
+    rejection, and one-time URL revocation.
+  - Renamed the workflow/static macOS step from seven to eight packaged smoke
+    tests and corrected Reader/resource/release documentation. The old ad-hoc
+    Beta hash and pre-review `43e777...` hash are explicitly historical, while
+    the current 0.1.0 candidate remains mutable, unsigned, and release-ineligible.
+- **Files**: added
+  `packages/muya/src/utils/marked/tokenizerContract.ts`,
+  `packages/muya/src/utils/inlinePure.ts`, and
+  `packages/desktop/test/unit/specs/book-workspace-image-lifecycle.spec.ts`;
+  updated the Muya parser/heading/inline helpers, desktop main resource
+  extraction/container/reader/session code, shared resource DTO, Renderer
+  render/hydration code, Vite/Vitest/TypeScript configuration, resource/Reader
+  and release-gate tests, `.github/workflows/release.yml`,
+  `docs/BOOK_READER.md`, `docs/RESOURCE_PIPELINE.md`,
+  `docs/RELEASE_GATE.md`, and this log.
+- **Verification**:
+  - Desktop unit: **76 files / 1310 passed / 1 native-Windows-only skipped**;
+  - Muya unit: **213 files / 1454 passed**;
+  - Desktop and Muya typechecks passed;
+  - complete repository ESLint passed with **0 errors / 134 existing
+    warnings**; focused Muya ESLint passed;
+  - production Electron build passed; the emitted main bundle was checked to
+    contain the shared contract but no DOMPurify/KaTeX/Prism runtime;
+  - exact source smoke passed **8/8**;
+  - current-tree arm64 build, app/ZIP/DMG audit, `hdiutil` checksum,
+    unpacked receipt audit, receipt re-verification, and packaged smoke
+    **8/8** passed;
+  - unpacked app size: **391,684,096 bytes**; ASAR size:
+    **149,182,914 bytes**.
+- **Candidate artifacts**:
+  - DMG:
+    `dist/leafbook-mac-arm64-0.1.0.dmg`, **151,502,680 bytes**, SHA-256
+    `7057222c186ef7d89b0c12cc65ea81ed92e310eef2f26457bb0d64d95fa219e2`;
+  - ZIP:
+    `dist/leafbook-mac-arm64-0.1.0.zip`, **150,651,159 bytes**, SHA-256
+    `c3e0a59a4d437f13a8f8238bd3ae7af2b512017bbf1c9beb006c515f030296e3`.
+- **Key decisions**: resource references remain only in the mounted
+  generation's in-memory table; decoded trust metadata comes only from the
+  main container validator; aggregate budgets count unique responses; export
+  and SVG stay deferred.
+- **Unresolved**: no Developer ID identity is installed, so electron-builder
+  skipped signing and `codesign --verify --deep --strict` failed with
+  `code has no resources but signature indicates they must be present`.
+  Notarization and external formal-release evidence therefore remain blocked.
+- **Git**: not committed, tagged, pushed, or released; HEAD remains
+  `e88b3107`.
+
+## 2026-07-30 — Phase 10B2a authoritative-budget and queue closure
+
+- **User goal**: close every remaining Reader raster P0–P2 review item, rebuild
+  the macOS candidate, and preserve the existing worktree without committing,
+  tagging, pushing, or releasing.
+- **Completed**:
+  - Split Reader admission into a 256-occurrence cap and 64-unique-reference
+    cap. Repeated destinations share one path-free resource slot/IPC/Blob URL,
+    while overflow becomes an inert placeholder.
+  - Added one shared pure local-raster reference policy for main and Renderer.
+    PNG/JPEG/GIF/WebP are the only eligible extensions; unsupported and
+    extensionless image tokens consume no quota.
+  - Added an authoritative main-process ledger keyed to the live
+    session/node/read nonce. References are one-shot leases reserved before
+    filesystem work; request/unique counts are reserved synchronously and
+    byte/decode-pixel/frame totals are atomically finalized before bytes are
+    returned. The first aggregate overrun fail-stops the generation and
+    cancels its queued work.
+  - Replaced immediate owner/global busy rejection with a bounded 64-entry,
+    30-second queue. It preserves FIFO among currently admissible owners,
+    avoids head-of-line starvation from a saturated owner, and rejects stale
+    session/token/nonce work before it can start.
+  - Made Renderer budget failure stop all later scheduling while tolerating
+    only already in-flight work, and made every resource-busy backoff timer
+    synchronously cancellable on generation replacement/unmount.
+  - Migrated clipboard parsing and `walkTokens` to the shared tokenizer
+    contract, deleted the old duplicate math and super/subscript regex
+    implementations, and added a Muya package-level `imageRenderer` provenance
+    contract test.
+  - Added local timeouts only to the heavy nonce/carrier fixtures rather than
+    weakening the global test timeout.
+- **Files**: added
+  `packages/desktop/src/common/book/resourceReference.ts` and
+  `packages/muya/src/__tests__/staticImageRenderer.spec.ts`; updated
+  `packages/desktop/src/main/book/sessionManager.ts`,
+  `packages/desktop/src/main/book/resourceReferences.ts`,
+  `packages/desktop/src/renderer/src/book/renderMarkdown.ts`,
+  `packages/desktop/src/renderer/src/book/hydrateBookImages.ts`,
+  `packages/desktop/test/unit/specs/book-reader-images.spec.ts`,
+  `packages/desktop/test/unit/specs/book-resource.spec.ts`,
+  `packages/desktop/test/unit/specs/book-reader.spec.ts`,
+  `packages/desktop/test/unit/specs/release-gate-static.spec.ts`, the Muya
+  marked/static-rendering helpers, `docs/BOOK_READER.md`,
+  `docs/RESOURCE_PIPELINE.md`, `docs/RELEASE_GATE.md`, and this log; deleted
+  the superseded Muya math and super/subscript extension files.
+- **Verification**:
+  - Desktop unit: **76 files / 1315 passed / 1 native-Windows-only skipped**;
+  - Muya unit: **214 files / 1455 passed**;
+  - Desktop and Muya typechecks passed;
+  - complete repository ESLint passed with **0 errors / 134 existing
+    warnings**; focused changed-file lint passed;
+  - production Electron build passed; the main bundle contains the shared
+    tokenizer contract and no DOMPurify/KaTeX/Prism runtime;
+  - exact source and packaged macOS arm64 smoke each passed **8/8**;
+  - unpacked app audit/receipt creation, full app/ZIP/DMG carrier audit,
+    `hdiutil verify`, and independent receipt re-verification passed;
+  - unpacked app size: **418,320,384 bytes**; ASAR size:
+    **175,125,288 bytes**.
+- **Candidate artifacts**:
+  - DMG: `dist/leafbook-mac-arm64-0.1.0.dmg`, **159,387,639 bytes**,
+    SHA-256
+    `7778b0374a6f5bfb02d6836af85703dc51b179427c71ca5a7a8393f5b6e4d88d`;
+  - ZIP: `dist/leafbook-mac-arm64-0.1.0.zip`, **158,583,383 bytes**,
+    SHA-256
+    `19f54ec917e7da772e0c4e487b6025bcb08e124944205427047082f58c20d15e`.
+- **Key decisions**: the main ledger, not the Renderer, is the authority for
+  aggregate resource cost; a saturated owner cannot block unrelated owners;
+  legal slow I/O is allowed to complete and release its slot; unsupported
+  formats never consume supported-image quotas.
+- **Unresolved**: this candidate is unsigned and unnotarized because no
+  Developer ID identity is installed. Native Windows/Linux release evidence,
+  notarization/Gatekeeper checks, protected release controls, and final human
+  approval remain formal-release blockers.
+- **Git**: not committed, tagged, pushed, or released; HEAD remains
+  `e88b3107`.
+
+## 2026-07-30 — Phase 10B2a third-review fairness and policy closure
+
+- **User goal**: close the third Reader raster review, rebuild the macOS
+  candidate, and keep moving toward a formal release without committing,
+  tagging, pushing, or publishing.
+- **Completed**:
+  - Made resource admission reserve each one-shot lease before enqueueing, so
+    duplicate requests cannot occupy queue capacity or reach filesystem I/O.
+  - Added an eight-entry per-owner queue cap alongside the 64-entry global cap.
+    Admission now lets an unrelated owner use an available global slot even
+    when an earlier owner's two active slots and private queue are saturated.
+  - Made queued timeout, cancellation, stale session/read nonce, and generation
+    revocation clean their timers and per-owner counters. A queue-cap rejection
+    does not consume the lease; an admitted request that later times out keeps
+    the lease burned fail-closed.
+  - Consolidated every supported extension/MIME and byte, dimension, pixel,
+    frame, occurrence, unique-resource, and aggregate-generation raster limit
+    in `packages/desktop/src/common/book/rasterPolicy.ts`. Main, Renderer, and
+    tests now consume or verify that single pure policy.
+  - Corrected Reader refresh documentation: a failed public refresh invalidates
+    and deletes the mounted session, so callers must reopen the book. Replaced
+    the inaccurate all-operations claim with the actual core Reader operation
+    groups.
+  - Added regression coverage proving the real admission/open order, per-owner
+    and global queue limits, injected 30-second timeout cleanup, fail-closed
+    lease behavior, and that an unrelated component rerender neither re-reads
+    nor revokes a hydrated image.
+- **Files**: added
+  `packages/desktop/src/common/book/rasterPolicy.ts`; updated
+  `packages/desktop/src/main/book/imageContainer.ts`,
+  `packages/desktop/src/main/book/resourceReader.ts`,
+  `packages/desktop/src/main/book/resourceReferences.ts`,
+  `packages/desktop/src/main/book/sessionManager.ts`,
+  `packages/desktop/src/renderer/src/book/renderMarkdown.ts`,
+  `packages/desktop/src/renderer/src/book/hydrateBookImages.ts`,
+  `packages/desktop/test/unit/specs/book-reader.spec.ts`,
+  `packages/desktop/test/unit/specs/book-resource-contract.spec.ts`,
+  `packages/desktop/test/unit/specs/book-workspace-image-lifecycle.spec.ts`,
+  `packages/desktop/test/unit/specs/release-gate-static.spec.ts`,
+  `docs/BOOK_READER.md`, `docs/RESOURCE_PIPELINE.md`,
+  `docs/RELEASE_GATE.md`, and this log.
+- **Verification**:
+  - focused Reader/resource suites: **271 passed / 1 native-Windows-only
+    skipped**;
+  - complete Desktop unit suite: **76 files / 1321 passed / 1
+    native-Windows-only skipped**;
+  - complete Muya unit suite: **214 files / 1455 passed**;
+  - Desktop and Muya typechecks passed;
+  - complete repository ESLint passed with **0 errors / 134 existing
+    warnings**;
+  - production Electron build passed; the main bundle contains the shared
+    raster-generation policy and no DOMPurify/KaTeX/Prism runtime;
+  - exact source and packaged macOS arm64 smoke each passed **8/8**;
+  - unpacked app audit/receipt creation, full app/ZIP/DMG carrier audit,
+    `hdiutil verify`, and independent receipt re-verification passed;
+  - unpacked app size: **418,664,448 bytes**; ASAR size:
+    **175,134,683 bytes**.
+- **Candidate artifacts**:
+  - DMG: `dist/leafbook-mac-arm64-0.1.0.dmg`, **159,379,093 bytes**,
+    SHA-256
+    `ffe72c8d9ea498d5fcf8366d1e4e32a2e38fba5527088e67cf092ee5bf6ff4bc`;
+  - ZIP: `dist/leafbook-mac-arm64-0.1.0.zip`, **158,582,687 bytes**,
+    SHA-256
+    `38f3e479c3b54568ac3c1af52535445f2fe47ed836ac56784d384a3250135c60`.
+- **Key decisions**: queue capacity is separate from one-shot lease
+  authority; only successfully admitted work burns a lease; timeout remains
+  fail-closed; all raster safety constants have one runtime source.
+- **Unresolved**: the candidate is unsigned and unnotarized because no
+  Developer ID identity is installed. Native Windows/Linux release evidence,
+  notarization/Gatekeeper checks, protected release controls, and final human
+  approval remain formal-release blockers.
+- **Git**: not committed, tagged, pushed, or released; HEAD remains
+  `e88b3107`.
+
+## 2026-07-30 — Phase 10B2a final-P2 determinism closure
+
+- **User goal**: resolve the final quality-review P2 findings, prove the
+  concurrency and carrier tests are stable, and rebuild the local macOS
+  candidate without committing or publishing.
+- **Completed**:
+  - Removed the fair-admission test's invalid assumption about the ordering of
+    two concurrent active opens. It now checks their set and requires the
+    unrelated owner's real open to be third.
+  - Added an explicit `firstEntered` loader barrier to the concurrent
+    `readChapter` nonce test before starting the second read, and reduced its
+    local timeout because ordering no longer depends on scheduler luck.
+  - Gave the heavy multi-carrier fixture a scoped 30-second timeout. Three
+    independent cold runs of the related six-file suite exposed a real
+    same-owner queue-start race; admission now hands one queued item per owner
+    into the real loader before admitting that owner's next queued item.
+  - Added real `afterResourceOpen` FIFO coverage after releasing two same-owner
+    active slots. The focused concurrency group then passed five consecutive
+    runs and the complete six-file cold combination passed three consecutive
+    runs.
+  - Made the frozen raster extension map the only MIME value source.
+    `BookRasterMediaType` and the runtime MIME collection are derived from its
+    values, while `BookResourceDto` directly imports that type instead of
+    repeating a union. Contract tests assert mapping/value-set/runtime parity.
+- **Files**: updated
+  `packages/desktop/src/common/book/rasterPolicy.ts`,
+  `packages/desktop/src/shared/types/bookReader.ts`,
+  `packages/desktop/src/main/book/sessionManager.ts`,
+  `packages/desktop/test/unit/specs/book-reader.spec.ts`,
+  `packages/desktop/test/unit/specs/book-resource-contract.spec.ts`,
+  `packages/desktop/test/unit/specs/release-gate-static.spec.ts`,
+  `docs/RESOURCE_PIPELINE.md`, `docs/RELEASE_GATE.md`, and this log.
+- **Verification**:
+  - focused concurrency selection passed **4/4** in five consecutive
+    independent runs;
+  - six-file Reader/resource/lifecycle/carrier cold combination passed three
+    consecutive independent runs, each **271 passed / 1 native-Windows-only
+    skipped**;
+  - complete Desktop unit suite: **76 files / 1321 passed / 1
+    native-Windows-only skipped**;
+  - complete Muya unit suite: **214 files / 1455 passed**;
+  - Desktop and Muya typechecks passed;
+  - complete repository ESLint passed with **0 errors / 134 existing
+    warnings**;
+  - production Electron build and exact source smoke **8/8** passed;
+  - rebuilt macOS arm64 app/ZIP/DMG audits, audit receipt creation and
+    re-verification, `hdiutil verify`, and packaged smoke **8/8** passed;
+  - unpacked app size: **417,456,128 bytes**; ASAR size:
+    **175,137,002 bytes**.
+- **Candidate artifacts**:
+  - DMG: `dist/leafbook-mac-arm64-0.1.0.dmg`, **159,386,241 bytes**,
+    SHA-256
+    `2181a51d1542538aac637fc68ae67e23603b6388c30e6973dfd7de84768a9a3c`;
+  - ZIP: `dist/leafbook-mac-arm64-0.1.0.zip`, **158,585,126 bytes**,
+    SHA-256
+    `54fc5d056de654e2b669b088217033b20bcbeb801eb7d50ac6ee8ec034f08021`.
+- **Key decisions**: cross-owner fairness and same-owner FIFO are separate
+  invariants; a queued owner start is serialized only until the actual loader
+  has opened it, retaining later parallel I/O. Raster MIME values must be
+  defined once at runtime and derived for both TypeScript and validation.
+- **Unresolved**: this candidate remains unsigned and unnotarized because no
+  Developer ID identity is installed. Native Windows/Linux release evidence,
+  notarization/Gatekeeper checks, protected release controls, and final human
+  approval remain formal-release blockers.
+- **Git**: not committed, tagged, pushed, or released; HEAD remains
+  `e88b3107`.
+
+## 2026-07-30 — Phase 10B2a final-P1 handoff-token closure
+
+- **User goal**: eliminate the remaining queued-start ABA race, bound the
+  admitted pre-open phase, repeat the complete gates, and rebuild the local
+  candidate without committing or publishing.
+- **Completed**:
+  - Replaced the owner-only pending-start set with an owner-to-opaque-token
+    map. Each token binds a unique operation ID, session object and ID, owner,
+    session generation, resource token, node ID, and chapter read nonce.
+  - Made real open, final cleanup, session/token invalidation, chapter nonce
+    replacement, budget revocation, and the watchdog release a handoff only
+    when the owner's current map value is the exact same token object. A late
+    request can no longer delete a newer handoff for the same owner.
+  - Added an independent 30-second watchdog for a queued request that has been
+    admitted but has not reached the real file open. Expiry releases only its
+    admission gate and drains eligible work; the active operation may finish
+    below and remains subject to the existing return-time session, generation,
+    token, nonce, and budget checks.
+  - Added an injected-clock ABA regression: an old admitted request blocks
+    before open, its watchdog expires, refresh creates a new same-owner
+    session that uses the spare slot and creates a new handoff, the old request
+    returns late without clearing it, and a second refresh releases only the
+    matching new token. Handoff timers and queued/active owner counters end
+    empty.
+  - Increased the separately identified carrier-layout binding fixture's
+    scoped timeout from 10 to 30 seconds; the multi-carrier fixture already
+    uses the same bounded local timeout.
+- **Files**: updated
+  `packages/desktop/src/main/book/sessionManager.ts`,
+  `packages/desktop/test/unit/specs/book-reader.spec.ts`,
+  `packages/desktop/test/unit/specs/release-gate-static.spec.ts`,
+  `docs/RESOURCE_PIPELINE.md`, `docs/RELEASE_GATE.md`, and this log.
+- **Verification**:
+  - focused handoff/fairness/timeout/nonce selection: **5 passed**;
+  - six-file Reader/resource/lifecycle/carrier cold combination passed three
+    consecutive independent runs, each **272 passed / 1 native-Windows-only
+    skipped**;
+  - complete Desktop unit suite: **76 files / 1322 passed / 1
+    native-Windows-only skipped**;
+  - complete Muya unit suite: **214 files / 1455 passed**;
+  - Desktop and Muya typechecks passed;
+  - repository ESLint passed with **0 errors / 134 existing warnings**;
+  - production Electron build and exact source smoke **8/8** passed;
+  - rebuilt macOS arm64 app/ZIP/DMG audits, audit receipt creation and
+    re-verification, `hdiutil verify`, and packaged smoke **8/8** passed;
+  - unpacked app size: **416,960,512 bytes**; ASAR size:
+    **175,144,363 bytes**.
+- **Candidate artifacts**:
+  - DMG: `dist/leafbook-mac-arm64-0.1.0.dmg`, **159,385,065 bytes**,
+    SHA-256
+    `61e6e70a925933840945e188652bf643f29bde112b137532d6c97ac1a91cc13e`;
+  - ZIP: `dist/leafbook-mac-arm64-0.1.0.zip`, **158,587,090 bytes**,
+    SHA-256
+    `4cb38806cc2c94cc01ba481b1d22e834b1858b211b32cb69fea5ddd38739814b`.
+- **Key decisions**: identity, not owner ID, governs handoff release; watchdog
+  expiry only removes admission starvation and never declares the underlying
+  filesystem work safe; final byte delivery remains independently fail-closed.
+- **Unresolved**: this candidate remains unsigned and unnotarized because no
+  Developer ID identity is installed. Native Windows/Linux release evidence,
+  notarization/Gatekeeper checks, protected release controls, and final human
+  approval remain formal-release blockers.
+- **Git**: not committed, tagged, pushed, or released; HEAD remains
+  `e88b3107`.
+
+## 2026-07-30 — Phase 10B2a watchdog contract and revocation matrix
+
+- **User goal**: document the precise FIFO-versus-liveness contract, add the
+  final watchdog overtaking test and a defensive revocation matrix, and avoid
+  rebuilding unchanged application code.
+- **Completed**:
+  - Documented that same-owner queued starts are strict FIFO until the
+    30-second pre-open watchdog expires. After expiry, liveness takes priority:
+    a later request in the same live generation may pass the stuck request,
+    while owner/global active caps and the late request's return-time
+    authorization checks remain mandatory.
+  - Added a real-open regression proving the later same-generation request
+    reaches `afterResourceOpen` before the stuck request only after the
+    watchdog fires, and that the stuck request may then complete normally
+    without leaking admission state.
+  - Added a pending pre-open handoff revocation matrix for chapter read-nonce
+    replacement, cumulative generation-budget fail-stop, `closeSession`, and
+    `cleanupOwner`. Each case verifies exact token/timer release, a fail-closed
+    late response where applicable, and empty handoff, queue-owner, and
+    active-owner state after completion.
+- **Files**: updated
+  `packages/desktop/test/unit/specs/book-reader.spec.ts`,
+  `docs/RESOURCE_PIPELINE.md`, and this log. No application source, build
+  configuration, or packaged resource changed in this closure.
+- **Verification**:
+  - focused watchdog/overtaking/revocation matrix: **6 passed**;
+  - six-file Reader/resource/lifecycle/carrier cold combination passed three
+    consecutive independent runs, each **277 passed / 1 native-Windows-only
+    skipped**;
+  - complete Desktop unit suite: **76 files / 1327 passed / 1
+    native-Windows-only skipped**;
+  - Desktop typecheck, Prettier check, and `git diff --check` passed;
+  - existing audit receipt re-verification and `hdiutil verify` passed;
+  - existing packaged macOS arm64 exact smoke passed **8/8**;
+  - DMG and ZIP hashes were re-read and remain unchanged.
+- **Candidate artifacts**:
+  - DMG: `dist/leafbook-mac-arm64-0.1.0.dmg`, SHA-256
+    `61e6e70a925933840945e188652bf643f29bde112b137532d6c97ac1a91cc13e`;
+  - ZIP: `dist/leafbook-mac-arm64-0.1.0.zip`, SHA-256
+    `4cb38806cc2c94cc01ba481b1d22e834b1858b211b32cb69fea5ddd38739814b`.
+- **Key decision**: no repackaging was performed because this closure changed
+  only tests and documentation. Rebuilding would create a different
+  nondeterministic carrier hash without changing the audited application
+  runtime; receipt verification and packaged smoke instead reconfirmed the
+  existing candidate.
+- **Unresolved**: this candidate remains unsigned and unnotarized because no
+  Developer ID identity is installed. Native Windows/Linux release evidence,
+  notarization/Gatekeeper checks, protected release controls, and final human
+  approval remain formal-release blockers.
+- **Git**: not committed, tagged, pushed, or released; HEAD remains
+  `e88b3107`.
+
+## 2026-07-30 — Phase 10B2b safe local SVG Reader pipeline
+
+- User goal: extend the Reader's local-image pipeline with safe SVG support,
+  validate it against a representative local book document, and produce a new auditable
+  Apple Silicon installer candidate without committing or releasing.
+- Completed: added a shared SVG/image policy; a strict `saxes` main-process
+  sanitizer with deterministic canonical output, finite geometry/path/
+  transform validation, bounded local fragment references, and fail-closed
+  namespace/URL/script/style/animation handling; integrated sanitized bytes
+  into the existing session capability, one-shot lease, FIFO and generation
+  budgets; and kept rendering limited to revocable Blob URLs on `<img>`.
+- Completed: added malicious-corpus, policy-contract, resource, hydration,
+  lifecycle, and Electron tests. The exact release smoke slice is now nine
+  tests and includes a separate safe/malicious SVG zero-network case.
+- Files: `packages/desktop/src/common/book/imagePolicy.ts`,
+  `packages/desktop/src/common/book/svgPolicy.ts`,
+  `packages/desktop/src/main/book/svgSanitizer.ts`,
+  `packages/desktop/src/main/book/resourceReader.ts`,
+  `packages/desktop/src/main/book/resourceReferences.ts`,
+  `packages/desktop/src/renderer/src/book/hydrateBookImages.ts`,
+  `packages/desktop/src/renderer/src/book/renderMarkdown.ts`, shared DTOs,
+  session integration, unit/Electron tests, release workflow/smoke scripts,
+  `docs/BOOK_READER.md`, `docs/RESOURCE_PIPELINE.md`,
+  `docs/RELEASE_GATE.md`, package manifests, and lockfile.
+- Tests: Desktop typecheck passed; Desktop unit 1360 passed/1 skipped; Muya
+  typecheck passed; Muya unit 1455 passed; lint completed with 0 errors
+  (repository-existing warnings only); production build passed; source smoke
+  9/9 passed; arm64 app/ZIP/DMG and unpacked receipt audits passed; packaged
+  smoke 9/9 passed. The isolated local-book regression copied a matching
+  representative local Markdown document to a private temporary root, rendered a safe SVG,
+  kept a script SVG inert with zero network requests, removed the copy, and
+  left the original unchanged.
+- Artifact: unsigned/unnotarized
+  `dist/leafbook-mac-arm64-0.1.0.dmg`, 159,413,134 bytes, SHA-256
+  `f2a0a6ffb0c9b989dc92057177f65106c520fe52aa8b7a1e1325bbb755ee4082`;
+  ZIP 158,615,018 bytes, SHA-256
+  `faeec5a9bf3ed75b9232fc7e4fa18495175598c45c7576bb730e818f7efc7cec`;
+  audit receipt SHA-256
+  `ca647d94a81a55d6352395fa0b5f63eec077ee67a499fca220967d43282f14bc`.
+- Key decisions: reject all XML entities/DTD/PI and any unknown SVG surface;
+  reject `xml:base`, `xlink`, external/protocol-relative/data/file references,
+  nested/foreign namespaces and over-budget graphs; return only canonical
+  main-validated bytes; never insert raw SVG into the DOM; keep export resource
+  embedding deferred to its own threat model.
+- Unresolved: this local candidate is not a formal release because it is not
+  signed or notarized and native Windows/Linux release evidence remains open.
+  The main bundle still contains Marked's pre-existing HTML attribute
+  `DOMParser` helper; the new SVG sanitizer itself has no DOM dependency and
+  uses only the direct lightweight `saxes` runtime dependency.
+- Git commit: none; no tag, push, or release was created.
+
+## 2026-07-30 — Phase 10B2b third-review security remediation
+
+- User goal: resolve every third-review SVG blocker, establish replayable
+  private-book evidence, rerun the complete gate, and replace the unsigned
+  Apple Silicon candidate without committing or releasing.
+- Completed: moved all SVG numeric magnitudes to `svgPolicy.ts`; rejected
+  non-finite values, exponent overflow and non-zero underflow; added semantic
+  path tracking for absolute/relative endpoints, explicit and reflected
+  smooth-curve controls, and arcs; bounded points, shape geometry, `pathLength`,
+  root/viewBox geometry, transform parameters and every composed matrix result.
+- Completed: rebuilt fragment validation as typed ID-resource graphs. Each ID
+  owns references in its complete subtree; paint, clipping and gradient href
+  targets are type checked; three-color DFS rejects cycles and memoized longest
+  depth rejects reordered and merged-tail over-depth DAGs.
+- Completed: canonical attribute ordering now uses a fixed code-unit comparator.
+  Child processes under three locale settings produced the same canonical
+  SHA-256
+  `b50eed59244101024d05e6024a59401f92d2c472528c1954289adbdd429b4f79`.
+  Renderer response validation is shared per MIME and requires SVG frame count
+  1, exact width×height decode pixels, and SVG-specific byte/dimension/pixel
+  limits.
+- Completed: added explicit duplicate-attribute, XML declaration, CDATA,
+  comment, numeric boundary, relative accumulation, transform composition,
+  arc, impossible DTO, typed-reference, structural-cycle, 41/512-node chain,
+  exact-depth and locale-child-process tests.
+- Real-book evidence: the filename-free replayable production Electron harness
+  ran against a representative local Markdown source and the packaged app. Its
+  content-derived digest, count, and byte size were withheld; the receipt recorded
+  `unchanged=true`, `safeSvg=true`,
+  `maliciousSvgInert=true`, `networkRequests=0`,
+  `temporaryCopyRemoved=true`. No path, filename or content entered the
+  receipt. Two temporary roots retained while developing stricter cleanup were
+  individually owner/marker/type validated and removed.
+- Files: `packages/desktop/src/common/book/svgPolicy.ts`,
+  `packages/desktop/src/common/book/imagePolicy.ts`,
+  `packages/desktop/src/main/book/svgSanitizer.ts`,
+  `packages/desktop/src/renderer/src/book/hydrateBookImages.ts`,
+  `packages/desktop/scripts/svg-canonical-probe.ts`,
+  `packages/desktop/scripts/run-real-book-svg-harness.mjs`,
+  SVG/Renderer/contract/harness/release static tests, package manifest,
+  `docs/BOOK_READER.md`, `docs/RESOURCE_PIPELINE.md`,
+  `docs/REAL_BOOK_RC.md`, `docs/BUILD.md`, and `docs/RELEASE_GATE.md`.
+- Tests: Desktop typecheck passed; Desktop unit 1402 passed/1 skipped; Muya
+  typecheck passed; Muya unit 1455 passed; lint completed with 0 errors and
+  repository-existing warnings only; production build passed; source smoke
+  9/9 passed; final focused release/SVG/harness check 110/110 passed; arm64
+  app/ZIP/DMG and unpacked receipt audits passed; packaged smoke 9/9 passed;
+  packaged real-book SVG harness passed.
+- Artifact: unsigned/unnotarized
+  `dist/leafbook-mac-arm64-0.1.0.dmg`, 159,409,037 bytes, SHA-256
+  `ae0d37038ff14bb83eeef81e1349db15acfbc8a40787e72480dd26232e511249`;
+  ZIP 158,617,949 bytes, SHA-256
+  `b182f9f35e694eb9cfebd0cad6485d04217591d33af87fb297eee5a20f9d894b`;
+  audit receipt SHA-256
+  `162efc4d8ce2c908e5a9aabebeb141729e2fb3f8dd2fa2496c97ae0f3c95d5ec`.
+- Key decisions: canonical output cannot depend on locale; reference depth is
+  the longest resource dependency path, not traversal order; displayed SVG
+  metadata cannot be weaker than its canonical geometry; real-book validation
+  must be replayable without disclosing the source.
+- Unresolved: the candidate remains unsigned and unnotarized; native
+  Windows/Linux release evidence and the documented public-release blockers
+  remain open.
+- Git commit: none; no tag, push, or release was created. HEAD remains
+  `e88b3107`.
+
+### Phase 10B2c final validation addendum
+
+- Final re-review: after updating the candidate-hash contract assertion,
+  Desktop unit reran cleanly at 1418 passed/1 skipped and Desktop typecheck
+  reran cleanly. No application source changed after the recorded package was
+  built and audited.
+- Git commit: none; no tag, push, or release was created.
+
+## 2026-07-31 — Phase 10B2c stable-read and private-snapshot release hardening
+
+- User goal: close the remaining SVG-surface and macOS package TOCTOU review
+  findings, rebuild the unsigned Apple Silicon candidate, and rerun every
+  applicable local release gate without committing or releasing.
+- Completed: reduced SVG to a documented static basic-graphics subset. Removed
+  `text`, `tspan`, `clipPath`, `clip-path`, and their attributes/references.
+  Stroked geometry, including inherited strokes, now reserves four full stroke
+  widths for default miter joins; acute path/polyline/polygon and rectangle
+  regressions enforce the bound.
+- Completed: packaged real-book validation now brackets Electron execution
+  with stable receipt reads, caller-hash checks, full app-tree rebuilds, and
+  exact executable device/inode/mode/link-count/size/mtime/ctime comparison.
+  The non-atomic check-to-kernel-exec interval remains explicitly documented
+  as P3.
+- Completed: macOS receipts now stable-read every regular file and receipt
+  through no-follow descriptors with matching pre/post descriptor and pathname
+  identity and one-link policy. Directory identity and sorted entry sets are
+  snapshotted twice. Version is parsed independently from stable
+  `Info.plist` bytes and architecture from the stable Mach-O header.
+- Completed: local Electron archives are descriptor-stably copied into a
+  random mode-0700 private root and the copied hash/full identity plus
+  caller-bound state are verified before and after builder use. ZIP/DMG
+  carriers are built from an independently receipted private app snapshot,
+  revalidated after generation, and followed automatically by complete
+  app/ZIP/DMG and `hdiutil` audits. Cleanup requires the original canonical
+  root, mode, owner marker, uid, and one-link marker.
+- Completed: added dynamic adversarial coverage for same-size content writes,
+  receipt inode replacement, Electron archive replacement, same-content
+  carrier-app replacement, and a live TOCTOU write race.
+- Files: `packages/desktop/src/common/book/svgPolicy.ts`,
+  `packages/desktop/src/main/book/svgSanitizer.ts`,
+  `packages/desktop/scripts/svg-canonical-probe.ts`,
+  `packages/desktop/scripts/run-real-book-svg-harness.mjs`,
+  `packages/desktop/test/unit/specs/book-svg-sanitizer.spec.ts`,
+  `packages/desktop/test/unit/specs/book-resource-contract.spec.ts`,
+  `packages/desktop/test/unit/specs/package-security-adversarial.spec.ts`,
+  `packages/desktop/test/unit/specs/release-gate-static.spec.ts`,
+  `scripts/mac-audit-receipt.mjs`,
+  `scripts/package-private-snapshot.mjs`,
+  `scripts/package-mac-unsigned-dir.sh`, `docs/BOOK_READER.md`,
+  `docs/RESOURCE_PIPELINE.md`, `docs/REAL_BOOK_RC.md`, `docs/BUILD.md`,
+  `docs/RELEASE_GATE.md`, and `WORKLOG.md`.
+- Tests: Desktop unit 1418 passed/1 skipped; Muya unit 1455 passed; Desktop and
+  Muya type checks passed; lint completed with 0 errors and 134
+  repository-existing warnings; Prettier checks passed for the changed
+  JavaScript/TypeScript/Markdown files; production build passed; source smoke
+  9/9 and packaged smoke 9/9 passed; privacy-safe source and receipt-bound
+  packaged real-book SVG harnesses passed; unpacked app receipt audit passed;
+  private-snapshot ZIP/DMG generation, complete carrier audit, and DMG checksum
+  verification passed.
+- Artifact: unsigned/unnotarized
+  `dist/leafbook-mac-arm64-0.1.0.dmg`, 159,514,904 bytes, SHA-256
+  `a4a8bbe41926b11b07ee1ee6d200aa4108391f989c07e36a9a64debb05cf28d1`;
+  ZIP 158,705,630 bytes, SHA-256
+  `3a69be81e3866524e58a004ca8b09aee0ec4336cc1afb08a17fdf4cfa5e0a2d4`;
+  app-tree audit receipt SHA-256
+  `109042a9689b664c572c4e9b2a4173be6d6cf829836a096513c44e3cc2b331d1`.
+- Key decisions: the formal SVG boundary favors a smaller static subset over
+  rendering breadth; package checks bind content and filesystem identity at
+  every controllable boundary; carrier creation cannot report success before
+  automatic post-generation artifact audits finish.
+- Unresolved: the candidate remains unsigned and unnotarized; Developer ID,
+  hardened runtime, notarization/Gatekeeper, native Windows/Linux release
+  evidence, and the documented instantaneous check-to-exec P3 remain formal
+  release blockers. Historical append-only worklog content was not rewritten.
+- Git commit: none; no tag, push, or release was created. HEAD remains
+  `e88b3107`.
+
+## 2026-07-31 — Phase 10B2b tree-CTM and privacy-contract remediation
+
+- User goal: close the remaining third-review SVG and real-book-harness
+  blockers, rerun the complete local release gate, and replace the unsigned
+  Apple Silicon candidate without committing or releasing.
+- Completed: changed SVG transform parsing to return matrices and added a
+  whole-tree effective-CTM pass. Validation begins with the root
+  viewport/viewBox and default `preserveAspectRatio` mapping, composes every
+  parent-to-child transform, rejects excessive intermediate CTMs before a
+  descendant can cancel them, and checks conservative transformed bounds for
+  shapes, path endpoints, explicit/reflected controls, and arcs.
+- Completed: tightened the real-book harness public schema to explicit
+  source/packaged mode, a random run ID, and fixed booleans only. Source
+  digest, count, byte size, paths, filenames, content, and other
+  manuscript-derived or exact-scale fields are no longer published. Packaged
+  mode now requires an explicit app-tree audit receipt plus caller-supplied
+  receipt hash, rebuilds the receipt-bound app tree, and requires the selected
+  executable to be the exact executable in that package.
+- Completed: unified source snapshot and copy creation, required the copied
+  content manifest to equal the before-manifest, compared stable device/inode/
+  mode/link-count/size/nanosecond-time metadata, and added unified total-entry,
+  per-directory, depth, per-file-byte and total-byte budgets, including a
+  dynamic empty-directory fanout regression.
+- Completed: expanded locale-independence probing to Lithuanian and Latvian
+  locale settings and real `cx`, `cy`, and `clip-path` attributes. Updated the
+  resource, Reader, real-book, build, and release-gate documentation.
+- Packaging: the first network-denied attempt exposed an offline
+  checksum-fetch cache miss. The package entry point now optionally accepts a
+  canonical local Electron archive only after version/architecture filename
+  validation and exact SHA-256 verification against the installed Electron
+  checksum manifest. It also has a carrier mode that verifies the app-tree
+  receipt before building ZIP/DMG from that audited app in the same
+  network-denied sandbox.
+- Files: `packages/desktop/src/main/book/svgSanitizer.ts`,
+  `packages/desktop/scripts/svg-canonical-probe.ts`,
+  `packages/desktop/scripts/run-real-book-svg-harness.mjs`,
+  `packages/desktop/test/unit/specs/book-svg-sanitizer.spec.ts`,
+  `packages/desktop/test/unit/specs/book-real-svg-harness.spec.ts`,
+  `packages/desktop/test/unit/specs/release-gate-static.spec.ts`,
+  `scripts/package-mac-unsigned-dir.sh`, `docs/BOOK_READER.md`,
+  `docs/RESOURCE_PIPELINE.md`, `docs/REAL_BOOK_RC.md`, `docs/BUILD.md`,
+  `docs/RELEASE_GATE.md`, and `WORKLOG.md`.
+- Tests: Desktop unit 1410 passed/1 skipped; Muya unit 1455 passed; Desktop and
+  Muya type checks passed; lint completed with 0 errors and 134
+  repository-existing warnings; production build passed; source smoke 9/9
+  passed; source and receipt-bound packaged real-book SVG harnesses passed;
+  unpacked app audit passed; packaged smoke 9/9 passed; ZIP/DMG carrier audit
+  and DMG checksum verification passed.
+- Artifact: unsigned/unnotarized
+  `dist/leafbook-mac-arm64-0.1.0.dmg`, 159,507,027 bytes, SHA-256
+  `d000f06d212f1cf1f6faed735e8719a38823f68ae4061f38cb636183180d2a6e`;
+  ZIP 158,705,754 bytes, SHA-256
+  `f0f6dcce31c68947054b7574e3a6b048b0665744d6bd9e3b16c668014e99b788`;
+  app-tree audit receipt SHA-256
+  `9195b68dac826ba8b2f5fc4a9594592a00d571a07aabb18f7e4e91a4ca0168dd`.
+- Key decisions: manuscript invariants remain internal booleans; package
+  identity may be publicly hashed but manuscript-derived metadata may not;
+  effective SVG safety is evaluated in viewport coordinates across the full
+  transform tree, not one attribute at a time.
+- Unresolved: earlier append-only worklog entries contain legacy manuscript
+  identifiers and manuscript-derived aggregate metadata. They were not
+  rewritten because targeted historical redaction requires explicit user
+  authorization. The candidate remains unsigned and unnotarized; native
+  Windows/Linux evidence and other documented public-release blockers remain.
+- Git commit: none; no tag, push, or release was created. HEAD remains
+  `e88b3107`.
+
+### Phase 10B2c append-only final confirmation
+
+- The stable-read/private-snapshot candidate remained byte-identical through
+  the final contract rerun. Desktop unit finished at 1418 passed/1 skipped and
+  Desktop typecheck passed.
+- Git commit: none; no tag, push, or release was created.
+
+## 2026-07-31 — Phase 10B2d triple-tree and public-dist binding
+
+- User goal: close the remaining SVG arc, whole-tree race, private-root
+  replacement, and public-carrier binding findings without changing historical
+  worklog records or creating a commit.
+- Completed: removed `A`/`a` elliptical arcs from the accepted SVG path grammar
+  and added explicit absolute/relative rejection tests. Other bounded static
+  path commands remain supported.
+- Completed: receipt construction now performs two complete content,
+  filesystem-identity, symlink-target, and directory-entry-set snapshots and
+  requires their full JSON equality, followed by a third terminal full-tree
+  scan. A deterministic early-target/slow-tail same-size persistent-write race
+  fails closed.
+- Completed: package, unpacked-app, and carrier audits now share an
+  identity-bound private-root helper. Root device, inode, uid, mode, and random
+  token are retained in shell plus a caller-hashed root-external state file.
+  Cleanup rejects a replacement inode even when it copies the old token.
+- Completed: carrier audits operate on private copies so `hdiutil` cannot
+  mutate public artifact metadata. Before copying, the public app/ZIP/DMG
+  receive stable digest and full-identity snapshots; public objects must remain
+  exactly identical afterward, while the audited private app content/identity
+  and carrier digests must equal the public objects. The public app receipt is
+  verified again as the final carrier step.
+- Files: `packages/desktop/src/main/book/svgSanitizer.ts`,
+  `packages/desktop/test/unit/specs/book-svg-sanitizer.spec.ts`,
+  `packages/desktop/test/unit/specs/package-security-adversarial.spec.ts`,
+  `packages/desktop/test/unit/specs/release-gate-static.spec.ts`,
+  `scripts/mac-audit-receipt.mjs`,
+  `scripts/package-private-snapshot.mjs`, `scripts/private-root.sh`,
+  `scripts/package-mac-unsigned-dir.sh`, `scripts/audit-mac-artifact.sh`,
+  `scripts/audit-mac-unpacked.sh`, `docs/BOOK_READER.md`,
+  `docs/RESOURCE_PIPELINE.md`, `docs/BUILD.md`, `docs/REAL_BOOK_RC.md`,
+  `docs/RELEASE_GATE.md`, and `WORKLOG.md`.
+- Tests: Desktop unit 1420 passed/1 skipped; Muya unit 1455 passed; both type
+  checks passed; lint completed with 0 errors and 134 repository-existing
+  warnings; production build passed; source and packaged smoke each passed
+  9/9; privacy-safe real-book source and packaged harnesses passed; unpacked
+  receipt audit passed; two private-copy carrier audits, both with public-dist
+  pre/post binding and `hdiutil` verification, passed. No private-root or
+  root-state residue remained.
+- Artifact: unsigned/unnotarized
+  `dist/leafbook-mac-arm64-0.1.0.dmg`, 159,513,755 bytes, SHA-256
+  `267d14d54d3c5ef9cbcad238ac598a0c6a7418d421cf22f50833bb610f8c0c6c`;
+  ZIP 158,705,748 bytes, SHA-256
+  `0865cdcfa0ad936e1f0cdae1f158a2f0698b204c9076101bc8f91cfe171c0e4a`;
+  app-tree audit receipt SHA-256
+  `42eb75a2bf70d8e37fa91ab4eb07bd9ac9c401b0d73b2dc1afcc0789d3ed8542`.
+- Key decisions: the safer formal SVG subset omits arcs rather than
+  approximating radii correction; whole-tree stability is a global invariant,
+  not a set of local directory checks; auditing a private carrier copy avoids
+  expected `hdiutil` ctime mutation of the public DMG.
+- Unresolved: same-uid instantaneous swap/restore after the terminal scan, the
+  packaged check-to-kernel-exec interval, and private-root check-to-recursive-
+  remove remain documented P3 limits of portable pathname APIs. The candidate
+  is still unsigned and unnotarized; signing, hardened runtime, notarization,
+  Gatekeeper, native Windows/Linux evidence, and other documented external
+  blockers remain.
+- Git commit: none; no tag, push, or release was created. HEAD remains
+  `e88b3107`.
+
+## 2026-07-31 — Phase 10B2d P2 deterministic receipt-test closure
+
+- User goal: close the final P2 test gap without changing packaged runtime
+  behavior, publishing, or rewriting historical privacy-sensitive records.
+- Completed: exported the receipt tree collector as an import-safe module
+  function and added an optional second-argument dependency containing
+  `onSnapshotFile(passIndex, relativePath)`. The callback exists only inside
+  the importing process; the production CLI accepts exactly its documented
+  three arguments, reads no environment hook, and remains behind a direct-
+  execution guard.
+- Completed: replaced the 10 ms early-file mutation timer with an explicit
+  pass-1 callback after `Contents/Resources/AA-target.dat` has been hashed. The
+  callback performs one same-size write, the changed bytes remain until the
+  test ends, and receipt construction deterministically fails on the later
+  complete snapshot.
+- Files: `scripts/mac-audit-receipt.mjs`,
+  `packages/desktop/test/unit/specs/package-security-adversarial.spec.ts`,
+  `docs/BUILD.md`, `docs/RELEASE_GATE.md`, and `WORKLOG.md`.
+- Test-count correction: the preceding 1420-passed result was the valid count
+  before adding the new import-safety/module-only injection test. The current
+  suite is 1421 passed/1 skipped, and that exact result passed in three
+  consecutive full Desktop runs. The targeted adversarial file passed 9/9 in
+  five consecutive runs.
+- Additional verification: Desktop typecheck, selected Prettier check, Node
+  and shell syntax checks, and `git diff --check` passed. The unpacked macOS
+  audit and full app/ZIP/DMG carrier audit passed; packaged smoke passed 9/9;
+  final receipt verification passed. An initial audit wrapper invocation with
+  an extra separator was rejected by usage validation; the documented command
+  was then run successfully.
+- Artifact decision: no Electron main/renderer source or bundle input changed,
+  so the app was not repackaged. Reverification retained the exact previous
+  candidate bytes: DMG SHA-256
+  `267d14d54d3c5ef9cbcad238ac598a0c6a7418d421cf22f50833bb610f8c0c6c`,
+  ZIP SHA-256
+  `0865cdcfa0ad936e1f0cdae1f158a2f0698b204c9076101bc8f91cfe171c0e4a`,
+  and receipt SHA-256
+  `42eb75a2bf70d8e37fa91ab4eb07bd9ac9c401b0d73b2dc1afcc0789d3ed8542`.
+  No private-root state or active packaging/audit temporary root remained.
+- Key decision: deterministic in-process fault injection is a testability
+  interface, not a production CLI feature; there is no environment-variable
+  or hidden command-line path to it.
+- Unresolved: rolling back a partially created private root when the helper
+  itself fails during creation remains a follow-up P3. Existing same-uid
+  pathname-race P3 limits and external signing/notarization/platform blockers
+  are unchanged.
+- Git commit: none; no tag, push, or release was created. HEAD remains
+  `e88b3107`.
+
+## 2026-07-31 — Phase 10B2d stable-read chunk race P2 closure
+
+- User goal: remove the last scheduler-dependent live-race test without adding
+  a timeout or changing packaged runtime behavior.
+- Completed: `stableRegular` now accepts the module-only
+  `onStableReadChunk(passIndex, relativePath, bytesRead)` dependency. The
+  collector awaits it after hashing each chunk and threads it through
+  snapshot/build options. Normal callers pass no dependency, while the
+  production CLI still accepts exactly three documented arguments and exposes
+  no command-line or environment hook. Import remains side-effect-free.
+- Completed: replaced the 48 MiB target, 1 ms interval, repeated synchronous
+  writes, and timer cleanup with one bounded 16 KiB file. Immediately after
+  pass 1 hashes its first chunk, the callback performs one same-size overwrite,
+  calls `fsync`, closes the writer, and leaves the changed bytes in place.
+  Stable descriptor/path identity comparison then deterministically rejects
+  the file during that same hashing operation.
+- Files: `scripts/mac-audit-receipt.mjs`,
+  `packages/desktop/test/unit/specs/package-security-adversarial.spec.ts`,
+  `docs/BUILD.md`, `docs/RELEASE_GATE.md`, and `WORKLOG.md`.
+- Stability-evidence correction: the preceding five-round targeted result is
+  superseded by the final chunk-injection implementation. The adversarial file
+  passed 9/9 in ten consecutive runs. Desktop unit passed 79 files, 1421
+  tests/1 skipped in three consecutive full runs.
+- Additional verification: Desktop typecheck, selected Prettier check, Node
+  and shell syntax checks, explicit removal check for the old interval/48 MiB
+  implementation, and `git diff --check` passed. The unpacked app audit,
+  complete app/ZIP/DMG audit, DMG checksum verification, packaged smoke 9/9,
+  and final receipt verification all passed. No current private-root state or
+  packaging/audit temporary root remained.
+- Artifact decision: only the receipt script, tests, and documentation changed;
+  no Electron main/renderer bundle input changed, so no repack was required.
+  Candidate bytes remain exact: DMG SHA-256
+  `267d14d54d3c5ef9cbcad238ac598a0c6a7418d421cf22f50833bb610f8c0c6c`,
+  ZIP SHA-256
+  `0865cdcfa0ad936e1f0cdae1f158a2f0698b204c9076101bc8f91cfe171c0e4a`,
+  and receipt SHA-256
+  `42eb75a2bf70d8e37fa91ab4eb07bd9ac9c401b0d73b2dc1afcc0789d3ed8542`.
+- Key decision: the fault is injected at an awaited descriptor-read boundary,
+  making the failure causal and repeatable instead of probabilistic.
+- Unresolved: private-root creation-failure rollback remains a follow-up P3.
+  Existing same-uid pathname-race limits and external
+  signing/notarization/platform blockers are unchanged.
+- Git commit: none; no tag, push, or release was created. HEAD remains
+  `e88b3107`.
+
+## 2026-07-31 — Phase 10B2d isolated heavy-test quality gate
+
+- User goal: close the remaining load-sensitive test-quality findings without
+  increasing the global timeout, reducing coverage, repackaging, or committing.
+- Completed: only the SVG child-process locale probe receives a local 30-second
+  timeout. It still executes the real canonical probe under C, en_US, tr_TR,
+  lt_LT, and lv_LV locales and requires one identical hash.
+- Completed: only the PDF inline-theme dynamic-import test receives a local
+  30-second timeout. It records whether `window.marktext` and
+  `window.fileUtils` existed plus both original values, removes them inside a
+  `try`, and restores the exact prior presence/value in `finally`, including
+  when import or assertions fail.
+- Files: `packages/desktop/test/unit/specs/book-svg-sanitizer.spec.ts`,
+  `packages/desktop/test/unit/specs/pdf.spec.ts`, and `WORKLOG.md`. No global
+  Vitest timeout was changed.
+- Isolated tests: the SVG sanitizer file passed 77/77 by itself; the PDF file
+  passed 16/16 by itself.
+- Stability-evidence correction: Desktop unit passed 79 files, 1421 tests/1
+  skipped in three consecutive clean runs with no concurrent heavy audit.
+  It then produced the same result in two further full runs while a complete
+  app/ZIP/DMG artifact audit and DMG checksum verification ran concurrently;
+  both concurrent audits also passed.
+- Additional verification: Desktop typecheck, selected Prettier check, and
+  `git diff --check` passed. Receipt verification and packaged smoke 9/9
+  passed. No private-root state or current audit temporary root remained.
+- Artifact decision: only tests and this append-only log changed, so no repack
+  was required. Candidate bytes remain exact: DMG SHA-256
+  `267d14d54d3c5ef9cbcad238ac598a0c6a7418d421cf22f50833bb610f8c0c6c`,
+  ZIP SHA-256
+  `0865cdcfa0ad936e1f0cdae1f158a2f0698b204c9076101bc8f91cfe171c0e4a`,
+  and receipt SHA-256
+  `42eb75a2bf70d8e37fa91ab4eb07bd9ac9c401b0d73b2dc1afcc0789d3ed8542`.
+- Key decision: accommodate known child-process/dynamic-import startup cost at
+  the individual test boundary while keeping the repository-wide timeout
+  strict and proving isolation under real concurrent artifact load.
+- Unresolved: existing P3 and external release blockers are unchanged.
+- Git commit: none; no tag, push, or release was created. HEAD remains
+  `e88b3107`.
+
+## 2026-07-31 — Phase 10B3 main-owned offline export resources
+
+- User goal: make verified local book images survive both single-file HTML and
+  local-website export without exposing source paths or weakening the Reader
+  resource boundary; validate the result against a representative local book.
+- Completed: added a separate main-process export-resource transaction that
+  rereads exact model-ordered chapter Markdown, extracts only authorized
+  Markdown image tokens, opens resources through the descriptor-pinned
+  raster/SVG pipeline, and retains the authoritative ledger in main. Renderer
+  snapshots contain only document-local ordered opaque targets: verified data
+  URLs for HTML or `assets/<sha256>.<ext>` for websites.
+- Completed: unique sanitized bytes are SHA-256 deduplicated across chapters.
+  Single HTML has a 24 MiB unique-resource budget plus the existing 64 MiB
+  final-HTML limit. Website resources have a separate 32 MiB budget. Both
+  modes cap unique assets, references, decode pixels, and frames. Remote,
+  data, file, absolute, raw-HTML, unsupported, malformed, missing, and
+  over-budget resources fail closed as placeholders without renderer
+  filesystem access.
+- Completed: commit rereads chapters and every accepted resource and requires
+  the exact document order, reference sets, metrics, hashes, targets, and
+  ledger fingerprint. Export IDs remain random and owner/session/generation
+  bound; the two-minute lease is single-use and now revokes its ledger
+  immediately when an expired HTML or website commit is attempted.
+- Completed: website output now uses strict website CSP, no scripts or external
+  resources, one content-addressed file per unique asset, and a canonical
+  schema-2 manifest binding every index/asset path, size, and SHA-256. Main
+  writes assets itself into a private sibling stage, fsyncs files/directories,
+  checks exact entry sets, symlink/hardlink/inode/link-count identities, and
+  atomically renames with pinned backup/rollback behavior. An APFS regression
+  was fixed by pinning the asset-directory link count after its final contents
+  are written.
+- Files: `packages/desktop/src/main/book/exportResources.ts`,
+  `packages/desktop/src/main/book/sessionManager.ts`,
+  `packages/desktop/src/common/book/exportPolicy.ts`,
+  `packages/desktop/src/common/book/websitePolicy.ts`,
+  `packages/desktop/src/renderer/src/book/exportBookHtml.ts`,
+  `packages/desktop/src/shared/types/bookReader.ts`, the corresponding export,
+  Reader, website-policy, real-book, release-gate, and Electron E2E tests,
+  `packages/desktop/scripts/run-real-book-svg-harness.mjs`,
+  `scripts/smoke-mac-unpacked.sh`, release workflow, Reader/resource/build/RC/
+  release-gate documentation, and this log.
+- Tests: full Desktop unit passed 80 files, 1432 tests/1 skipped before the
+  final lease-expiry regressions; the final focused Reader/harness run passed
+  178/178 including both new expiry cases. Desktop typecheck and production
+  build passed. Full source smoke selected exactly 10 tests in 3 files and
+  passed 10/10, including the new embedded-data/hashed-website-asset case.
+  Full lint passed with 0 errors and 136 inherited warnings; `git diff --check`
+  passed.
+- Real-book evidence: the privacy-safe isolated harness passed against the
+  representative local Markdown source. It verified the original source snapshot remained
+  unchanged, safe SVG rendering, malicious SVG inertness, single-HTML resource
+  embedding, website asset/manifest binding, zero network requests, and
+  validated temporary-copy cleanup. Its public receipt contained only
+  aggregate booleans and a random run ID.
+- Key decisions: export is deliberately not Reader's one-shot resource lease;
+  renderer asset bytes/source references are never authoritative. SVG remains
+  an `<img>` resource only. The real-book harness validates the exported bytes
+  and manifest; browser loading/decoding of the website output stays in the
+  dedicated bounded Electron E2E because a hidden window can indefinitely
+  defer a lazy image at the end of a long real manuscript.
+- Unresolved: the existing DMG/ZIP/receipt candidate predates these
+  main/renderer changes and must be rebuilt and re-audited before it can be
+  treated as evidence. External signing/notarization and real Windows/Linux
+  runtime blockers remain unchanged.
+- Git commit: none; no tag, push, or release was created. HEAD remains
+  `e88b3107`.
+
+### Phase 10B3 final validation addendum
+
+- After the expiry regressions and lint-only formatting fixes, the complete
+  Desktop unit suite reran at 80 files, 1432 passed/1 skipped. Typecheck,
+  production build, and `git diff --check` reran successfully.
+- No commit, tag, package, push, or release was created by this validation.
+
+### Phase 10B3 unsigned arm64 candidate addendum
+
+- The approved network-denied package entry initially failed honestly when
+  electron-builder attempted to resolve a missing cache entry. The canonical
+  local Electron 42.1.0 arm64 archive was then supplied explicitly; the
+  package script matched its filename and SHA-256 against Electron's installed
+  `checksums.json`, copied it descriptor-stably into a random private root,
+  verified it before and after use, and removed that root.
+- The first packaged smoke run passed 9/10 and exposed a test timing defect:
+  the hidden validation window inspected website images before Chromium
+  scheduled their `loading="lazy"` fetch. The E2E now explicitly switches the
+  two exported images to eager loading, scrolls them into view, and awaits
+  `decode()` before inspecting dimensions. The focused source E2E passed, and
+  the complete app, receipt, ZIP, and DMG were rebuilt after this correction.
+- Final candidate evidence: unpacked audit passed with a 416,759,808-byte app
+  and 175,374,867-byte ASAR. The private-snapshot carrier flow and a separate
+  public-dist audit both proved app/ZIP/DMG topology and content equivalence;
+  `hdiutil verify` passed both inside the carrier audit and independently.
+  Packaged smoke selected exactly 10 tests in 3 files and passed 10/10.
+- The receipt-bound packaged representative-book schema-2 harness passed with unchanged
+  source and package snapshots, safe SVG rendering, malicious SVG inertness,
+  offline HTML resources, complete website manifest binding, zero network
+  requests, and verified temporary-copy cleanup.
+- Candidate files: DMG 159,542,114 bytes, SHA-256
+  `c584a90bc7b654ac5b937866ce90d2573a47408d848ec6411b982dd2586a2aad`;
+  ZIP 158,716,365 bytes, SHA-256
+  `328226d481bf4942f8e71404ecba4b97fd2b139500e5cbffc4cdc41924f57742`;
+  receipt 38,329 bytes, SHA-256
+  `ec2b95f09eaaa1a8b16d77429c887b89dded43c9b471390df3ee2fb2cb53f9b3`.
+- Three exact mode-0700 harness roots left by earlier manually interrupted
+  diagnostic runs were individually validated under the canonical temporary
+  parent with current ownership and single-link 32-byte owner markers, then
+  removed. Final checks found no package state file and no current package,
+  harness, or platform-audit temporary root.
+- The candidate is explicitly unsigned and unnotarized. Signing,
+  notarization/Gatekeeper, and real Windows/Linux runtime evidence remain
+  release blockers.
+- Git commit: none; no tag, push, or release was created. HEAD remains
+  `e88b3107`.
+
+### Phase 10B3 third-review hardening and replacement candidate
+
+- User goal: continue under orchestration until LeafBook reaches a formal
+  release-quality threshold, while keeping publication and irreversible
+  release actions gated.
+- Completed: export leases now have identity-bound active TTL timers and are
+  pruned before admission. Revocation aborts and removes the lease, clears the
+  timer, closes the pinned parent descriptor, zeroes retained asset buffers,
+  and releases all ledger state. Exact recorded temp/stage identities permit
+  safe cancellation cleanup after those capabilities have been released.
+- Completed: export resource ledgers now retain private root/ancestor/file
+  identities plus raw SHA-256 and byte length, enforce a 32 MiB unique raw-byte
+  budget, and synchronously reopen, bound-read, EOF-check, hash, and revalidate
+  every raw source immediately adjacent to HTML or website rename.
+- Completed: the shared Markdown occurrence plan authorizes only the first 256
+  supported image occurrences and preserves duplicates and document order.
+  Final HTML validation requires the exact issued image sequence and count,
+  including null placeholders. Image tags receive a bounded 8 MiB token limit;
+  all other tags remain capped at 64 KiB.
+- Completed: the schema-2 website manifest requires each asset basename hash
+  to equal its declared SHA-256. The ownership inspector uses bounded directory
+  iteration, rejects undeclared or unused files, enforces 8 MiB per-asset and
+  32 MiB aggregate budgets before content reads, and verifies the exact index
+  image sequence. Raw resource snapshots remain private and non-enumerable at
+  the low-level Reader result boundary.
+- Files: `packages/desktop/src/main/book/resourceReader.ts`,
+  `packages/desktop/src/main/book/resourceReferences.ts`,
+  `packages/desktop/src/main/book/exportResources.ts`,
+  `packages/desktop/src/main/book/sessionManager.ts`,
+  `packages/desktop/src/common/book/exportPolicy.ts`,
+  `packages/desktop/src/common/book/websitePolicy.ts`, their focused unit tests,
+  `docs/BOOK_WEBSITE.md`, `docs/RESOURCE_PIPELINE.md`,
+  `docs/RELEASE_GATE.md`, the static release-gate test, and this log.
+- Tests: lint passed with 0 errors and 134 inherited warnings; Desktop
+  typecheck passed; Desktop unit passed 80 files with 1,435 tests and one
+  platform skip; Muya typecheck and 214-file/1,455-test suite passed;
+  production build passed; source and packaged release-smoke each selected the
+  exact ten tests and passed 10/10. The packaged privacy-safe local-book
+  schema-2 harness passed with unchanged source/package snapshots, safe SVG,
+  inert malicious SVG, offline export resources, bound website manifest, zero
+  network requests, and verified cleanup. `git diff --check` passed.
+- Candidate: the network-denied arm64 build used the locally checksum-verified
+  Electron 42.1.0 archive. Unpacked audit passed with a 417,611,776-byte app
+  and 175,388,332-byte ASAR. Private-snapshot and independent public-dist
+  carrier audits plus independent `hdiutil verify` passed. DMG: 159,516,647
+  bytes, SHA-256
+  `55f6db52b432c8050e058fd697f56f6bf991c2ccffe7828174574d41a2d0dc57`;
+  ZIP: 158,718,874 bytes, SHA-256
+  `6caf12afcd89b803b08791db7f208cefe2d32f2932d710227c60ad9054210586`;
+  receipt: 38,329 bytes, SHA-256
+  `e2869ace7656a48db2de0e0cb9cbfa3f934812cdea71784df1bfcb840c8501e8`.
+- Key decisions: the earlier Phase 10B3 artifact is retained only as previous
+  evidence; the new bytes are the current local candidate. Neither artifact is
+  a formal release because signing, notarization/Gatekeeper, and real native
+  Windows/Linux runtime evidence remain unresolved blockers.
+- Git commit: none; no tag, push, signing, notarization, publication, or GitHub
+  Release was created. HEAD remains `e88b3107`.
+
+### Phase 10B3 final-third-review resource/export correction
+
+- User goal: address the remaining Phase 10B3 review findings without a commit
+  or release, then rebuild and independently validate a replacement local
+  candidate.
+- Completed: renderer snapshot targets are now unique and aligned with the
+  first-occurrence order of Reader `image-N` slots. Main retains a separate
+  occurrence-expanded sequence, so `[A,A,B]` renders and validates as A, A, B
+  while `[missing,missing,B]` renders two exact managed placeholders followed
+  by B. Unsupported and raw-HTML placeholders remain outside that contract.
+- Completed: HTML preparation rejects more than 48 MiB of occurrence-expanded
+  data-URL characters before the snapshot crosses IPC. Tests cover a shared
+  maximum-size URL repeated 256 times, the exact boundary, and one character
+  over it. The calculated image-token bound now independently includes the
+  maximum 6 MiB asset's base64 source, bounded attribute overhead, and explicit
+  4 KiB `alt` and `title` limits; non-image tags retain the 64 KiB token cap.
+- Completed: export leases now use an in-flight reference. Cancel or active TTL
+  expiry immediately aborts and removes admission, but a running commit retains
+  its pinned parent descriptor and ledger until its operation `finally`; the
+  last reference then closes the descriptor, zeroes bytes, and disposes the
+  ledger. Rebuilt validation ledgers and every post-build begin failure path
+  dispose explicitly.
+- Completed: website staging now journals the root identity immediately, the
+  assets-directory identity at creation, and every exclusive file identity
+  before content awaits. Exact journal cleanup handles cancellation after the
+  first asset, cancellation after a middle asset, and active TTL expiry with no
+  stage residue, even before a manifest exists. Unknown or changed entries are
+  left untouched.
+- Files: `packages/desktop/src/main/book/exportResources.ts`,
+  `packages/desktop/src/main/book/sessionManager.ts`,
+  `packages/desktop/src/common/book/exportPolicy.ts`,
+  `packages/desktop/src/renderer/src/book/exportBookHtml.ts`, focused export,
+  Reader, website and release-static tests, `docs/BOOK_WEBSITE.md`,
+  `docs/RESOURCE_PIPELINE.md`, `docs/RELEASE_GATE.md`, and this log.
+- Tests: focused export/Reader/website tests passed 208/208. Full Desktop unit
+  passed 80 files with 1,448 tests and one platform skip. Full Muya passed 214
+  files/1,455 tests. Desktop and Muya typechecks, production build, lint with
+  zero errors/134 inherited warnings, source smoke 10/10, packaged smoke 10/10,
+  and `git diff --check` passed. The packaged local-book schema-2 harness passed
+  with unchanged source/package snapshots, safe SVG, inert malicious SVG,
+  offline resources, a bound manifest, zero network requests, and verified
+  cleanup.
+- Candidate: the network-denied arm64 build used the locally checksum-verified
+  Electron 42.1.0 archive. Unpacked audit passed with a 418,086,912-byte app
+  and 175,409,638-byte ASAR. Private-snapshot and independent public-dist
+  carrier audits plus independent `hdiutil verify` passed. DMG: 159,524,027
+  bytes, SHA-256
+  `fd5755d326706936f27de4f413112ead4e03c2987f26c1fe40544b3375963e7c`;
+  ZIP: 158,722,387 bytes, SHA-256
+  `25e84eb7dbdd7dd72ac195edea64b99783fd0214bdb06f0c42afef94eaa2b086`;
+  receipt: 38,329 bytes, SHA-256
+  `0688ff8da2cefbf24da0a93cc5f3930ae79c9672ea9dcb3bf06575c5f1e26a12`.
+- Key decision: the preceding candidate is now previous evidence and the new
+  bytes are the sole current local candidate. It remains unsigned and
+  unnotarized; signing/Gatekeeper and real Windows/Linux runtime evidence still
+  block a formal public release.
+- Git commit: none; no tag, push, signing, notarization, publication, or GitHub
+  Release was created. HEAD remains `e88b3107`.
+
+### 2026-07-31 Phase 10B3 staging-journal finalization
+
+- User goal: continue the formal-release hardening under orchestration and
+  replace the local candidate after the final defensive export review.
+- Completed: bounded directory enumeration now invalidates its result if the
+  directory descriptor cannot be closed and continues to reject a maximum+1
+  entry. Website staging records each exclusively created file and the assets
+  directory synchronously before the next asynchronous yield, so early stat,
+  write, cancellation, TTL, or other exceptions remain covered by exact
+  identity-bound cleanup.
+- Files: `packages/desktop/src/main/book/sessionManager.ts`,
+  `docs/RELEASE_GATE.md`, the release-gate static test, and this log.
+- Tests: focused export/Reader/release tests passed 241/241; Desktop unit passed
+  80 files with 1,448 tests and one platform skip; Desktop typecheck passed;
+  Muya typecheck and its 214-file/1,455-test suite passed; the production build
+  and focused ESLint passed; source and packaged smoke each selected exactly
+  ten tests and passed 10/10; `git diff --check` passed.
+- Packaging: the arm64 app was rebuilt with Electron 42.1.0 from its locally
+  checksum-verified archive under the network-denied sandbox. Unpacked audit
+  passed with a 416,985,088-byte app and 175,410,566-byte ASAR. Private carrier
+  and independent public-dist audits plus independent `hdiutil verify` passed.
+  The packaged local-book schema-2 harness passed with unchanged source and
+  package trees, safe SVG, inert malicious SVG, offline exports, bound website
+  manifest, zero network requests, and verified temporary-copy cleanup.
+- Candidate: DMG 159,524,354 bytes, SHA-256
+  `f21caea117a0ae6f5e12214f0174c5f97ed9d3e46f9aeb498a517b7a6083c99f`;
+  ZIP 158,721,122 bytes, SHA-256
+  `667989e14eb892ec92ee866b3490358914fc79768da413a6c926914e543cc13c`;
+  receipt 38,329 bytes, SHA-256
+  `2c76e008dc7307c8f1947f5c5d03762d7d56302b48e6b3bebd44447dfe2c9d5d`.
+- Key decision: the immediately preceding final-third-review bytes are retained
+  only as previous evidence. This replacement is the sole current local
+  candidate and remains unsigned and unnotarized; Apple signing/notarization,
+  Gatekeeper download validation, and real Windows/Linux runtime evidence
+  remain formal public-release blockers.
+- Git commit: none; no tag, push, signing, notarization, publication, or GitHub
+  Release was created. HEAD remains `e88b3107`.
+
+### 2026-07-31 Phase 10B3 final negative-source and lease-boundary hardening
+
+- User goal: close the final two export-review findings without committing or
+  publishing, then rebuild and verify a replacement local candidate.
+- Completed: every supported unique export reference now carries a source
+  state. Successful resources retain their descriptor-stable positive raw
+  snapshot. Missing, too-large, type-mismatched, symlinked, multiply-linked,
+  or otherwise invalid resources retain an exact negative snapshot of the root
+  and observed path chain, including type, identity, link count, timestamps,
+  canonical path, symlink text, and bounded stable raw hash when applicable.
+  Unverifiable permission or I/O states fail preparation instead of producing
+  an unbound placeholder.
+- Completed: async rebuilt-ledger fingerprints and final synchronous checks
+  include those negative states. Missing-to-created, changed corrupt bytes,
+  corrupt-to-valid, and symlink-to-regular transitions fail with the existing
+  source-changed error class; an unchanged negative state remains allowed.
+  HTML and website commits recheck lease time, token, owner, session, and
+  generation immediately after final synchronous source/resource validation
+  and before rename without an async yield. Website cancellation cleans the
+  exact staged tree; replacement rollback preserves the old target.
+- Files: `packages/desktop/src/main/book/exportResources.ts`,
+  `packages/desktop/src/main/book/sessionManager.ts`, focused resource/Reader
+  tests, `docs/RESOURCE_PIPELINE.md`, `docs/BOOK_WEBSITE.md`,
+  `docs/RELEASE_GATE.md`, the release-gate static test, and this log.
+- Tests: focused negative-state, export, Reader, and policy tests passed. Full
+  Desktop unit passed 80 files with 1,457 tests and one platform skip. Full
+  Muya passed 214 files/1,455 tests. Desktop and Muya typechecks, production
+  build, lint with zero errors/134 inherited warnings, source smoke 10/10,
+  packaged smoke 10/10, release-static tests, and `git diff --check` passed.
+- Packaging: the arm64 app was rebuilt with Electron 42.1.0 from the locally
+  checksum-verified archive inside the network-denied sandbox. Unpacked audit
+  passed with a 416,403,456-byte app and 175,429,518-byte ASAR. Private carrier
+  and independent public-dist audits plus independent `hdiutil verify` passed.
+  The packaged local-book schema-2 harness passed with unchanged source and
+  package trees, safe SVG, inert malicious SVG, offline exports, bound website
+  manifest, zero network requests, and verified temporary-copy cleanup.
+- Candidate: DMG 159,526,128 bytes, SHA-256
+  `9edf73bad24bab7243a05b8887a0181409cb5c2fb6208110f12892f0a2be654d`;
+  ZIP 158,723,947 bytes, SHA-256
+  `de24a3a644e420269215bed91d3eacb663b044f689038b19dfc0eebb94a74923`;
+  receipt 38,329 bytes, SHA-256
+  `56a19194fee52a3791f4de81135a359247b797039beed451e84b0358de138cc8`.
+- Key decision: the staging-journal-final bytes are now previous evidence.
+  This replacement is the sole current local candidate and remains unsigned
+  and unnotarized; Apple signing/notarization, Gatekeeper download validation,
+  and real Windows/Linux runtime evidence remain public-release blockers.
+- Git commit: none; no tag, push, signing, notarization, publication, or GitHub
+  Release was created. HEAD remains `e88b3107`.
+
+### 2026-07-31 Phase 10B3 physical-source budget and rollback finalization
+
+- User goal: continue formal-release hardening under orchestration, close the
+  final physical-source accounting, rollback, and error-classification review
+  findings, and produce a replacement local candidate without publishing it.
+- Completed: positive resources and readable invalid regular sources now share
+  one 32 MiB physical-source ledger. Device/inode plus exact metadata
+  deduplicates hard-link aliases, so each physical file is opened and hashed at
+  most once per validation pass; directory and symlink negative states require
+  no content read. Final synchronous validation uses the same proof cache.
+- Completed: budget exhaustion uses the explicit `budget` error code and maps
+  to too-large; I/O, unstable identity, or unverifiable proof capture uses
+  `source-unverifiable` and maps to source-changed. Five distinct 8 MiB corrupt
+  files fail the aggregate budget, while 2,048 aliases of one inode stay
+  bounded.
+- Completed: replacement rollback after target-to-backup rename is authorized
+  by operation/owner/session identity, destination parent, absent target, and
+  exact stage/backup identities, intentionally excluding source freshness.
+  Missing-to-valid, corrupt-to-valid, and Markdown source changes abort with
+  `website-source-changed`, `committed: false`, restore the prior website, and
+  leave no known stage or backup.
+- Files: `packages/desktop/src/main/book/exportResources.ts`,
+  `packages/desktop/src/main/book/sessionManager.ts`, focused resource/Reader
+  and release-static tests, `docs/RESOURCE_PIPELINE.md`,
+  `docs/BOOK_WEBSITE.md`, `docs/RELEASE_GATE.md`, and this log.
+- Tests: focused resource/Reader tests passed 208/208; Desktop unit passed 80
+  files with 1,464 tests and one platform skip; Muya passed 214 files/1,455
+  tests. Desktop and Muya typechecks, production build, lint with zero errors
+  and 134 inherited warnings, source and packaged smoke 10/10, release-static
+  35/35, and `git diff --check` passed. The receipt-bound packaged local-book
+  schema-2 harness passed with unchanged source/package trees, safe SVG, inert
+  malicious SVG, offline exports, a bound manifest, zero network requests, and
+  verified temporary-copy cleanup.
+- Packaging: the arm64 app was rebuilt with Electron 42.1.0 from its locally
+  checksum-verified archive under the network-denied packaging policy. Unpacked
+  audit passed with a 416,960,512-byte app and 175,438,674-byte ASAR. Private and
+  independent public carrier audits plus independent `hdiutil verify` passed.
+- Candidate: DMG 159,522,764 bytes, SHA-256
+  `ed6bfc37b2fa8514d6c566b9bab307810d20e86c51fb4e53c796d71898f8ce56`;
+  ZIP 158,725,144 bytes, SHA-256
+  `6bc89caed789810cbf4513a4aa04dcd27bde3349aacf7a58ac801c15c3dffbb3`;
+  receipt 38,329 bytes, SHA-256
+  `c49e9e8e9ad42f5d474cbd468a35485b21f82195b994a1d5aecf312c536cb592`.
+- Key decision: the negative-source-state-final bytes are retained only as
+  previous evidence. This replacement is the sole current local candidate and
+  remains unsigned and unnotarized; Apple signing/notarization, Gatekeeper
+  download validation, and real Windows/Linux runtime evidence remain formal
+  public-release blockers.
+- Git commit: none; no tag, push, signing, notarization, publication, or GitHub
+  Release was created. HEAD remains `e88b3107`.
+
+### 2026-07-31 Phase 10B3 private Prepare draft recovery finalization
+
+- User goal: continue formal-release hardening under orchestration by making
+  Prepare-book edits crash-safe and explicitly recoverable, then rebuild and
+  verify a replacement local candidate without publishing it.
+- Completed: Prepare rename, order, remove, and add-back operations now use one
+  main-process canonical chapter model and persist through typed, generation-
+  scoped IPC. Renames are debounced and flushed before close or commit. A
+  restart never restores silently: the matching book shows Restore/Discard;
+  stale, invalid, or mismatched drafts can only be discarded. Closing or
+  cancelling keeps a recoverable draft, explicit discard deletes it, and a
+  successful SUMMARY commit deletes it only after the source, target, and
+  directory durability checks complete.
+- Completed: the user-data draft store uses a private 0700 directory, a random
+  0600 HMAC key, HMAC-derived per-book filenames, 0600 single-link files,
+  bounded schema/checksum validation, descriptor-stable no-follow reads,
+  monotonic nonces, exclusive temporary files, file and directory fsync, and
+  atomic rename. Corrupt, truncated, old-schema, oversized, public-mode,
+  symlink, hardlink, replaced-root, and changed-source states fail closed.
+  Startup cleanup is limited to exact known private temporary-file identities.
+  Draft data contains only relative source structure and base identities—no
+  Markdown body, absolute source path, or book name is written to public logs.
+- Completed: added bilingual accessible recovery and chapter-edit controls,
+  multi-book/crash/concurrency/durability/privacy tests, an eleventh packaged
+  smoke scenario, and real-book harness checks for private storage and HMAC
+  isolation. Updated Prepare, build, real-book, workflow, and release-gate
+  documentation without rewriting historical candidate evidence.
+- Files: `packages/desktop/src/main/book/preparationDraftStore.ts`, preparation
+  manager/session/IPC/preload/shared types, renderer book store and Prepare UI,
+  focused unit/E2E/static tests, `packages/desktop/scripts/run-real-book-svg-harness.mjs`,
+  `scripts/smoke-mac-unpacked.sh`, `.github/workflows/release.yml`,
+  `docs/PREPARE_BOOK.md`, `docs/BUILD.md`, `docs/REAL_BOOK_RC.md`,
+  `docs/RELEASE_GATE.md`, and this log.
+- Tests: lint passed with zero errors and 134 inherited warnings. Desktop unit
+  passed 81 files with 1,478 tests and one platform skip; Muya passed 214
+  files/1,455 tests. Desktop typecheck, production build, source smoke 11/11,
+  packaged smoke 11/11, focused final tests 84/84, and `git diff --check`
+  passed. Source and receipt-bound packaged schema-2 runs against a
+  representative local book both passed with unchanged source/package trees, private draft
+  isolation, safe SVG, inert malicious SVG, offline exports, a bound website
+  manifest, zero network requests, and verified temporary-copy cleanup.
+- Packaging: the arm64 app was rebuilt with Electron 42.1.0 from its locally
+  checksum-verified archive under the network-denied packaging policy. Unpacked
+  audit passed with a 417,521,664-byte app and 175,502,522-byte ASAR. Private and
+  independent public carrier audits plus independent `hdiutil verify` passed.
+- Candidate: DMG 159,541,029 bytes, SHA-256
+  `29d71bd6a8f531fb44593d6d76b351ea4fa704188a04c3c866fb609230bf7227`;
+  ZIP 158,738,577 bytes, SHA-256
+  `202e6af585c725710387cd11da90db829bc5126d346d5c66cbb5065c3a3eeebc`;
+  receipt 38,329 bytes, SHA-256
+  `7142eab68de12ff6fb988242973a5a709652459f1a485e332f3768b896c565ab`.
+- Key decision: the physical-source-budget-and-rollback-final bytes are
+  retained only as previous evidence. This replacement is the sole current
+  local candidate and remains unsigned and unnotarized; Apple signing,
+  notarization, Gatekeeper download validation, and real Windows/Linux runtime
+  evidence remain formal public-release blockers.
+- Git commit: none; no tag, push, signing, notarization, publication, or GitHub
+  Release was created. HEAD remains `e88b3107`.
+
+### 2026-07-31 Phase 10B3 Prepare concurrency review remediation
+
+- User goal: remediate the blocking third-review findings in Prepare draft
+  debounce, recovery/discard concurrency, and nonce handling; fully reverify
+  and replace the local candidate without committing or publishing.
+- Completed: renderer title debounce is now an ordered map keyed by chapter ID,
+  so rapid edits to different chapters cannot overwrite one another while the
+  latest edit to the same chapter is coalesced. Rename batches serialize
+  through one drain promise; move/remove/add-back, Create, and Close wait for
+  every queued or already-running title write before continuing.
+- Completed: restore and discard capture their initial generation, prepared
+  object, recovery object/token, file identity, draft ID, and nonce. Every
+  asynchronous boundary revalidates those bindings, and the current private
+  file must exactly match the initially discovered identity plus draft ID and
+  nonce. A second window's newer replacement can therefore neither be restored
+  through an old token nor deleted by it. Select, close, discard, replacement,
+  or lease revocation during a deferred read returns a typed stale result.
+- Completed: draft operations now accept only the exact next nonce and reject
+  gaps, replays, and `Number.MAX_SAFE_INTEGER`; persisted schema validation
+  applies the same upper bound. Added deferred-read multi-manager regressions
+  for n1/n2 replacement, restore/select, restore/close, restore/discard, and
+  discard/close, plus rapid A/B rename, rename/move, and Create/Close flush.
+- Documentation: `docs/PREPARE_BOOK.md` records Node's lack of directory-
+  descriptor-relative `unlinkat` as a P3 same-user race boundary and the exact
+  no-yield identity checks that narrow it.
+- Files: `packages/desktop/src/renderer/src/store/books.ts`,
+  `packages/desktop/src/main/book/preparationManager.ts`,
+  `packages/desktop/src/main/book/preparationDraftStore.ts`, Prepare draft and
+  renderer-store tests, `docs/PREPARE_BOOK.md`, `docs/RELEASE_GATE.md`, the
+  release-gate static test, and this log.
+- Tests: focused Prepare tests passed 52/52. Desktop unit passed 81 files with
+  1,481 tests and one platform skip; Muya passed 214 files/1,455 tests. Lint
+  passed with zero errors and 134 inherited warnings. Desktop typecheck,
+  production build, source and packaged smoke 11/11, release-static tests, and
+  `git diff --check` passed. Source and receipt-bound packaged schema-2 runs
+  against a representative local book passed with unchanged source/package trees,
+  private draft isolation, safe SVG, inert malicious SVG, offline exports, a
+  bound website manifest, zero network requests, and temporary-copy cleanup.
+- Packaging: the arm64 app was rebuilt with Electron 42.1.0 from its locally
+  checksum-verified archive under the network-denied packaging policy. Unpacked
+  audit passed with a 417,046,528-byte app and 175,516,939-byte ASAR. Private
+  and independent public carrier audits plus independent `hdiutil verify`
+  passed.
+- Candidate: DMG 159,545,630 bytes, SHA-256
+  `e0ab227ee8d61f8ede30f89f0cab26d833762e37615feba453e97626d54d8e76`;
+  ZIP 158,740,540 bytes, SHA-256
+  `516c79ab5b4518d3cb05c05735e05c0a9c91adf13fd29c2d24fdb049ba0b3c0b`;
+  receipt 38,329 bytes, SHA-256
+  `facf3be0844838f90f0b9b3d3e0f81cc6bf8ac84121f60d0ca8454a62f714925`.
+- Key decision: the preparation-draft-recovery-final bytes are retained only
+  as previous evidence. This replacement is the sole current local candidate
+  and remains unsigned and unnotarized; Apple signing/notarization, Gatekeeper
+  download validation, and real Windows/Linux runtime evidence remain formal
+  public-release blockers.
+- Git commit: none; no tag, push, signing, notarization, publication, or GitHub
+  Release was created. HEAD remains `e88b3107`.
+
+### 2026-07-31 Phase 10B3 Prepare flush-failure gate remediation
+
+- User goal: fix the second quality-review P1 where a failed debounced rename
+  could be silently skipped while later edits or Create/Close continued, then
+  rerun every release gate and replace the local candidate without publishing.
+- Completed: the renderer rename drain and flush now return explicit success.
+  The ordered chapter map removes an entry only after its main-process write
+  succeeds. The first failure stops the drain and preserves both the failed
+  coalesced title and every later chapter entry; no later success can clear the
+  original error in the same drain.
+- Completed: move, remove, add-back, current-draft discard, Create, and Close
+  all treat a failed rename flush as a hard gate. They send no subsequent IPC,
+  keep the preparation open, retain the visible error, and leave the queue
+  available for an explicit later retry. A timer firing while another Prepare
+  request is busy likewise retains its rename for the next flush.
+- Tests: added failure injection for two queued chapter renames with the first
+  failing, retry order/nonces, rename-before-move, rename-before-remove,
+  rename-before-Create, rename-before-Close, and timer/busy recovery. Focused
+  Prepare tests passed 58/58. Desktop unit passed 81 files with 1,487 tests and
+  one platform skip; Muya passed 214 files/1,455 tests. Lint passed with zero
+  errors and 134 inherited warnings. Desktop typecheck, production build,
+  source and packaged smoke 11/11, release-static tests, and `git diff --check`
+  passed. Source and receipt-bound packaged schema-2 runs against the local
+  representative local book passed with unchanged source/package trees, private draft
+  isolation, safe SVG, inert malicious SVG, offline exports, a bound website
+  manifest, zero network requests, and temporary-copy cleanup.
+- Files: `packages/desktop/src/renderer/src/store/books.ts`, its Prepare store
+  regression tests, `docs/PREPARE_BOOK.md`, `docs/RELEASE_GATE.md`, the
+  release-gate static test, and this log.
+- Packaging: the arm64 app was rebuilt with Electron 42.1.0 from its locally
+  checksum-verified archive under the network-denied packaging policy. Unpacked
+  audit passed with a 416,792,576-byte app and 175,522,905-byte ASAR. Private
+  and independent public carrier audits plus independent `hdiutil verify`
+  passed.
+- Candidate: DMG 159,542,555 bytes, SHA-256
+  `45a19a624f914f7d7135bc19a19833fd3f56e350083ab7127723d13f7e4e088c`;
+  ZIP 158,739,320 bytes, SHA-256
+  `f42dd17a240cfce1887b9ce183bbd31d0495b0f59ad2726a537fd4d3f973b7f6`;
+  receipt 38,329 bytes, SHA-256
+  `d3ee774d717f437b31d14476d54861b2a7d88121e98e6a5065ba9ec4009ec19b`.
+- Key decision: the preparation-concurrency-final bytes are retained only as
+  previous evidence. This replacement is the sole current local candidate and
+  remains unsigned and unnotarized; Apple signing/notarization, Gatekeeper
+  download validation, and real Windows/Linux runtime evidence remain formal
+  public-release blockers.
+- Git commit: none; no tag, push, signing, notarization, publication, or GitHub
+  Release was created. HEAD remains `e88b3107`.
+
+### 2026-07-31 Phase 10B3 Prepare navigation gate finalization
+
+- User goal: complete the flush-failure remediation and ensure every caller of
+  Prepare Close honors that failure before leaving the preparation workspace,
+  then regenerate and verify the final local candidate without publishing.
+- Completed: `closePreparation` now returns its flush result. Bookshelf, folder
+  picker, library switching, refresh, edit, and editor transition callers stop
+  immediately when a pending rename cannot be persisted. Picker/library flows
+  clear prior messages only after a successful close, so the draft-write error
+  remains visible and the preparation stays open.
+- Tests: Prepare store tests passed 33/33 and the full focused Prepare suite
+  remained 58/58. Desktop unit passed 81 files with 1,487 tests and one
+  platform skip; Muya passed 214 files/1,455 tests. Lint passed with zero errors
+  and 134 inherited warnings. Desktop typecheck, production build, source and
+  packaged smoke 11/11, final release-static/focused tests, and
+  `git diff --check` passed. Source and receipt-bound packaged schema-2 runs
+  against a representative local book passed with unchanged source/package trees,
+  private draft isolation, safe SVG, inert malicious SVG, offline exports, a
+  bound website manifest, zero network requests, and temporary-copy cleanup.
+- Files: `packages/desktop/src/renderer/src/store/books.ts`,
+  `docs/RELEASE_GATE.md`, the release-gate static test, and this log.
+- Packaging: the arm64 app was rebuilt with Electron 42.1.0 from its locally
+  checksum-verified archive under the network-denied packaging policy. Unpacked
+  audit passed with a 417,525,760-byte app and 175,523,472-byte ASAR. Private
+  and independent public carrier audits plus independent `hdiutil verify`
+  passed.
+- Candidate: DMG 159,540,413 bytes, SHA-256
+  `ab515a89b3dfee5ad131eeb53831f9c5ddc05ca34fb3011c646ff30aa3a6be85`;
+  ZIP 158,741,044 bytes, SHA-256
+  `ca2b6312a5028f6d89d71ff5d7cc9de381869b5eff395790d93306f66feb2c1f`;
+  receipt 38,329 bytes, SHA-256
+  `e963b51fe7102c7784e2f1c609c9b6a6b4157185aadac5c981253d71702cb4fb`.
+- Key decision: the preparation-flush-failure-final bytes are retained only as
+  previous evidence. This replacement is the sole current local candidate and
+  remains unsigned and unnotarized; Apple signing/notarization, Gatekeeper
+  download validation, and real Windows/Linux runtime evidence remain formal
+  public-release blockers.
+- Git commit: none; no tag, push, signing, notarization, publication, or GitHub
+  Release was created. HEAD remains `e88b3107`.
+
+### 2026-07-31 Phase 10C local release-readiness controls
+
+- User goal: complete the locally implementable supply-chain, cross-platform
+  CI-definition, signed-macOS preflight, formal documentation, and static-gate
+  scope without changing the current binary candidate or triggering any remote
+  release operation.
+- Completed: added a deterministic SPDX 2.3 generator over the frozen LeafBook
+  production closure. It found 481 package/version components, fails closed on
+  unknown or disallowed transitive licenses, and binds three reviewed metadata
+  exceptions to exact license-file hashes. Added a byte-sorted top-level
+  SHA-256 manifest writer/verifier and a required-section release-note gate.
+- Completed: release CI now gates release notes, carries the SPDX document into
+  assembly, writes and immediately verifies `SHA256SUMS.txt`, and verifies it
+  again after the assembled artifact is downloaded. License CI regenerates the
+  SBOM twice and requires byte identity. Official actions touched by this work
+  are pinned to full commit SHAs.
+- Completed: added an uncalled reusable GitHub provenance/SBOM-attestation
+  workflow using the documented `actions/attest` v4 permission and input model.
+  Added manual Windows/Linux native build, source-smoke, and carrier-audit
+  definitions; the existing stable Windows NSIS evidence blocker remains
+  fail-closed. Added a separate manual macOS signing/notarization workflow with
+  protected-environment credential-presence preflight, no-publish packaging,
+  signature/staple/Gatekeeper checks, existing artifact audits, and packaged
+  smoke. No workflow was triggered, so these definitions are not native or
+  signing evidence.
+- Completed: added formal install/upgrade/uninstall/data-location,
+  privacy/security/known-limitations, release-note, and release-checklist docs;
+  linked them from the README and release gate. New log text names required
+  credential variables only and contains no credential values, manuscript
+  contents, private paths, or user identifiers.
+- Files: `.github/workflows/release.yml`,
+  `.github/workflows/validate-licenses.yml`, the three new evidence workflows,
+  `package.json`, `README.md`, `docs/RELEASE_GATE.md`, the four new formal docs,
+  four new release-control scripts, the Phase 10C static test, and this log.
+- Tests: touched-file Prettier check passed; targeted ESLint passed (one
+  pre-existing module-type runtime warning only); all five touched workflows
+  parsed as YAML; release notes passed; SPDX generation ran twice with 481
+  packages and byte-identical output; macOS preflight rejected absent variables
+  and accepted synthetic presence without emitting values; focused Phase 10C
+  plus existing release-static tests passed 41/41; `git diff --check` passed.
+- Key decision: the existing unsigned/unnotarized local package and `dist` were
+  left untouched. Windows/Linux native results, signed/notarized macOS results,
+  downloaded Gatekeeper validation, hosted attestations, and human approval
+  remain explicit stable release blockers until real retained evidence exists.
+- Git commit: none; no tag, push, signing, notarization, publication, workflow
+  dispatch, or GitHub Release was created.
+
+### 2026-07-31 Phase 10C static-test type narrowing
+
+- User goal: clear the two TypeScript nullable-access errors in the new Phase
+  10C workflow test without changing any other implementation scope.
+- Completed: asserted and narrowed each attestation step's optional `with`
+  inputs before indexing, then separately asserted and narrowed the second SBOM
+  attestation step.
+- Files: `packages/desktop/test/unit/specs/phase10c-release-readiness.spec.ts`
+  and this log.
+- Tests: focused Phase 10C tests passed 6/6; full desktop `pnpm typecheck`
+  passed; targeted ESLint and Prettier checks passed; `git diff --check` passed.
+  ESLint emitted only the pre-existing module-type performance warning.
+- Key decision: retain explicit runtime assertions so malformed parsed workflow
+  data fails with a precise test error while satisfying static narrowing.
+- Git commit: none; no `dist`, secret, workflow, signing, notarization,
+  publication, tag, push, or release operation was touched.
+
+### 2026-07-31 Phase 10C release-gate formatting follow-up
+
+- User goal: clear the remaining touched-file Prettier failure without changing
+  release-gate meaning or historical evidence.
+- Completed: applied the project Prettier formatter mechanically to
+  `docs/RELEASE_GATE.md` only.
+- Files: `docs/RELEASE_GATE.md` and this log.
+- Tests: targeted Prettier passed; Phase 10C plus release-static tests passed
+  41/41; full desktop typecheck passed; `git diff --check` passed.
+- Key decision: formatting-only change; no substantive release claim changed.
+- Git commit: none; no `dist`, secret, workflow, signing, notarization,
+  publication, tag, push, or release operation was touched.
+
+### 2026-07-31 Phase 10C generated license-notice gate
+
+- User goal: retain the production `saxes` notice missing from the checked-in
+  generated inventory and prove the release license gate is repeatable.
+- Completed: regenerated the canonical third-party notice. The only dependency
+  addition is `saxes@6.0.0 (ISC)`, with generated numbering adjustment and its
+  license-checker-provided body. A second generation was byte-identical with
+  SHA-256 `294739784e45cfe606179b2dee7d8d6436e287fcc2fabfce77689ba4c7d80580`.
+- Files: `packages/desktop/build/THIRD-PARTY-LICENSES.txt` and this log.
+- Tests: production license validation passed with 66 entries; regeneration
+  plus scoped byte comparison passed; Phase 10C plus release-static tests passed
+  41/41; full desktop typecheck, targeted ESLint, touched-file Prettier, and
+  `git diff --check` passed. ESLint emitted only the pre-existing module-type
+  performance warning.
+- Key decision: retain the canonical generated change so the workflow's scoped
+  post-generation diff gate will be clean once the implementation is committed;
+  the current intentionally dirty working tree was verified by exact byte
+  comparison rather than staging or committing.
+- Git commit: none; no `dist`, secret, workflow, signing, notarization,
+  publication, tag, push, or release operation was touched.
+
+### 2026-07-31 Phase 10C evidence-boundary remediation
+
+- User goal: remove four release-control anti-patterns covering signing-secret
+  lifetime, artifact/manifest set equality, draft-time exact verification, and
+  substring-only release-note validation.
+- Completed: macOS signing credentials are no longer job environment values.
+  Only the credential-presence preflight and signed/notarized builder step can
+  receive them; checkout, source build, audits, trust checks, smoke, and upload
+  cannot. A pre-checkout shell gate now requires an exact selected tag, lowercase
+  40-character commit, and matching operator input without reading or printing
+  credential values; package-version validation runs before repository setup.
+- Completed: manual macOS and Windows/Linux workflows stage only their exact,
+  versioned carrier allowlists into a newly created bounded evidence directory.
+  Checksums are written and verified there, and `evidence/*` is the sole upload
+  source. Missing, empty, symlinked, oversized, duplicate-destination, or
+  unexpected evidence shapes fail closed.
+- Completed: checksum verification now rejects every extra file, directory,
+  symlink, missing subject, and byte mismatch. The assembled release carries the
+  exact verifier into the read-only candidate artifact; the draft-write job runs
+  it against the downloaded `dist` set before its final server-state check and
+  sole draft creation command.
+- Completed: release-note validation is a 128 KiB-bounded Markdown structure
+  parser. It recognizes ordered anchored ATX headings only outside fenced code
+  and HTML comments, requires all five sections to be nonempty, and requires nine
+  exact disclosure fields. The formal notes now contain those structured values.
+- Files: `.github/workflows/macos-signed-evidence.yml`,
+  `.github/workflows/platform-evidence.yml`, `.github/workflows/release.yml`,
+  `scripts/release-checksums.mjs`, new `scripts/stage-release-evidence.mjs`,
+  `scripts/verify-release-notes.mjs`, `docs/RELEASE_NOTES.md`, the Phase 10C
+  static/runtime test, and this log.
+- Tests: current release notes passed with five sections and nine disclosures;
+  three touched workflows parsed as YAML; Phase 10C and release-static tests
+  passed 45/45, including positive/negative ref binding, secret scope, exact
+  staging, missing carrier, extra file/directory, tamper, fenced/comment decoy
+  headings, empty section, wrong disclosure, and oversized-note cases. Full
+  desktop typecheck, targeted ESLint, targeted Prettier, and `git diff --check`
+  passed. ESLint emitted only the pre-existing module-type performance warning.
+- Key decision: a checksum manifest is the sole metadata exception to its own
+  subject set; every other uploaded evidence file is staged before manifest
+  creation and must appear exactly once in it.
+- Git commit: none; no `dist`, credential value, workflow dispatch, signing,
+  notarization, publication, tag, commit, push, or release operation occurred.
+
+### 2026-07-31 Phase 10C checksum-manifest symlink hardening
+
+- User goal: prevent checksum manifest write or verification from following a
+  `SHA256SUMS.txt` symlink outside the bounded evidence directory.
+- Completed: manifest names now use a bounded safe basename grammar. Both modes
+  lstat and reject any non-regular or symbolic-link manifest before opening it.
+  Write creates a random same-directory mode-0600 file with exclusive flags,
+  writes and syncs it, rechecks the destination identity/nonexistence, atomically
+  replaces the manifest, and validates the resulting regular file. Verify uses
+  no-follow where available and binds pre-open, descriptor, post-read, and final
+  pathname identity before accepting exact content.
+- Files: `scripts/release-checksums.mjs`, the Phase 10C static/runtime test, and
+  this log.
+- Tests: the new negative test points the manifest at an outside file, proves
+  both verify and write fail, and proves the outside bytes remain unchanged;
+  static checks cover exclusive/no-follow open and atomic rename. Phase 10C plus
+  release-static tests passed 46/46; three release workflows parsed as YAML;
+  full desktop typecheck, targeted ESLint, targeted Prettier, and
+  `git diff --check` passed. ESLint emitted only the pre-existing module-type
+  performance warning.
+- Key decision: an existing manifest may be replaced only when its identity is
+  the same regular file observed before staging the atomic replacement; any
+  disappearance, appearance, link, or identity change fails closed.
+- Git commit: none; no app source, `dist`, credential, workflow dispatch,
+  signing, notarization, publication, tag, commit, push, or release operation
+  was touched.
+
+### 2026-07-31 Phase 10C final evidence-code quality hardening
+
+- User goal: bind manual platform evidence to tag-derived release state, close
+  carrier staging/checksum replacement races without large reads, and prevent
+  the repository-write job from executing downloaded candidate code.
+- Completed: the platform workflow no longer accepts a self-reported channel.
+  Before checkout it binds the selected release tag to an operator-supplied full
+  commit SHA; after checkout the existing strict tag/package validator emits the
+  sole prerelease value consumed by native audits and evidence naming.
+- Completed: evidence staging exclusively creates a new directory and each
+  destination file. Source carriers are opened no-follow and copied in 1 MiB
+  descriptor chunks while hashing; source and destination descriptor/path
+  identity, size, modification time, and change time are checked before and
+  after. The staging hash becomes the final manifest, which is independently
+  reverified before upload.
+- Completed: checksum subjects are likewise hashed through no-follow file
+  descriptors in bounded chunks. Every subject is rechecked after hashing and
+  the directory is re-enumerated, rejecting set, identity, metadata, link, or
+  byte changes without loading a carrier into memory.
+- Completed: the `contents:write` job no longer downloads or runs the repository
+  checksum script. Its workflow-defined inline verifier performs a bounded
+  manifest read, exact subject-set check, no-follow descriptor streaming hashes,
+  and identity rechecks; only then can the existing server tag check and single
+  draft-write command run.
+- Files: `.github/workflows/platform-evidence.yml`,
+  `.github/workflows/macos-signed-evidence.yml`, `.github/workflows/release.yml`,
+  `scripts/stage-release-evidence.mjs`, `scripts/release-checksums.mjs`, the
+  Phase 10C static/runtime test, and this log.
+- Tests: three workflows parsed as YAML; Phase 10C plus release-static tests
+  passed 50/50, including platform branch/SHA rejection, tag-derived channel,
+  source and subject symlink rejection, descriptor-streaming static contracts,
+  and positive/extra-file negative execution of the fixed inline write-job
+  verifier. Full desktop typecheck, targeted ESLint, targeted Prettier, and
+  `git diff --check` passed. ESLint emitted only the pre-existing module-type
+  performance warning.
+- Key decision: hosted native evidence remains unavailable until a manually
+  approved exact release tag run succeeds; workflow definitions and local tests
+  do not satisfy that blocker.
+- Git commit: none; no app source, `dist`, credential, workflow dispatch,
+  signing, notarization, publication, tag, commit, push, or release operation
+  was touched.
+
+### 2026-07-31 Phase 10C final race closure
+
+- User goal: close the remaining manifest, carrier, and directory replacement
+  races in release checksum verification and staged evidence generation.
+- Completed: the repository-write job's fixed inline verifier now snapshots the
+  manifest before and after reading, including device, inode, size, modification
+  time, and change time; carrier final comparisons include change time; and the
+  subject directory is re-enumerated with directory identity and timestamp
+  checks before the draft release can be written.
+- Completed: evidence staging now independently rehashes every final destination
+  through no-follow descriptors, checks descriptor/path metadata and directory
+  stability around the final read, rejects post-hash mutation, and writes the
+  destination-derived digest into `SHA256SUMS`.
+- Files: `.github/workflows/release.yml`,
+  `scripts/stage-release-evidence.mjs`, the Phase 10C static/runtime test, and
+  this log.
+- Tests: all three evidence workflows parsed as YAML; Phase 10C and release
+  static tests passed 51/51, including controlled destination mutation,
+  carrier-ctime mutation, and subject-set growth negatives. Full desktop
+  typecheck, targeted ESLint, targeted Prettier, and `git diff --check` passed.
+  ESLint emitted only the pre-existing module-type performance warning.
+- Key decision: test-only hooks make the sub-second race windows deterministic;
+  production CLI execution does not supply those hooks and remains bound to the
+  fixed stable-read checks.
+- Remaining issue: hosted native evidence still requires a manually approved
+  exact release-tag run; this local hardening does not satisfy that gate.
+- Git commit: none; no app source, `dist`, credential, workflow dispatch,
+  signing, notarization, publication, tag, commit, push, or release operation
+  was touched.
+
+### 2026-07-31 Phase 10C release artifact-flow closure
+
+- User goal: prevent quality-gate metadata from contaminating the exact
+  13-carrier release set, and make the license workflow explicitly read-only
+  with complete dependency-manifest path coverage.
+- Completed: release assembly now downloads exactly five named build artifacts
+  into `dist`; it no longer uses an unbounded all-artifact download or
+  `merge-multiple`, so `leafbook-release-metadata` remains separate from release
+  carriers and the existing asset contract remains unchanged.
+- Completed: the license workflow now declares `permissions: contents: read`.
+  Its pull-request and develop-push filters cover the workspace definition,
+  all three package manifests read by the SBOM/license inventory, and the
+  license validation scripts in addition to the lockfile and release-note gate.
+- Files: `.github/workflows/release.yml`,
+  `.github/workflows/validate-licenses.yml`, the Phase 10C static/integration
+  test, and this log.
+- Tests: four relevant workflows parsed as YAML; Phase 10C and release-static
+  tests passed 53/53. The integration-style artifact-store fixture proved that
+  the five explicitly selected build artifacts yield the same 13 subjects as
+  the audit allowlist and checksum manifest, while SBOM/release-note metadata
+  never enters `dist`; the draft command remains bound to that checked set plus
+  `SHA256SUMS.txt`. Full desktop typecheck, targeted ESLint and Prettier, and
+  `git diff --check` passed. ESLint emitted only the pre-existing module-type
+  performance warning.
+- Key decision: release metadata stays a separate evidence artifact rather than
+  becoming a public release asset, preserving installation documentation and
+  the exact-set audit contract.
+- Remaining issue: hosted native evidence still requires a manually approved
+  exact release-tag run; this local workflow correction does not satisfy that
+  external gate.
+- Git commit: none; no app source, `dist`, credential, workflow dispatch,
+  signing, notarization, publication, tag, commit, push, or release operation
+  was touched.
+
+### 2026-07-31 Phase 10C deterministic SBOM namespace and source time
+
+- User goal: close the final P2 by making SPDX creation time fail-closed and
+  source-bound, and make the document namespace change for every normalized
+  input that determines SBOM output without hashing the SBOM itself.
+- Completed: the generator now requires a canonical positive in-range
+  `SOURCE_DATE_EPOCH`, emits that instant as UTC SPDX `creationInfo.created`, and
+  versions its creator/policy contract. The namespace uses length-framed,
+  name-sorted hashing over the epoch, lockfile, workspace definition, relevant
+  package manifests, generator constants, license allowlist, and hash-bound
+  reviewed overrides. Duplicate/empty inputs fail closed and generated output
+  is excluded from the input set.
+- Completed: release, reusable supply-chain, and license-validation workflows
+  derive `SOURCE_DATE_EPOCH` from the exact checked-out `GITHUB_SHA` commit
+  before SBOM creation. Maintainer, security, release-gate, and formal-checklist
+  documentation now records the contract and exact local command.
+- Files: `scripts/generate-release-sbom.mjs`,
+  `packages/desktop/test/unit/specs/phase10c-release-readiness.spec.ts`,
+  `.github/workflows/release.yml`,
+  `.github/workflows/supply-chain-evidence.yml`,
+  `.github/workflows/validate-licenses.yml`, `docs/BUILD.md`,
+  `docs/PRIVACY_SECURITY.md`, `docs/RELEASE_CHECKLIST.md`,
+  `docs/RELEASE_GATE.md`, and this log.
+- Tests: Phase 10C focused tests passed 21/21; combined Phase 10C plus release
+  static tests passed 56/56. Tests cover byte-identical repeated output, exact
+  UTC creation time, missing/malformed/zero/out-of-range epoch rejection, every
+  namespace input mutation, generator constants, allowlist, overrides, and
+  non-self-reference. Two real generations from the HEAD commit were
+  byte-identical and contained 481 packages; the license gate passed. Full
+  desktop typecheck, targeted ESLint, targeted Prettier, generator syntax,
+  workflow YAML parsing, and `git diff --check` passed. ESLint emitted only the
+  pre-existing module-type performance warning.
+- Key decision: raw repository input bytes are normalized through sorted named
+  length framing so any byte change affects the namespace, while semantic
+  policy data is serialized from a versioned canonical object. Policy behavior
+  changes must bump `SBOM_GENERATOR_VERSION`.
+- Remaining issue: hosted native/signing/notarization/attestation evidence and
+  human review remain formal-release blockers; local SBOM determinism does not
+  satisfy those external gates.
+- Git commit: none; no `dist`, publication, signing, notarization, workflow
+  dispatch, tag, push, release, or credential operation was performed.
+
+### 2026-07-31 Phase 10C third-review release trust-boundary closure
+
+- User goal: close the third-review blockers in the repository-write draft job,
+  formal release-note flow, SBOM attestation subject set, SBOM namespace, and
+  maintainer command documentation without publishing or changing `dist`.
+- Completed: the fixed inline verifier in `create-release` derives the exact 13
+  carrier names from the canonical SemVer tag and requires exactly those files
+  plus `SHA256SUMS.txt`. It rejects a symlink root, non-regular entries, link
+  count other than one, empty or over-1-GiB subjects, malformed/self-consistent
+  but wrong manifests, and identity/content changes using Python integer and
+  nanosecond stat fields before, during, and after descriptor hashing.
+- Completed: quality-gate metadata now contains exactly the generated SBOM,
+  formal `docs/RELEASE_NOTES.md`, and a separate metadata checksum manifest.
+  Assembly downloads it outside `dist`, verifies exact names, hashes, regular
+  one-link files, sizes, and equality with the reviewed source notes, then
+  composes only a fixed prerelease banner plus those notes and reverifies both.
+  The write job independently rechecks metadata hashes and exact body bytes.
+  GitHub draft creation uses that body without generated notes. Quarantine/
+  Gatekeeper bypass guidance was removed.
+- Completed: the public asset policy remains exactly 13 carriers plus
+  `SHA256SUMS.txt`; SBOM and notes are retained evidence outside `dist`. The
+  callable supply-chain workflow verifies the carrier manifest, creates a
+  dedicated SBOM subject manifest containing only those 13 carriers, and uses
+  it for SBOM attestation, so neither SBOM nor notes can attest themselves.
+- Completed: SBOM namespace generation now canonicalizes and domain-separates
+  the complete emitted SPDX payload except `documentNamespace`, including
+  creation information, inventory, licenses, platform-dependent packages,
+  document descriptors, and relationships. Any output mutation changes the
+  namespace; source/policy changes with byte-identical normalized output do not.
+- Files: `.github/workflows/release.yml`,
+  `.github/workflows/supply-chain-evidence.yml`,
+  `scripts/generate-release-sbom.mjs`, `README.md`, `docs/BUILD.md`,
+  `docs/PRIVACY_SECURITY.md`, `docs/RELEASE_CHECKLIST.md`,
+  `docs/RELEASE_GATE.md`, `packages/website/content/docs/dev/RELEASE.md`,
+  `packages/desktop/test/unit/specs/phase10c-release-readiness.spec.ts`,
+  `packages/desktop/test/unit/specs/release-gate-static.spec.ts`, and this log.
+- Tests: focused Phase 10C passed 23/23; combined Phase 10C and release static
+  passed 58/58. Runtime fixtures cover exact 13 positive verification, wrong
+  tag, extra self-consistent subject, hard link, empty file, sparse over-1-GiB
+  file, root symlink, ctime/set races, metadata/body mutation, metadata hard
+  link, and SBOM/notes subject pollution. Three workflows parsed as YAML and
+  full desktop typecheck passed. Two real HEAD-time SBOM generations were
+  byte-identical with 481 packages and a recomputed matching canonical payload
+  digest; license and formal release-note gates passed. Targeted ESLint,
+  Prettier, generator syntax, forbidden bypass-text scan, and
+  `git diff --check` passed; ESLint emitted only the pre-existing module-type
+  performance warning.
+- Key decision: trusted release code keeps three disjoint contracts: public
+  carrier assets, formal draft notes, and SBOM evidence. A checksum manifest is
+  never accepted merely because it agrees with an arbitrary downloaded set.
+- Remaining issue: these are definitions and local fixtures, not retained
+  hosted signing, notarization, native-platform, attestation, or human-approval
+  evidence; all remain formal release blockers.
+- Git commit: none; no `dist`, credential, workflow dispatch, signing,
+  notarization, publication, tag, push, release, or commit operation occurred.
+
+### 2026-07-31 Phase 10C final-snapshot upload boundary
+
+- User goal: eliminate the post-verification mutation window in which the
+  repository-write job still uploaded mutable `candidate` files, add controlled
+  late-mutation coverage, and tighten release evidence size limits.
+- Completed: the write job exclusively creates `final-release` and copies the
+  exact manifest and 13 tag-derived carriers from no-follow source descriptors
+  to exclusive destination descriptors in bounded chunks. It fsyncs each copy,
+  verifies full source/destination identity and digest, rechecks every early
+  source plus the manifest after all copies, checks directory identity/set, and
+  makes the completed asset directory read-only.
+- Completed: formal notes, metadata manifest, and SBOM are copied through the
+  same descriptor-stable path into a separate snapshot evidence directory. The
+  draft body is independently copied and compared with the fixed banner plus
+  verified notes. All snapshot file identities/digests and three directory
+  identities/entry sets are saved in an exclusive read-only sibling state file;
+  snapshot files and directories are read-only defense-in-depth.
+- Completed: the `gh release create` shell begins with a complete no-follow,
+  bounded rehash and identity/entry-set comparison against that saved state,
+  then references only `final-release/release_body.md` and
+  `final-release/assets/*`. No candidate glob reaches the upload command. The
+  SBOM cap is now 16 MiB; carrier caps are 512 MiB for packages/installers,
+  640 MiB for ZIP/tar archives, and 768 MiB for DMGs.
+- Files: `.github/workflows/release.yml`,
+  `packages/desktop/test/unit/specs/phase10c-release-readiness.spec.ts`,
+  `packages/desktop/test/unit/specs/release-gate-static.spec.ts`,
+  `docs/PRIVACY_SECURITY.md`, `docs/RELEASE_CHECKLIST.md`,
+  `docs/RELEASE_GATE.md`, and this log.
+- Tests: focused Phase 10C passed 23/23 and combined Phase 10C/release-static
+  passed 58/58. Controlled tests reject late same-size carrier and manifest
+  rewrites, preserve snapshot bytes after a post-verification candidate-body
+  rewrite, reject a forced snapshot-body mutation during the immediate final
+  rehash, enforce the 16-MiB sparse SBOM negative, and verify upload arguments
+  contain only final-snapshot paths. Three workflows parsed as YAML; full
+  desktop typecheck, targeted ESLint and Prettier, generator syntax, fixture
+  execution, and `git diff --check` passed. ESLint emitted only the pre-existing
+  module-type performance warning.
+- Key decision: snapshot creation removes mutable candidate paths from the
+  upload set and the same-shell rehash minimizes the remaining boundary. The
+  unavoidable interval between the final check and `gh` opening pathname-based
+  inputs remains a documented same-user P3 because `gh` exposes no
+  descriptor-based atomic upload API.
+- Remaining issue: hosted/native/signing/notarization/attestation evidence and
+  human approval remain release blockers independent of this local boundary.
+- Git commit: none; no `dist`, credential, workflow dispatch, signing,
+  notarization, publication, tag, push, release, or commit operation occurred.
+
+### 2026-07-31 Phase 10C trusted snapshot-state root
+
+- User goal: prevent an attacker or late mutation from replacing both the final
+  snapshot and its self-consistent local state, and require independent final
+  verification of carrier, metadata, and draft-body truth before the write.
+- Completed: the final-snapshot step now binds state schema, exact tag,
+  `GITHUB_SHA`, and a 256-bit random nonce. After exclusive state creation it
+  performs a no-follow, bounded, identity-stable state read and emits the
+  resulting SHA-256 through `GITHUB_OUTPUT` as `state_sha256`.
+- Completed: the `gh release create` step injects only that trusted step output
+  as `EXPECTED_STATE_SHA256`. Before parsing state, its fixed inline verifier
+  hashes the exact bytes and uses `hmac.compare_digest`; a replacement state
+  cannot select its own root digest. State binding to tag/commit/nonce is then
+  rechecked.
+- Completed: the final verifier no longer relies on state alone. It independently
+  parses `assets/SHA256SUMS.txt` as the exact 13 tag-derived names and compares
+  every recomputed asset digest; parses the metadata manifest as exactly notes
+  plus SBOM and compares both recomputed digests; and reconstructs the exact
+  fixed prerelease banner plus formal notes for the selected channel. Only then
+  does it cross-check saved file/directory identities, digests, and entry sets.
+- Completed: source and final-snapshot checks reject files of at least 1 MiB
+  whose allocated blocks are less than half their logical size, covering
+  significant sparse carrier/SBOM inputs in addition to format size bounds.
+- Files: `.github/workflows/release.yml`,
+  `packages/desktop/test/unit/specs/phase10c-release-readiness.spec.ts`,
+  `docs/PRIVACY_SECURITY.md`, `docs/RELEASE_CHECKLIST.md`,
+  `docs/RELEASE_GATE.md`, and this log.
+- Tests: focused Phase 10C passed 23/23 and combined Phase 10C/release-static
+  passed 58/58. A second fully valid snapshot/state is generated with a distinct
+  nonce and digest: it passes with its own output digest but fails with the
+  original trusted step digest, proving a self-consistent whole-set replacement
+  cannot cross the root. Existing manifest/carrier/body races remain covered;
+  within-limit sparse carrier/SBOM fixtures are rejected when the filesystem
+  reports sparse allocation. Three workflows parsed as YAML; full desktop
+  typecheck, targeted ESLint and Prettier, generator syntax, fixture execution,
+  and `git diff --check` passed. ESLint emitted only the pre-existing module-type
+  performance warning.
+- Key decision: the GitHub step-output digest is the trust root; local state is
+  evidence to verify, not authority to redefine what is trusted. The same-shell
+  final-check-to-`gh` pathname-open micro-window remains the documented P3.
+- Remaining issue: hosted/native/signing/notarization/attestation evidence and
+  human approval remain separate release blockers.
+- Git commit: none; no `dist`, credential, workflow dispatch, signing,
+  notarization, publication, tag, push, release, or commit operation occurred.
+
+### 2026-07-31 Phase 10C final publication ordering and signed macOS contract
+
+- User goal: clear the final quality findings by correcting the stale LeafBook
+  brand test and moving the last server preflight into the only release-create
+  shell after the trusted snapshot verifier.
+- Completed: the brand contract now requires the protected macOS evidence
+  workflow—not the unsigned tag workflow—to install the signed DMG at
+  `/Applications/LeafBook.app`, verify its signature, stapled ticket, and
+  Gatekeeper assessment, launch it, and observe the installed process. The
+  release workflow and its test reject the old `xattr -cr` bypass.
+- Completed: fixed inline GitHub API logic for recursively peeling the server
+  tag to `GITHUB_SHA` and confirming release absence now runs in the same shell
+  after the final Python snapshot verifier and immediately before the sole
+  `gh release create`. Candidate code is never executed. Static tests assert
+  this exact verifier → server preflight → repository-write ordering.
+- Files: `.github/workflows/release.yml`,
+  `.github/workflows/macos-signed-evidence.yml`,
+  `packages/desktop/test/unit/specs/leafbook-brand-foundation.spec.ts`,
+  `packages/desktop/test/unit/specs/release-gate-static.spec.ts`,
+  `packages/desktop/test/unit/specs/phase10c-release-readiness.spec.ts`,
+  `docs/PRIVACY_SECURITY.md`, `docs/RELEASE_CHECKLIST.md`,
+  `docs/RELEASE_GATE.md`, and this log.
+- Tests: full desktop unit suite passed with 82 files and 1510 passed/1 skipped;
+  the three focused release/brand files passed 72/72. Four workflow files parsed
+  as YAML. Full desktop typecheck, targeted ESLint, and targeted Prettier passed;
+  ESLint emitted only the pre-existing module-type performance warning.
+- Key decision: the remote preflight is trusted fixed workflow text and shares
+  the `gh` shell so no separate-step code can run between it and release
+  creation. Protected tags remain required for the remote API check/create
+  micro-window; the independent same-UID final-file-check/pathname-open P3 also
+  remains documented.
+- Remaining issue: hosted native/signing/notarization/attestation evidence and
+  human approval are still release blockers; the macOS workflow definition is
+  not evidence that a hosted run occurred.
+- Git commit: none; no `dist`, credential, workflow dispatch, signing,
+  notarization, publication, tag, push, release, or commit operation occurred.
+
+### 2026-07-31 Phase 10D Windows/Linux native evidence and exact-16 release contract
+
+- User goal: replace incomplete Windows/Linux definitions with fail-closed
+  signed/native evidence, remove Snap, bind evidence to exact bytes, and require
+  successful receipts before release attestation or draft creation.
+- Completed: the release contract is exactly 16 carriers. Linux x64 and arm64
+  each produce architecture-qualified AppImage, deb, rpm, and tar.gz; Windows
+  and macOS retain two carriers per architecture. Snap is absent from builder,
+  upload, staging, checksum, SBOM, final snapshot, audit, test, and docs.
+- Completed: only the protected `windows-signing` build job receives step-scoped
+  `WIN_CSC_LINK`/`WIN_CSC_PASSWORD`, and it stays `--publish never`. Separate
+  fresh x64/arm64 jobs verify the same bytes, Authenticode signer, silent
+  default-No associations/protocols, launch, shortcuts, uninstall, and residue.
+- Completed: Linux builds once per native Ubuntu 24.04 x64/arm64 runner. Fresh
+  jobs exercise AppImage, real tar extract/run/remove, and deb install/MIME/
+  launch/purge. RPM uses real `dnf install`, Xvfb smoke, and `dnf remove` in
+  Fedora 42 pinned to multiarch digest
+  `sha256:99e203b80b1c3d8f7e161ec10a68fd02b081ef83a3963553e513c82846b97814`;
+  the receipt records the resolved image ID. No `rpm --nodeps` success path exists.
+- Completed: fixed `leafbook-native-evidence-v1` receipts bind tag, commit,
+  platform, architecture, runner/image, exact carrier names/sizes/SHA-256,
+  signature and complete lifecycle results. Extra/unsafe/changed files, failed
+  phases, and a wrong Fedora digest fail closed.
+- Completed: release assembly downloads the same candidates and receipts,
+  rebinds them to tag/SHA/platform/architecture, recomputes hashes, and copies
+  only verified bytes into the exact-16 set. Provenance/SBOM attestation covers
+  that assembly, and draft creation depends on every evidence job.
+- Files: `.github/workflows/{build,release,platform-evidence,windows-signed-evidence,supply-chain-evidence}.yml`,
+  root/Desktop package files and builder config, three platform staging/audit
+  scripts, new `scripts/native-evidence-receipt.mjs`, new
+  `scripts/verify-windows-authenticode.ps1`, three release/native test files,
+  release/build/install/privacy docs, website release docs, and this log.
+- Tests: five workflows passed strict YAML and extracted Bash syntax; audit
+  scripts passed `bash -n`; focused suites passed 64/64; full Desktop unit passed
+  83 files, 1516 passed and 1 skipped; typecheck and full ESLint passed. Metadata,
+  Windows association, release-note, Prettier, and `git diff --check` gates passed.
+- Key decisions: a carrier is releasable only when receipt production and final
+  assembly use the same artifact bytes. Partial reports, RPM extraction, or
+  build-only success do not satisfy the gate. Signing secrets never enter fresh
+  validation, and dependency setup receives no `GITHUB_TOKEN`.
+- Remaining issues: no workflow was dispatched locally. Protected environments,
+  signing inputs/public thumbprint, native runners, retained attestations,
+  signed/notarized macOS evidence, tag protection, and human review remain
+  external prerequisites. `pwsh` is unavailable, so its verifier was not run here.
+- Application source and `dist`: untouched by Phase 10D; no desktop main,
+  preload, renderer, Muya, application binary, or `dist` file changed.
+- Git commit: none; no push, dispatch, publication, signing, tag, release,
+  secret read, or `dist` mutation occurred.
+
+### 2026-07-31 Phase 10D independent-verification corrections
+
+- User goal: correct every issue found by independent Phase 10D verification
+  before treating the Windows/Linux native evidence work as complete.
+- Correction to the preceding Phase 10D entry: its completion and test claims
+  described the pre-review implementation. Independent verification found that
+  dependency setup still exposed `GITHUB_TOKEN`, Linux collapsed three native
+  lifecycles into a misleading final-runner receipt, two Peter Evans actions
+  used mutable tags, the new static test had an ESLint error, and the reusable
+  release call inherited all secrets. Those defects are fixed by this entry;
+  the authoritative receipt schema is `leafbook-native-evidence-v2`, not v1.
+- Completed: the composite dependency action now runs the frozen, ignore-scripts
+  install without any token environment. Static coverage parses and expands the
+  local action rather than trusting only the calling workflows.
+- Completed: portable/tar, deb, and RPM validation now emit three strict,
+  non-overlapping lifecycle reports only after their actual commands succeed.
+  Each report binds tag, commit, architecture, exact carrier hashes, the actual
+  hosted runner identity/image, and install/smoke/uninstall/residue success.
+  Portable/deb host-image fields must match their runner fields. RPM additionally
+  binds the fixed reviewed Fedora digest and resolved `sha256:` image ID. Final
+  Linux aggregation accepts exactly one report of each category and no fabricated
+  aggregate runner. Release verification rehashes those same carrier bytes.
+- Completed: `peter-evans/find-comment` and
+  `peter-evans/create-or-update-comment` are pinned to official 40-character
+  commit SHAs verified with `git ls-remote`. The reusable Windows call explicitly
+  passes only `WIN_CSC_LINK` and `WIN_CSC_KEY_PASSWORD`, and its `workflow_call`
+  contract uses those exact names; `secrets: inherit` is absent.
+- Files: `.github/actions/setup/action.yml`,
+  `.github/workflows/{build,release,platform-evidence,windows-signed-evidence}.yml`,
+  `scripts/native-evidence-receipt.mjs`,
+  `packages/desktop/test/unit/specs/phase10d-native-evidence.spec.ts`,
+  `docs/{BUILD,RELEASE_GATE}.md`, and this log.
+- Tests: focused Phase 10C/10D/release suites passed 65/65. Full Desktop unit
+  passed 83 files with 1517 passed and 1 skipped. Typecheck passed. Full ESLint
+  passed with 0 errors and 134 pre-existing warnings. Metadata, Windows
+  association, and release-note gates passed. Six workflow/action YAML files
+  passed strict parsing and 55 extracted Bash blocks passed `bash -n`.
+- Key decision: a lifecycle report is evidence for only the carrier class and
+  runner that produced it. A final aggregation runner cannot stand in for an
+  earlier validation runner, and an RPM report cannot be substituted by a
+  portable/deb report.
+- Remaining issues: no hosted workflow was dispatched, so native runner,
+  signing, notarization, attestation, protected-environment, and human-review
+  evidence remain external release prerequisites. `pwsh` is unavailable locally,
+  so the PowerShell verifier was not executed here.
+- Application source and `dist`: untouched by this correction. No product source,
+  generated application binary, credential, secret, tag, release, dispatch,
+  publication, push, or `dist` file was read or changed.
+- Git commit: none.
+
+### 2026-07-31 Phase 10D anti-pattern audit remediation
+
+- User goal: close the remaining release-evidence anti-patterns so a formal
+  draft can consume only signed/notarized macOS carriers, actual hosted runner
+  identities, and per-stage lifecycle observations.
+- Completed: `.github/workflows/macos-signed-evidence.yml` now supports manual
+  and reusable single-architecture invocation. Its protected `macos-signing`
+  job receives exactly five explicit Apple secrets, builds/signs/notarizes with
+  `--publish never`, and uploads exact carrier bytes without installing,
+  validating, or launching the candidate. A separate fresh job receives no
+  signing secret, downloads the same bytes, performs `codesign`, stapler and
+  Gatekeeper checks, carrier/tree audits, packaged smoke, DMG installation into
+  `/Applications`, launch observation, cleanup, and strict receipt generation.
+- Completed: the tag release calls the macOS workflow separately for x64 and
+  arm64 with only those five secrets. Assembly downloads both signed candidates
+  and both receipts, rebinds schema/tag/commit/architecture and recomputes the
+  exact carrier hashes before copying mac4. The ordinary unsigned macOS job was
+  removed from the tag workflow entirely; ordinary regression builds remain in
+  the separate PR workflow and contribute no release carrier bytes.
+- Completed: Windows environment evidence now uses actual `ImageOS`,
+  `ImageVersion`, runner label/OS/architecture and rejects spoofed host bindings.
+  Its install, association, shortcut, smoke, uninstall, and residue observations
+  are written immediately after the corresponding checks and then aggregated.
+- Completed: Linux portable, deb, and RPM lifecycles now consist of four actual
+  stage observations written after install, smoke, uninstall, and residue
+  commands/checks. RPM uses one persistent pinned-Fedora container so each
+  observation follows its real `dnf`/Xvfb/removal action. Missing, duplicate,
+  failed, carrier-inconsistent, or runner/image-inconsistent stages fail closed.
+- Completed: added timeouts to both macOS jobs and `validate-licenses`; removed
+  the macOS postinstall token; corrected the stale release-draft comment and
+  updated release/build/checklist documentation.
+- Files: `.github/workflows/{release,macos-signed-evidence,platform-evidence,windows-signed-evidence,validate-licenses}.yml`,
+  `scripts/{native-evidence-receipt,macos-native-evidence}.mjs`,
+  `packages/desktop/test/unit/specs/{phase10c-release-readiness,phase10d-native-evidence,release-gate-static}.spec.ts`,
+  `docs/{BUILD,RELEASE_GATE,RELEASE_CHECKLIST}.md`,
+  `packages/website/content/docs/dev/RELEASE.md`, and this log.
+- Tests: focused release/native/brand suites passed 82/82. Full Desktop unit
+  passed 83 files with 1520 passed and 1 skipped. Full Muya unit passed 214 files
+  and 1455 tests; root/Desktop and Muya typechecks passed. Full ESLint passed
+  with 0 errors and 134 pre-existing warnings. Metadata, Windows association,
+  and release-note gates passed. Eight workflow/action YAML files passed strict
+  parsing and 83 extracted Bash blocks passed `bash -n`.
+- Key decision: signing jobs may produce carrier bytes but may not execute them;
+  only fresh no-secret jobs may create runtime evidence. A stage is accepted only
+  through its separately materialized observation, never from a final hardcoded
+  all-true object.
+- Remaining issues: no hosted workflow was dispatched. Apple/Windows signing,
+  notarization, native runner, attestation, protected-environment, tag-protection,
+  and human-review evidence remain external prerequisites. `pwsh` and
+  `actionlint` are unavailable locally, so PowerShell execution and actionlint
+  validation were not performed.
+- Application source and `dist`: untouched by this remediation. No product
+  source, generated application binary, credential, secret, tag, release,
+  dispatch, publication, push, or `dist` file was read or changed.
+- Git commit: none.
+
+### 2026-07-31 Phase 10D release-documentation correction
+
+- User goal: correct the two stale release-documentation contracts found by
+  final independent verification without changing application code or release
+  state.
+- Completed: the website release guide now describes the reusable protected
+  signed/notarized macOS workflow, fresh no-secret validation, receipt-bound
+  macOS 4 + Windows 4 + Linux 8 assembly, exact-16 attestation, and draft-only
+  repository write. It distinguishes unsigned local development builds from
+  formal release carriers.
+- Completed: formal release notes now state that signed/notarized macOS and
+  complete Windows/Linux native receipts are prerequisites for any draft. They
+  also state that checked-in definitions and local tests are not retained
+  hosted evidence, and that publication remains blocked until the hosted run,
+  receipts, attestations, logs, and approvals receive human review.
+- Completed: the release-note validator and focused unit contract require the
+  corrected fields and reject regression to the removed six-job/six-artifact
+  description.
+- Files: `packages/website/content/docs/dev/RELEASE.md`,
+  `docs/RELEASE_NOTES.md`, `scripts/verify-release-notes.mjs`,
+  `packages/desktop/test/unit/specs/phase10c-release-readiness.spec.ts`, and this
+  log.
+- Tests: release-note gate, focused release/native tests, Prettier, and
+  `git diff --check` were run after the correction.
+- Key decision: successful native evidence is required before draft creation,
+  but a draft and its producing workflow still require retained human review
+  before public publication.
+- Remaining issues: hosted signing, notarization, native runners, attestations,
+  environment/tag protection, and publication review remain external evidence;
+  no workflow was dispatched locally.
+- Application source and `dist`: untouched. No credential, secret, tag,
+  release, dispatch, publication, push, or `dist` operation occurred.
+- Git commit: none.
+
+### 2026-07-31 Phase 10D GitHub Environment signing-secret correction
+
+- User goal: make the protected GitHub Environments the sole source of Windows
+  and macOS signing secrets for both manual dispatch and reusable-workflow
+  invocation, without publishing or reading credentials.
+- Completed: removed all required signing-secret declarations from the Windows
+  and macOS `workflow_call` contracts and removed every signing-secret mapping
+  from the three release caller jobs. The protected `windows-signing` and
+  `macos-signing` jobs still resolve Environment secrets directly and expose
+  them only to the intended signing preflight/build steps; fresh validation
+  jobs remain secret-free.
+- Completed: strengthened static contracts to require zero reusable-workflow
+  signing-secret declarations, zero release-caller mappings, exact protected-job
+  secret-reference locations and counts, and no secret references in fresh
+  validation. Release documentation now requires Environment-level rather than
+  repository-level secrets and explains that callers cannot pass Environment
+  secrets into reusable workflows.
+- Files: `.github/workflows/{release,windows-signed-evidence,macos-signed-evidence}.yml`,
+  `packages/desktop/test/unit/specs/{phase10c-release-readiness,phase10d-native-evidence}.spec.ts`,
+  `docs/{BUILD,RELEASE_GATE,RELEASE_CHECKLIST}.md`,
+  `packages/website/content/docs/dev/RELEASE.md`, and this log.
+- Tests: focused release/native/brand suites passed 82/82; full Desktop unit
+  passed 83 files with 1520 passed and 1 skipped. Eight workflow/action YAML
+  files passed strict parsing and 97 extracted Bash blocks passed `bash -n`.
+  Root/Desktop and Muya typechecks passed. Full ESLint passed with 0 errors and
+  134 pre-existing warnings. Metadata, Windows association, release-note, and
+  license gates passed; targeted Prettier and `git diff --check` passed.
+- Key decision: signing credentials exist only as secrets on the protected
+  `windows-signing` and `macos-signing` GitHub Environments. A reusable workflow
+  caller cannot forward those Environment secrets; the called job must declare
+  its Environment and read its secrets directly.
+- Remaining issues: no hosted workflow was dispatched. Environment approvals,
+  actual certificate provisioning, signing/notarization, retained native
+  receipts, attestations, tag protection, and human publication review remain
+  external prerequisites.
+- Application source and `dist`: untouched. No secret value, credential, tag,
+  release, dispatch, publication, push, or `dist` file was read or changed.
+- Git commit: none.
+
+### 2026-07-31 Phase 10D dependency-setup token hardening
+
+- User goal: close the final P3 repository-token exposure in protected native
+  dependency setup without changing application code or release state.
+- Completed: the shared dependency-setup composite now explicitly passes an
+  empty `token` input to pinned `actions/setup-node`, preventing its default
+  `${{ github.token }}` input from being used while Node and the pnpm cache are
+  prepared.
+- Completed: the native-evidence static contract now requires every
+  `actions/setup-node` step in the composite to set an empty token, forbids both
+  `github.token` and `GITHUB_TOKEN` in that action definition, and preserves the
+  exact frozen `pnpm install --frozen-lockfile --ignore-scripts` assertion.
+- Files: `.github/actions/setup/action.yml`,
+  `packages/desktop/test/unit/specs/phase10d-native-evidence.spec.ts`, and this
+  log.
+- Tests: focused release/native/static tests passed 68/68; strict YAML parsing,
+  root TypeScript typecheck, full ESLint, targeted Prettier, and
+  `git diff --check` were run after the correction.
+- Key decision: keep checkout credentials disabled and also override
+  `setup-node`'s otherwise implicit read-only repository token, so dependency
+  preparation has neither a persisted checkout credential nor an action input
+  token.
+- Remaining issues: hosted Environment approvals, signing/notarization,
+  retained native receipts and attestations, protected tags, and human release
+  review remain external prerequisites. Full ESLint retains 134 existing
+  warnings and zero errors.
+- Application source and `dist`: untouched. No credential, secret, tag,
+  release, dispatch, publication, push, or `dist` operation occurred.
+- Git commit: none.
+
+### 2026-07-31 Phase 10D draft-release Environment governance
+
+- User goal: require an independently protected GitHub Environment before the
+  repository's sole release-write job may create a draft, without changing
+  application code, release artifacts, credentials, or external release state.
+- Completed: assigned the unique `contents: write` `create-release` job to the
+  job-level `release` Environment. The static contract now requires that exact
+  job/environment pairing while preserving the protected `windows-signing` and
+  `macos-signing` job contracts and forbidding any additional release write job.
+- Completed: documented that `release` requires one or more required reviewers,
+  **Prevent self-review**, and a deployment policy limited to selected `v*`
+  tags with branch deployments denied. Creating an Environment without every
+  protection rule is explicitly not accepted and blocks formal release.
+- Files: `.github/workflows/release.yml`,
+  `packages/desktop/test/unit/specs/release-gate-static.spec.ts`,
+  `packages/desktop/test/unit/specs/phase10c-release-readiness.spec.ts`,
+  `packages/desktop/test/unit/specs/phase10d-native-evidence.spec.ts`,
+  `docs/RELEASE_GATE.md`, `docs/RELEASE_CHECKLIST.md`, and this log.
+- Tests: focused release/native/static suites passed 68/68; full Desktop unit
+  passed 83 files with 1520 passed and 1 skipped. Eight workflow/action YAML
+  files passed strict parsing and 97 extracted Bash blocks passed `bash -n`.
+  Root/Desktop typecheck, targeted ESLint, targeted Prettier, and
+  `git diff --check` passed.
+- Key decision: Environment naming in YAML is only the attachment point;
+  reviewer, self-review, and deployment-policy settings are external
+  repository governance and remain mandatory fail-closed prerequisites.
+- Remaining issues: repository administrators must create and configure the
+  three protected Environments and tag rules, then retain hosted signing,
+  notarization, native receipt, attestation, approval, and draft evidence.
+- Application source and `dist`: untouched. No secret value, credential, tag,
+  release, dispatch, publication, push, commit, or `dist` operation occurred.
+- Git commit: none.
+
+### 2026-07-31 Phase 10D independent release-reviewer wording
+
+- User goal: make the protected `release` Environment governance contract
+  explicitly require an independent human reviewer, without changing code,
+  artifacts, credentials, or release state.
+- Completed: `RELEASE_GATE.md` and `RELEASE_CHECKLIST.md` now require at least
+  one independent required reviewer in addition to **Prevent self-review** and
+  the selected-`v*`-tag-only deployment policy.
+- Completed: the release-readiness static documentation contract now rejects
+  wording that omits the explicit independent-reviewer requirement.
+- Files: `docs/RELEASE_GATE.md`, `docs/RELEASE_CHECKLIST.md`,
+  `packages/desktop/test/unit/specs/phase10c-release-readiness.spec.ts`, and
+  this log.
+- Tests: focused release/native/static suites, strict YAML parsing, targeted
+  Prettier, and `git diff --check` were run after the wording correction.
+- Key decision: retain **Prevent self-review** as an executable repository
+  setting while stating reviewer independence directly, rather than relying on
+  readers to infer it from that setting.
+- Remaining issues: repository administrators must configure the protected
+  Environments and tag rules, then retain hosted signing, notarization, native
+  receipt, attestation, approval, and draft evidence.
+- Application source and `dist`: untouched. No secret, credential, tag,
+  release, dispatch, publication, push, commit, or `dist` operation occurred.
+- Git commit: none.
+
+### 2026-07-31 Phase 10D release-Environment policy test hardening
+
+- User goal: make the static release-readiness contract reject governance
+  wording that no longer limits the `release` Environment to selected `v*`
+  tags or that permits branch deployments.
+- Completed: both `RELEASE_CHECKLIST.md` and `RELEASE_GATE.md` are now matched
+  against the complete selected-tag and branch-denial phrase, with whitespace-
+  tolerant assertions that remain stable across Markdown wrapping.
+- Files: `packages/desktop/test/unit/specs/phase10c-release-readiness.spec.ts`
+  and this log.
+- Tests: focused release/native/static suites passed 68/68; strict workflow and
+  action YAML parsing, targeted Prettier, and `git diff --check` were run after
+  the assertion hardening.
+- Key decision: keep the exact external governance semantics executable in the
+  documentation contract even though GitHub Environment settings themselves
+  remain repository configuration outside the workflow YAML.
+- Remaining issues: administrators must still configure and retain evidence of
+  the protected Environment reviewer, self-review, selected-tag, and branch-
+  denial settings before formal release.
+- Application source and `dist`: untouched. No secret, credential, tag,
+  release, dispatch, publication, push, commit, or `dist` operation occurred.
+- Git commit: none.
+
+### 2026-07-31 Phase 10D personal-project release Environment correction
+
+- User goal: synchronize the formal release governance contract with the actual
+  personal-project GitHub Environment configuration without changing workflows,
+  application code, artifacts, credentials, or external release state.
+- Completed: the authoritative release gate and checklist now require
+  `Jacquesxu666` as a required reviewer on `windows-signing`, `macos-signing`,
+  and `release`. The `release` Environment explicitly uses personal-project
+  owner approval with **Prevent self-review** disabled
+  (`prevent_self_review=false`), while selected tags matching `v*` remain the
+  only allowed deployment path and branch deployment remains denied.
+- Completed: retained the stronger separation-of-duties posture as an explicit
+  future recommendation: if the project becomes multi-person, enable **Prevent
+  self-review** and require at least one independent reviewer before another
+  formal release.
+- Correction: the preceding Phase 10D Environment-governance entries remain
+  historical records, but their claim that independent review and enabled
+  **Prevent self-review** describe the current required configuration is
+  superseded by this entry and the current `RELEASE_GATE.md` /
+  `RELEASE_CHECKLIST.md` contract.
+- Files: `docs/RELEASE_GATE.md`, `docs/RELEASE_CHECKLIST.md`,
+  `packages/desktop/test/unit/specs/phase10c-release-readiness.spec.ts`, and this
+  log.
+- Tests: focused release/native/static suites passed 68/68; full Desktop unit
+  passed 83 files with 1520 passed and 1 skipped. Targeted Prettier and
+  `git diff --check` were run after the correction.
+- Key decision: a required reviewer remains a mandatory deployment gate for all
+  three Environments, but owner approval is intentional for the current
+  single-owner project. Reviewer independence becomes mandatory only when the
+  project moves to a multi-person governance model.
+- Remaining issues: hosted Environment approvals, signing/notarization,
+  retained native receipts and attestations, protected tags, and human draft
+  review remain external prerequisites.
+- Application source and `dist`: untouched. No secret value, credential, tag,
+  release, dispatch, publication, push, commit, or `dist` operation occurred.
+- Git commit: none.

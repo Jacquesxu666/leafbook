@@ -5,7 +5,18 @@ import { createHash, randomUUID } from 'crypto'
 import { analyzeAtxH1Headings } from 'leafbook-muya-heading-analyzer'
 import { validateBookHeadingFragments } from 'common/book/heading'
 import { unicodeDefaultCaseFold } from 'common/book/unicodeCaseFold'
+import {
+  createPreparationDraftId,
+  type BookPreparationDraftStore,
+  type PreparationDraftChapter,
+  type PreparationDraftFileIdentity,
+  type PreparationDraftPayload,
+  type PreparationDraftReadResult
+} from './preparationDraftStore'
 import type {
+  BookPreparationDraftApplyRequestDto,
+  BookPreparationDraftOperationDto,
+  BookPreparationRecoveryRequestDto,
   BookPreparationCandidateDto,
   BookPreparationDto,
   BookReaderError,
@@ -63,6 +74,12 @@ interface PreparedSource {
   source: BookPreparationSource
   identity: FileState
   sourceRevision: string
+  baseChapters: PreparationDraftChapter[]
+  chapters: PreparationDraftChapter[]
+  draftId: string
+  nonce: number
+  draftPersisted: boolean
+  draftDurabilityUncertain: boolean
   summaryBytes: Buffer
   revision: string
   dto: BookPreparationDto
@@ -74,6 +91,8 @@ interface PreparationLease extends BookPreparationBeginContext {
   candidates: BookPreparationSource[]
   prepared: PreparedSource | null
   critical: boolean
+  recoveryId: string | null
+  recovery: PreparationDraftReadResult
 }
 
 interface CriticalValidationFailure {
@@ -94,6 +113,7 @@ export interface BookPreparationCommitResult {
 
 export interface BookPreparationManagerHooks {
   beforePrepareRead?: () => void | Promise<void>
+  beforeDraftRead?: () => void | Promise<void>
   beforeOpen?: (targetPath: string) => void | Promise<void>
   openTarget?: (targetPath: string, flags: number, mode: number) => number
   afterOpen?: (targetPath: string, descriptor: number) => void
@@ -133,6 +153,15 @@ const sameFileState = (left: FileState, right: FileState): boolean =>
   left.size === right.size &&
   left.mtimeNs === right.mtimeNs &&
   left.ctimeNs === right.ctimeNs
+const sameDraftFileIdentity = (
+  left: PreparationDraftFileIdentity,
+  right: PreparationDraftFileIdentity
+): boolean =>
+  left.dev === right.dev &&
+  left.ino === right.ino &&
+  left.mode === right.mode &&
+  left.nlink === right.nlink &&
+  left.size === right.size
 const resultError = <T>(
   code: BookReaderError['code'],
   message: string,
@@ -231,7 +260,10 @@ const hashExactSync = (
 export class BookPreparationManager {
   private readonly leases = new Map<string, PreparationLease>()
 
-  constructor(private readonly hooks: BookPreparationManagerHooks = {}) {}
+  constructor(
+    private readonly hooks: BookPreparationManagerHooks = {},
+    private readonly draftStore: BookPreparationDraftStore | null = null
+  ) {}
 
   private owned(id: unknown, ownerId: number): PreparationLease | null {
     if (typeof id !== 'string' || id.length === 0 || id.length > 128) return null
@@ -740,6 +772,106 @@ export class BookPreparationManager {
     }
   }
 
+  private recoveryStatus(lease: PreparationLease): 'available' | 'stale' | 'invalid' | null {
+    if (lease.recovery.status === 'none') return null
+    if (lease.recovery.status === 'invalid') return 'invalid'
+    const payload = lease.recovery.payload
+    const prepared = lease.prepared
+    const rootHmac = this.draftStore?.rootHmac(lease.rootIdentity.realPath)
+    if (
+      !prepared ||
+      !rootHmac ||
+      payload.rootRealPathHmac !== rootHmac ||
+      payload.rootDev !== lease.rootIdentity.dev.toString() ||
+      payload.rootIno !== lease.rootIdentity.ino.toString() ||
+      payload.sourcePath !== prepared.source.path ||
+      payload.baseRevision !== prepared.sourceRevision ||
+      payload.sourceIdentity.dev !== prepared.identity.dev.toString() ||
+      payload.sourceIdentity.ino !== prepared.identity.ino.toString() ||
+      payload.sourceIdentity.mode !== prepared.identity.mode ||
+      payload.sourceIdentity.nlink !== prepared.identity.nlink.toString() ||
+      payload.sourceIdentity.size !== prepared.identity.size.toString() ||
+      payload.sourceIdentity.mtimeNs !== prepared.identity.mtimeNs.toString() ||
+      payload.sourceIdentity.ctimeNs !== prepared.identity.ctimeNs.toString()
+    ) {
+      return 'stale'
+    }
+    return 'available'
+  }
+
+  private recoveryDto(lease: PreparationLease): BookPreparationDto['recovery'] {
+    const status = this.recoveryStatus(lease)
+    if (!status || !lease.recoveryId) return null
+    return {
+      recoveryId: lease.recoveryId,
+      status,
+      chapterCount:
+        lease.recovery.status === 'valid' ? lease.recovery.payload.chapters.length : null
+    }
+  }
+
+  private rebuildPrepared(lease: PreparationLease, prepared: PreparedSource): void {
+    const included = prepared.chapters
+      .filter((chapter) => chapter.included)
+      .sort((left, right) => left.order - right.order)
+    const removed = prepared.chapters
+      .filter((chapter) => !chapter.included)
+      .sort((left, right) => left.order - right.order)
+    prepared.summaryBytes = summaryBytes(lease.rootName, prepared.source.path, included)
+    prepared.revision = hash(
+      Buffer.concat([
+        Buffer.from(prepared.sourceRevision, 'ascii'),
+        Buffer.from(`${prepared.identity.dev}:${prepared.identity.ino}`, 'utf8'),
+        prepared.summaryBytes
+      ])
+    )
+    const toDto = (chapter: PreparationDraftChapter, index: number) => ({
+      chapterId: chapter.id,
+      ordinal: index + 1,
+      line: chapter.line,
+      title: chapter.title,
+      fragment: chapter.fragment
+    })
+    prepared.dto = {
+      ...this.baseDto(lease),
+      revision: prepared.revision,
+      sourceNodeId: prepared.source.nodeId,
+      sourceTitle: prepared.source.title,
+      chapters: included.map(toDto),
+      removedChapters: removed.map(toDto),
+      summaryPreview: `# Contents\n\n${included.map((chapter) => `- ${chapter.title}`).join('\n')}\n`,
+      requiresSelection: false,
+      draftPersisted: prepared.draftPersisted,
+      draftDurabilityUncertain: prepared.draftDurabilityUncertain,
+      draftId: prepared.draftPersisted ? prepared.draftId : null,
+      draftNonce: prepared.nonce
+    }
+  }
+
+  private draftPayload(lease: PreparationLease, prepared: PreparedSource): PreparationDraftPayload {
+    const rootRealPathHmac = this.draftStore?.rootHmac(lease.rootIdentity.realPath)
+    if (!rootRealPathHmac) throw new Error('preparation draft storage is unavailable')
+    return {
+      draftId: prepared.draftId,
+      rootDev: lease.rootIdentity.dev.toString(),
+      rootIno: lease.rootIdentity.ino.toString(),
+      rootRealPathHmac,
+      sourcePath: prepared.source.path,
+      sourceIdentity: {
+        dev: prepared.identity.dev.toString(),
+        ino: prepared.identity.ino.toString(),
+        mode: prepared.identity.mode,
+        nlink: prepared.identity.nlink.toString(),
+        size: prepared.identity.size.toString(),
+        mtimeNs: prepared.identity.mtimeNs.toString(),
+        ctimeNs: prepared.identity.ctimeNs.toString()
+      },
+      baseRevision: prepared.sourceRevision,
+      chapters: prepared.chapters.map((chapter) => ({ ...chapter })),
+      nonce: prepared.nonce
+    }
+  }
+
   private baseDto(lease: PreparationLease): BookPreparationDto {
     return {
       preparationId: lease.preparationId,
@@ -755,8 +887,14 @@ export class BookPreparationManager {
         })
       ),
       chapters: [],
+      removedChapters: [],
       summaryPreview: null,
-      requiresSelection: true
+      requiresSelection: true,
+      recovery: this.recoveryDto(lease),
+      draftPersisted: false,
+      draftDurabilityUncertain: false,
+      draftId: null,
+      draftNonce: 0
     }
   }
 
@@ -834,37 +972,35 @@ export class BookPreparationManager {
         'A generated chapter destination exceeds its safety limit.'
       )
     }
-    const bytes = summaryBytes(lease.rootName, source.path, chapters)
-    if (bytes.byteLength > MAX_SUMMARY_BYTES) {
-      return resultError('preparation-too-large', 'The generated SUMMARY exceeds its safety limit.')
-    }
-    const revision = hash(
-      Buffer.concat([
-        Buffer.from(hash(read.bytes), 'ascii'),
-        Buffer.from(`${read.identity.dev}:${read.identity.ino}`, 'utf8'),
-        bytes
-      ])
-    )
-    const dto: BookPreparationDto = {
-      ...this.baseDto(lease),
-      revision,
-      sourceNodeId: source.nodeId,
-      sourceTitle: source.title,
-      chapters,
-      summaryPreview: `# Contents\n\n${chapters
-        .map((chapter) => `- ${chapter.title}`)
-        .join('\n')}\n`,
-      requiresSelection: false
-    }
-    lease.prepared = {
+    const baseChapters: PreparationDraftChapter[] = chapters.map((chapter, index) => ({
+      id: `chapter-${index + 1}`,
+      line: chapter.line,
+      title: chapter.title,
+      fragment: chapter.fragment,
+      included: true,
+      order: index
+    }))
+    const prepared: PreparedSource = {
       source,
       identity: read.identity,
       sourceRevision: hash(read.bytes),
-      summaryBytes: bytes,
-      revision,
-      dto
+      baseChapters,
+      chapters: baseChapters.map((chapter) => ({ ...chapter })),
+      draftId: createPreparationDraftId(),
+      nonce: 0,
+      draftPersisted: false,
+      draftDurabilityUncertain: false,
+      summaryBytes: Buffer.alloc(0),
+      revision: '',
+      dto: null as unknown as BookPreparationDto
     }
-    return { ok: true, value: dto }
+    lease.prepared = prepared
+    this.rebuildPrepared(lease, prepared)
+    if (prepared.summaryBytes.byteLength > MAX_SUMMARY_BYTES) {
+      lease.prepared = null
+      return resultError('preparation-too-large', 'The generated SUMMARY exceeds its safety limit.')
+    }
+    return { ok: true, value: prepared.dto }
   }
 
   async begin(context: BookPreparationBeginContext): Promise<BookReaderResult<BookPreparationDto>> {
@@ -898,18 +1034,34 @@ export class BookPreparationManager {
       )
     }
     const preparationId = randomUUID()
+    let recovery: PreparationDraftReadResult = { status: 'none' }
+    if (this.draftStore) {
+      try {
+        recovery = this.draftStore.read(context.rootIdentity.realPath)
+      } catch {
+        recovery = { status: 'none' }
+      }
+    }
     const lease: PreparationLease = {
       ...context,
       preparationId,
       generation: 1,
       candidates,
       prepared: null,
-      critical: false
+      critical: false,
+      recoveryId: recovery.status === 'none' ? null : randomUUID(),
+      recovery
     }
     this.leases.set(preparationId, lease)
     if (!(await this.summaryAbsent(lease))) {
       this.leases.delete(preparationId)
       return resultError('preparation-conflict', 'A SUMMARY already exists or the book changed.')
+    }
+    if (recovery.status === 'valid') {
+      const recoveredSource = candidates.find(
+        (candidate) => candidate.path === recovery.payload.sourcePath
+      )
+      if (recoveredSource) return this.prepare(lease, recoveredSource)
     }
     const rootStem = unicodeDefaultCaseFold(context.rootName)
     const automatic = candidates.filter((candidate) => {
@@ -962,6 +1114,281 @@ export class BookPreparationManager {
     return this.prepare(lease, source)
   }
 
+  async applyDraft(
+    request: BookPreparationDraftApplyRequestDto,
+    ownerId: number
+  ): Promise<BookReaderResult<BookPreparationDto>> {
+    const lease = this.owned(request.preparationId, ownerId)
+    const prepared = lease?.prepared
+    if (
+      !lease ||
+      !prepared ||
+      !this.draftStore ||
+      request.revision !== prepared.revision ||
+      !Number.isSafeInteger(request.nonce) ||
+      request.nonce >= Number.MAX_SAFE_INTEGER ||
+      prepared.nonce >= Number.MAX_SAFE_INTEGER - 1 ||
+      request.nonce !== prepared.nonce + 1 ||
+      lease.recoveryId !== null ||
+      !this.current(lease)
+    ) {
+      return resultError('preparation-not-found', 'This preparation draft is stale.')
+    }
+    const source = await this.readSource(lease, prepared.source)
+    if (
+      !source ||
+      !sameFileState(source.identity, prepared.identity) ||
+      hash(source.bytes) !== prepared.sourceRevision ||
+      !this.current(lease) ||
+      lease.prepared !== prepared ||
+      request.revision !== prepared.revision ||
+      request.nonce !== prepared.nonce + 1
+    ) {
+      return resultError(
+        'preparation-draft-stale',
+        'The book changed; this draft cannot be edited.'
+      )
+    }
+    const previous = prepared.chapters.map((chapter) => ({ ...chapter }))
+    const previousNonce = prepared.nonce
+    const previousDurabilityUncertain = prepared.draftDurabilityUncertain
+    const operation: BookPreparationDraftOperationDto = request.operation
+    const chapter = prepared.chapters.find((item) => item.id === operation.chapterId)
+    if (!chapter) {
+      return resultError('preparation-conflict', 'The selected chapter is unavailable.')
+    }
+    if (operation.type === 'rename') {
+      const title = operation.title.trim()
+      if (
+        !title ||
+        [...title].length > MAX_TITLE_CHARACTERS ||
+        [...title].some((character) => {
+          const codePoint = character.codePointAt(0) ?? 0
+          return codePoint <= 0x1f || codePoint === 0x7f
+        })
+      ) {
+        return resultError('preparation-conflict', 'The chapter title is invalid.')
+      }
+      chapter.title = title
+    } else if (operation.type === 'remove') {
+      if (!chapter.included || prepared.chapters.filter((item) => item.included).length <= 1) {
+        return resultError('preparation-conflict', 'At least one chapter must remain.')
+      }
+      chapter.included = false
+    } else if (operation.type === 'restore') {
+      if (chapter.included) {
+        return resultError('preparation-conflict', 'The chapter is already added.')
+      }
+      chapter.included = true
+      chapter.order = Math.max(-1, ...prepared.chapters.map((item) => item.order)) + 1
+    } else {
+      const active = prepared.chapters
+        .filter((item) => item.included)
+        .sort((left, right) => left.order - right.order)
+      const index = active.findIndex((item) => item.id === chapter.id)
+      const targetIndex = operation.type === 'move-up' ? index - 1 : index + 1
+      if (index < 0 || targetIndex < 0 || targetIndex >= active.length) {
+        return resultError('preparation-conflict', 'The chapter cannot move farther.')
+      }
+      const target = active[targetIndex]
+      const currentOrder = chapter.order
+      chapter.order = target.order
+      target.order = currentOrder
+    }
+    prepared.nonce = request.nonce
+    prepared.draftPersisted = false
+    prepared.draftDurabilityUncertain = false
+    this.rebuildPrepared(lease, prepared)
+    if (prepared.summaryBytes.byteLength > MAX_SUMMARY_BYTES) {
+      prepared.chapters = previous
+      prepared.nonce = previousNonce
+      this.rebuildPrepared(lease, prepared)
+      return resultError('preparation-too-large', 'The draft SUMMARY exceeds its safety limit.')
+    }
+    const payload = this.draftPayload(lease, prepared)
+    const generation = lease.generation
+    const saved = this.draftStore.write(lease.rootIdentity.realPath, payload, () =>
+      Boolean(
+        this.current(lease, generation) &&
+        lease.prepared === prepared &&
+        prepared.nonce === request.nonce
+      )
+    )
+    if (saved === 'failed') {
+      prepared.chapters = previous
+      prepared.nonce = previousNonce
+      prepared.draftPersisted = previousNonce > 0
+      prepared.draftDurabilityUncertain = previousDurabilityUncertain
+      this.rebuildPrepared(lease, prepared)
+      return resultError(
+        'preparation-draft-write-failed',
+        'LeafBook could not durably save this preparation draft.'
+      )
+    }
+    prepared.draftPersisted = true
+    prepared.draftDurabilityUncertain = saved === 'uncertain'
+    lease.recoveryId = null
+    try {
+      lease.recovery = this.draftStore.read(lease.rootIdentity.realPath)
+    } catch {
+      lease.recovery = { status: 'none' }
+    }
+    this.rebuildPrepared(lease, prepared)
+    return { ok: true, value: prepared.dto }
+  }
+
+  async restoreDraft(
+    request: BookPreparationRecoveryRequestDto,
+    ownerId: number
+  ): Promise<BookReaderResult<BookPreparationDto>> {
+    const lease = this.owned(request.preparationId, ownerId)
+    const prepared = lease?.prepared
+    if (
+      !lease ||
+      !prepared ||
+      !lease.recoveryId ||
+      request.recoveryId !== lease.recoveryId ||
+      lease.recovery.status !== 'valid' ||
+      this.recoveryStatus(lease) !== 'available'
+    ) {
+      return resultError('preparation-draft-stale', 'This preparation draft cannot be restored.')
+    }
+    const generation = lease.generation
+    const expectedRecovery = lease.recovery
+    const expectedRecoveryId = lease.recoveryId
+    const expectedDraftId = expectedRecovery.payload.draftId
+    const expectedNonce = expectedRecovery.payload.nonce
+    const source = await this.readSource(lease, prepared.source)
+    if (
+      !source ||
+      !sameFileState(source.identity, prepared.identity) ||
+      hash(source.bytes) !== prepared.sourceRevision ||
+      !this.current(lease, generation) ||
+      lease.prepared !== prepared ||
+      lease.recovery !== expectedRecovery ||
+      lease.recoveryId !== expectedRecoveryId
+    ) {
+      return resultError('preparation-draft-stale', 'The source changed; this draft is stale.')
+    }
+    await this.hooks.beforeDraftRead?.()
+    if (
+      !this.current(lease, generation) ||
+      lease.prepared !== prepared ||
+      lease.recovery !== expectedRecovery ||
+      lease.recoveryId !== expectedRecoveryId
+    ) {
+      return resultError('preparation-draft-stale', 'This preparation draft cannot be restored.')
+    }
+    let persisted: PreparationDraftReadResult
+    try {
+      persisted = this.draftStore?.read(lease.rootIdentity.realPath) ?? { status: 'none' }
+    } catch {
+      return resultError('preparation-draft-write-failed', 'The draft identity is unavailable.')
+    }
+    if (
+      persisted.status !== 'valid' ||
+      !sameDraftFileIdentity(persisted.identity, expectedRecovery.identity) ||
+      persisted.payload.draftId !== expectedDraftId ||
+      persisted.payload.nonce !== expectedNonce
+    ) {
+      return resultError('preparation-draft-stale', 'This preparation draft is no longer current.')
+    }
+    prepared.chapters = expectedRecovery.payload.chapters.map((chapter) => ({ ...chapter }))
+    prepared.draftId = expectedDraftId
+    prepared.nonce = expectedNonce
+    prepared.draftPersisted = true
+    prepared.draftDurabilityUncertain = false
+    lease.recoveryId = null
+    this.rebuildPrepared(lease, prepared)
+    return { ok: true, value: prepared.dto }
+  }
+
+  async discardDraft(
+    request: BookPreparationRecoveryRequestDto,
+    ownerId: number
+  ): Promise<BookReaderResult<BookPreparationDto>> {
+    const lease = this.owned(request.preparationId, ownerId)
+    const prepared = lease?.prepared
+    const generation = lease?.generation
+    const expectedRecovery = lease?.recovery
+    const expectedRecoveryId = lease?.recoveryId ?? null
+    const discardingCurrent = Boolean(
+      prepared?.draftPersisted && request.recoveryId === prepared.draftId
+    )
+    if (
+      !lease ||
+      !this.draftStore ||
+      generation === undefined ||
+      !expectedRecovery ||
+      (!discardingCurrent &&
+        (!expectedRecoveryId ||
+          request.recoveryId !== expectedRecoveryId ||
+          expectedRecovery.status === 'none')) ||
+      (discardingCurrent &&
+        (expectedRecovery.status !== 'valid' ||
+          expectedRecovery.payload.draftId !== prepared?.draftId ||
+          expectedRecovery.payload.nonce !== prepared.nonce))
+    ) {
+      return resultError('preparation-draft-stale', 'This preparation draft cannot be discarded.')
+    }
+    const rootIsCurrent = await this.rootCurrent(lease)
+    if (
+      !rootIsCurrent ||
+      !this.current(lease, generation) ||
+      lease.prepared !== prepared ||
+      lease.recovery !== expectedRecovery ||
+      lease.recoveryId !== expectedRecoveryId
+    ) {
+      return resultError('preparation-draft-stale', 'This preparation draft cannot be discarded.')
+    }
+    await this.hooks.beforeDraftRead?.()
+    if (
+      !this.current(lease, generation) ||
+      lease.prepared !== prepared ||
+      lease.recovery !== expectedRecovery ||
+      lease.recoveryId !== expectedRecoveryId
+    ) {
+      return resultError('preparation-draft-stale', 'This preparation draft cannot be discarded.')
+    }
+    let persisted: PreparationDraftReadResult
+    try {
+      persisted = this.draftStore.read(lease.rootIdentity.realPath)
+    } catch {
+      return resultError('preparation-draft-write-failed', 'The draft identity is unavailable.')
+    }
+    if (
+      persisted.status === 'none' ||
+      persisted.status !== expectedRecovery.status ||
+      !sameDraftFileIdentity(persisted.identity, expectedRecovery.identity) ||
+      (persisted.status === 'valid' &&
+        expectedRecovery.status === 'valid' &&
+        (persisted.payload.draftId !== expectedRecovery.payload.draftId ||
+          persisted.payload.nonce !== expectedRecovery.payload.nonce))
+    ) {
+      return resultError('preparation-draft-stale', 'This preparation draft no longer exists.')
+    }
+    const expected: PreparationDraftFileIdentity = persisted.identity
+    if (!this.draftStore.discard(lease.rootIdentity.realPath, expected)) {
+      return resultError(
+        'preparation-draft-write-failed',
+        'LeafBook could not safely discard this draft.'
+      )
+    }
+    lease.recovery = { status: 'none' }
+    lease.recoveryId = null
+    if (prepared) {
+      if (discardingCurrent) {
+        prepared.chapters = prepared.baseChapters.map((chapter) => ({ ...chapter }))
+      }
+      prepared.draftId = createPreparationDraftId()
+      prepared.nonce = 0
+      prepared.draftPersisted = false
+      prepared.draftDurabilityUncertain = false
+      this.rebuildPrepared(lease, prepared)
+    }
+    return { ok: true, value: prepared?.dto ?? this.baseDto(lease) }
+  }
+
   async commit(
     preparationId: unknown,
     revision: unknown,
@@ -973,6 +1400,7 @@ export class BookPreparationManager {
       typeof revision !== 'string' ||
       revision.length !== 64 ||
       !lease.prepared ||
+      lease.recoveryId !== null ||
       lease.prepared.revision !== revision
     ) {
       return resultError('preparation-not-found', 'This preparation has expired.')
@@ -1157,6 +1585,20 @@ export class BookPreparationManager {
       } catch (error) {
         if (error instanceof UnsafeTargetError) throw error
         durabilityUncertain = true
+      }
+      if (!durabilityUncertain && this.draftStore && prepared.draftPersisted) {
+        try {
+          const persisted = this.draftStore.read(lease.rootIdentity.realPath)
+          if (
+            persisted.status === 'valid' &&
+            persisted.payload.draftId === prepared.draftId &&
+            persisted.payload.nonce === prepared.nonce
+          ) {
+            this.draftStore.discard(lease.rootIdentity.realPath, persisted.identity)
+          }
+        } catch {
+          // The verified source commit remains successful; an unverifiable draft is retained.
+        }
       }
       this.leases.delete(lease.preparationId)
       return {

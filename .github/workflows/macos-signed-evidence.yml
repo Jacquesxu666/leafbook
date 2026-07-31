@@ -1,0 +1,342 @@
+name: macOS signed and notarized native evidence
+
+on:
+  workflow_dispatch:
+    inputs:
+      architecture:
+        required: true
+        type: choice
+        default: arm64
+        options:
+          - arm64
+          - x64
+      expected-commit:
+        description: Full lowercase commit SHA resolved by the selected release tag
+        required: true
+        type: string
+  workflow_call:
+    inputs:
+      architecture:
+        description: Exact native architecture to build and validate
+        required: true
+        type: string
+      expected-commit:
+        description: Full lowercase commit SHA resolved by the selected release tag
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  signed-notarized-candidate:
+    name: Protected signing/notarization build (${{ inputs.architecture }})
+    runs-on: ${{ inputs.architecture == 'x64' && 'macos-15-intel' || 'macos-15' }}
+    timeout-minutes: 60
+    environment: macos-signing
+    steps:
+      - name: Bind invocation to an exact release tag commit
+        shell: bash
+        env:
+          EXPECTED_COMMIT: ${{ inputs.expected-commit }}
+          ARCHITECTURE: ${{ inputs.architecture }}
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF_TYPE:-}" != "tag" ]] ||
+            [[ ! "${GITHUB_REF_NAME:-}" =~ ^v[0-9A-Za-z.+-]+$ ]] ||
+            [[ ! "${GITHUB_SHA:-}" =~ ^[0-9a-f]{40}$ ]] ||
+            [[ ! "$EXPECTED_COMMIT" =~ ^[0-9a-f]{40}$ ]] ||
+            [[ "$GITHUB_SHA" != "$EXPECTED_COMMIT" ]] ||
+            [[ "$ARCHITECTURE" != 'x64' && "$ARCHITECTURE" != 'arm64' ]]; then
+            echo 'BLOCKED: invocation is not bound to an exact tag, commit, and architecture.' >&2
+            exit 1
+          fi
+
+      - name: Check out exact source revision
+        # actions/checkout v4.3.1
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.expected-commit }}
+
+      - name: Validate exact tag and package version
+        run: node scripts/validate-release-tag.mjs "$GITHUB_REF_NAME"
+
+      - name: Setup frozen dependency graph without repository credentials
+        uses: ./.github/actions/setup
+        with:
+          node-version: '24.14.1'
+
+      - name: Run postinstall and native rebuild without repository credentials
+        run: pnpm tsx scripts/postinstall.ts
+        env:
+          npm_config_user_agent: pnpm
+
+      - name: Build production application source
+        run: pnpm build
+
+      - name: Block when protected signing inputs are unavailable
+        run: node scripts/preflight-mac-signing.mjs
+        env:
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+
+      - name: Build signed and notarized carriers without publishing
+        run: pnpm --filter leafbook exec electron-builder --mac --${{ inputs.architecture }} --publish never -c.mac.notarize=true
+        env:
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+
+      - name: Stage exact signed carrier bytes without executing them
+        run: |
+          node scripts/stage-release-evidence.mjs macos \
+            '${{ inputs.architecture }}' dist evidence
+          node scripts/release-checksums.mjs verify evidence
+
+      - name: Upload signed carriers for fresh no-secret validation
+        # actions/upload-artifact v4.6.2
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: leafbook-macos-${{ inputs.architecture }}-signed-candidate
+          retention-days: 7
+          if-no-files-found: error
+          path: evidence/*
+
+  fresh-native-validation:
+    name: Fresh no-secret signed lifecycle (${{ inputs.architecture }})
+    needs: signed-notarized-candidate
+    runs-on: ${{ inputs.architecture == 'x64' && 'macos-15-intel' || 'macos-15' }}
+    timeout-minutes: 60
+    steps:
+      - name: Check out exact validation source
+        # actions/checkout v4.3.1
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.expected-commit }}
+
+      - name: Rebind fresh runner to exact tag, commit, and architecture
+        shell: bash
+        env:
+          EXPECTED_COMMIT: ${{ inputs.expected-commit }}
+          ARCHITECTURE: ${{ inputs.architecture }}
+        run: |
+          set -euo pipefail
+          [[ "${GITHUB_REF_TYPE:-}" == 'tag' ]]
+          [[ "${GITHUB_SHA:-}" == "$EXPECTED_COMMIT" ]]
+          [[ "$ARCHITECTURE" == 'x64' || "$ARCHITECTURE" == 'arm64' ]]
+          node scripts/validate-release-tag.mjs "$GITHUB_REF_NAME"
+
+      - name: Setup validation dependencies without repository credentials
+        uses: ./.github/actions/setup
+        with:
+          node-version: '24.14.1'
+
+      - name: Prepare validation tooling without repository credentials
+        run: pnpm tsx scripts/postinstall.ts
+        env:
+          npm_config_user_agent: pnpm
+
+      - name: Download exact signed and notarized carrier bytes
+        # actions/download-artifact v4.3.0
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: leafbook-macos-${{ inputs.architecture }}-signed-candidate
+          path: evidence
+
+      - name: Verify same-byte manifest and prepare audited unpacked tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/release-checksums.mjs verify evidence
+          version="$(node -p "require('./packages/desktop/package.json').version")"
+          mkdir dist
+          cp "evidence/leafbook-mac-${{ inputs.architecture }}-$version.dmg" dist/
+          cp "evidence/leafbook-mac-${{ inputs.architecture }}-$version.zip" dist/
+          app_directory=mac
+          if [[ '${{ inputs.architecture }}' == 'arm64' ]]; then app_directory=mac-arm64; fi
+          mkdir "dist/$app_directory"
+          ditto -x -k "evidence/leafbook-mac-${{ inputs.architecture }}-$version.zip" \
+            "dist/$app_directory"
+          [[ -d "dist/$app_directory/LeafBook.app" && ! -L "dist/$app_directory/LeafBook.app" ]]
+
+      - name: Verify Developer ID signature on the exact unpacked carrier
+        shell: bash
+        run: |
+          set -euo pipefail
+          app_directory=mac
+          if [[ '${{ inputs.architecture }}' == 'arm64' ]]; then app_directory=mac-arm64; fi
+          codesign --verify --deep --strict --verbose=2 "dist/$app_directory/LeafBook.app"
+          node scripts/macos-native-evidence.mjs observe \
+            --stage signature --architecture '${{ inputs.architecture }}' \
+            --tag "$GITHUB_REF_NAME" --commit "$GITHUB_SHA" \
+            --runner-label "$RUNNER_NAME" --runner-os "$RUNNER_OS" \
+            --runner-arch "$RUNNER_ARCH" --image-os "$ImageOS" \
+            --image-version "$ImageVersion" --carriers evidence \
+            --output signature-observation.json
+
+      - name: Verify stapled notarization on both exact carriers
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./packages/desktop/package.json').version")"
+          app_directory=mac
+          if [[ '${{ inputs.architecture }}' == 'arm64' ]]; then app_directory=mac-arm64; fi
+          xcrun stapler validate "evidence/leafbook-mac-${{ inputs.architecture }}-$version.dmg"
+          xcrun stapler validate "dist/$app_directory/LeafBook.app"
+          node scripts/macos-native-evidence.mjs observe \
+            --stage notarization --architecture '${{ inputs.architecture }}' \
+            --tag "$GITHUB_REF_NAME" --commit "$GITHUB_SHA" \
+            --runner-label "$RUNNER_NAME" --runner-os "$RUNNER_OS" \
+            --runner-arch "$RUNNER_ARCH" --image-os "$ImageOS" \
+            --image-version "$ImageVersion" --carriers evidence \
+            --output notarization-observation.json
+
+      - name: Verify Gatekeeper acceptance before any launch
+        shell: bash
+        run: |
+          set -euo pipefail
+          app_directory=mac
+          if [[ '${{ inputs.architecture }}' == 'arm64' ]]; then app_directory=mac-arm64; fi
+          spctl --assess --type execute --verbose=4 "dist/$app_directory/LeafBook.app"
+          node scripts/macos-native-evidence.mjs observe \
+            --stage gatekeeper --architecture '${{ inputs.architecture }}' \
+            --tag "$GITHUB_REF_NAME" --commit "$GITHUB_SHA" \
+            --runner-label "$RUNNER_NAME" --runner-os "$RUNNER_OS" \
+            --runner-arch "$RUNNER_ARCH" --image-os "$ImageOS" \
+            --image-version "$ImageVersion" --carriers evidence \
+            --output gatekeeper-observation.json
+
+      - name: Audit both exact macOS carriers
+        run: |
+          pnpm audit:mac-artifact -- '${{ inputs.architecture }}'
+          node scripts/macos-native-evidence.mjs observe \
+            --stage carrier-audit --architecture '${{ inputs.architecture }}' \
+            --tag "$GITHUB_REF_NAME" --commit "$GITHUB_SHA" \
+            --runner-label "$RUNNER_NAME" --runner-os "$RUNNER_OS" \
+            --runner-arch "$RUNNER_ARCH" --image-os "$ImageOS" \
+            --image-version "$ImageVersion" --carriers evidence \
+            --output carrier-audit-observation.json
+
+      - name: Audit signed unpacked application tree
+        run: |
+          pnpm audit:mac-unpacked '${{ inputs.architecture }}'
+          node scripts/macos-native-evidence.mjs observe \
+            --stage unpacked-audit --architecture '${{ inputs.architecture }}' \
+            --tag "$GITHUB_REF_NAME" --commit "$GITHUB_SHA" \
+            --runner-label "$RUNNER_NAME" --runner-os "$RUNNER_OS" \
+            --runner-arch "$RUNNER_ARCH" --image-os "$ImageOS" \
+            --image-version "$ImageVersion" --carriers evidence \
+            --output unpacked-audit-observation.json
+
+      - name: Run packaged smoke suite against the signed unpacked carrier
+        run: |
+          pnpm smoke:mac:unpacked '${{ inputs.architecture }}'
+          node scripts/macos-native-evidence.mjs observe \
+            --stage packaged-smoke --architecture '${{ inputs.architecture }}' \
+            --tag "$GITHUB_REF_NAME" --commit "$GITHUB_SHA" \
+            --runner-label "$RUNNER_NAME" --runner-os "$RUNNER_OS" \
+            --runner-arch "$RUNNER_ARCH" --image-os "$ImageOS" \
+            --image-version "$ImageVersion" --carriers evidence \
+            --output packaged-smoke-observation.json
+
+      - name: Install exact DMG application into Applications and launch it
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./packages/desktop/package.json').version")"
+          dmg="evidence/leafbook-mac-${{ inputs.architecture }}-$version.dmg"
+          mount_point="$(mktemp -d "$RUNNER_TEMP/leafbook-dmg.XXXXXX")"
+          launched_pid=''
+          installed=0
+          cleanup() {
+            if [[ -n "$launched_pid" ]]; then
+              kill "$launched_pid" 2>/dev/null || true
+              wait "$launched_pid" 2>/dev/null || true
+            fi
+            hdiutil detach "$mount_point" -quiet 2>/dev/null || true
+            if [[ "$installed" == '1' ]]; then sudo rm -rf -- /Applications/LeafBook.app; fi
+            rmdir "$mount_point" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+          [[ ! -e /Applications/LeafBook.app && ! -L /Applications/LeafBook.app ]]
+          hdiutil attach "$dmg" -readonly -nobrowse -mountpoint "$mount_point" -quiet
+          [[ -d "$mount_point/LeafBook.app" && ! -L "$mount_point/LeafBook.app" ]]
+          sudo ditto "$mount_point/LeafBook.app" /Applications/LeafBook.app
+          installed=1
+          codesign --verify --deep --strict --verbose=2 /Applications/LeafBook.app
+          xcrun stapler validate /Applications/LeafBook.app
+          spctl --assess --type execute --verbose=4 /Applications/LeafBook.app
+          node scripts/macos-native-evidence.mjs observe \
+            --stage install --architecture '${{ inputs.architecture }}' \
+            --tag "$GITHUB_REF_NAME" --commit "$GITHUB_SHA" \
+            --runner-label "$RUNNER_NAME" --runner-os "$RUNNER_OS" \
+            --runner-arch "$RUNNER_ARCH" --image-os "$ImageOS" \
+            --image-version "$ImageVersion" --carriers evidence \
+            --output install-observation.json
+          open -n /Applications/LeafBook.app --args --disable-gpu
+          for _ in {1..30}; do
+            launched_pid="$(pgrep -f '^/Applications/LeafBook.app/Contents/MacOS/LeafBook( |$)' | head -n 1 || true)"
+            [[ -n "$launched_pid" ]] && break
+            sleep 1
+          done
+          [[ -n "$launched_pid" ]]
+          node scripts/macos-native-evidence.mjs observe \
+            --stage applications-smoke --architecture '${{ inputs.architecture }}' \
+            --tag "$GITHUB_REF_NAME" --commit "$GITHUB_SHA" \
+            --runner-label "$RUNNER_NAME" --runner-os "$RUNNER_OS" \
+            --runner-arch "$RUNNER_ARCH" --image-os "$ImageOS" \
+            --image-version "$ImageVersion" --carriers evidence \
+            --output applications-smoke-observation.json
+          kill "$launched_pid"
+          wait "$launched_pid" || true
+          launched_pid=''
+          sudo rm -rf -- /Applications/LeafBook.app
+          installed=0
+          hdiutil detach "$mount_point" -quiet
+          rmdir "$mount_point"
+          trap - EXIT
+          [[ ! -e /Applications/LeafBook.app && ! -L /Applications/LeafBook.app ]]
+          node scripts/macos-native-evidence.mjs observe \
+            --stage residue --architecture '${{ inputs.architecture }}' \
+            --tag "$GITHUB_REF_NAME" --commit "$GITHUB_SHA" \
+            --runner-label "$RUNNER_NAME" --runner-os "$RUNNER_OS" \
+            --runner-arch "$RUNNER_ARCH" --image-os "$ImageOS" \
+            --image-version "$ImageVersion" --carriers evidence \
+            --output residue-observation.json
+
+      - name: Aggregate and verify the exact signed macOS receipt
+        shell: bash
+        run: |
+          set -euo pipefail
+          node scripts/macos-native-evidence.mjs write \
+            --architecture '${{ inputs.architecture }}' \
+            --tag "$GITHUB_REF_NAME" --commit "$GITHUB_SHA" --carriers evidence \
+            --signature-report signature-observation.json \
+            --notarization-report notarization-observation.json \
+            --gatekeeper-report gatekeeper-observation.json \
+            --carrier-audit-report carrier-audit-observation.json \
+            --unpacked-audit-report unpacked-audit-observation.json \
+            --packaged-smoke-report packaged-smoke-observation.json \
+            --install-report install-observation.json \
+            --applications-smoke-report applications-smoke-observation.json \
+            --residue-report residue-observation.json \
+            --output leafbook-macos-${{ inputs.architecture }}-native-evidence.json
+          node scripts/macos-native-evidence.mjs verify \
+            --receipt leafbook-macos-${{ inputs.architecture }}-native-evidence.json \
+            --carriers evidence
+
+      - name: Upload receipt after fresh no-secret validation
+        # actions/upload-artifact v4.6.2
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: leafbook-macos-${{ inputs.architecture }}-native-receipt
+          retention-days: 14
+          if-no-files-found: error
+          path: leafbook-macos-${{ inputs.architecture }}-native-evidence.json

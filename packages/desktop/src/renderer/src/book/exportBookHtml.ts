@@ -5,7 +5,7 @@ import type {
   BookReaderNodeDto
 } from '@shared/types/bookReader'
 import { renderBookMarkdown } from './renderMarkdown'
-import { BOOK_EXPORT_CSP, BOOK_EXPORT_STYLE } from 'common/book/exportPolicy'
+import { BOOK_EXPORT_CSP, BOOK_EXPORT_STYLE, BOOK_WEBSITE_CSP } from 'common/book/exportPolicy'
 import { bookFragmentKey } from 'common/book/heading'
 
 const escapeHtml = (value: string): string =>
@@ -94,8 +94,33 @@ export const generateBookExportHtml = async (snapshot: BookExportSnapshotDto): P
       })
       continue
     }
-    const rendered = await renderBookMarkdown(source.markdown)
+    const rendered = await renderBookMarkdown(source.markdown, { localImages: true })
     const document = new DOMParser().parseFromString(rendered.html, 'text/html')
+    document.querySelectorAll<HTMLImageElement>('img[data-leafbook-resource]').forEach((image) => {
+      const key = image.getAttribute('data-leafbook-resource')
+      const resourceIndex = key?.match(/^image-(\d+)$/u)?.[1]
+      const target =
+        resourceIndex === undefined
+          ? null
+          : (source.resourceTargets?.[Number(resourceIndex)] ?? null)
+      image.removeAttribute('data-leafbook-resource')
+      if (target) {
+        image.setAttribute('src', target)
+      } else {
+        const placeholder = document.createElement('span')
+        placeholder.className = 'leafbook-media-placeholder'
+        if (resourceIndex !== undefined) {
+          placeholder.setAttribute('data-leafbook-export-placeholder', `image-${resourceIndex}`)
+        }
+        placeholder.setAttribute('role', 'img')
+        placeholder.setAttribute(
+          'aria-label',
+          image.alt ? `Image unavailable: ${image.alt}` : 'Image unavailable'
+        )
+        placeholder.textContent = `[Image unavailable${image.alt ? `: ${image.alt}` : ''}]`
+        image.replaceWith(placeholder)
+      }
+    })
     const headingByFragment = new Map<string, string>()
     document.querySelectorAll<HTMLHeadingElement>('h1,h2,h3,h4,h5,h6').forEach((heading, index) => {
       const originalId = heading.id
@@ -160,5 +185,6 @@ export const generateBookExportHtml = async (snapshot: BookExportSnapshotDto): P
     })
     .join('')
   const navigation = renderNavigation(snapshot.nodes, snapshot, generated)
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="${BOOK_EXPORT_CSP}"><title>${escapeHtml(snapshot.title)}</title><style>${BOOK_EXPORT_STYLE}</style></head><body><div class="leafbook-shell"><nav class="leafbook-toc" aria-label="Table of contents"><h2>Contents</h2>${navigation}</nav><main class="leafbook-book"><header><p>LeafBook offline export</p><h1>${escapeHtml(snapshot.title)}</h1></header>${chapters}</main></div></body></html>`
+  const csp = snapshot.format === 'website' ? BOOK_WEBSITE_CSP : BOOK_EXPORT_CSP
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="${csp}"><title>${escapeHtml(snapshot.title)}</title><style>${BOOK_EXPORT_STYLE}</style></head><body><div class="leafbook-shell"><nav class="leafbook-toc" aria-label="Table of contents"><h2>Contents</h2>${navigation}</nav><main class="leafbook-book"><header><p>LeafBook offline export</p><h1>${escapeHtml(snapshot.title)}</h1></header>${chapters}</main></div></body></html>`
 }

@@ -39,7 +39,9 @@ import type {
   BookArrangementSaveDto,
   BookArrangementSaveRequestDto,
   BookPreparationCommitRequestDto,
+  BookPreparationDraftApplyRequestDto,
   BookPreparationDto,
+  BookPreparationRecoveryRequestDto,
   BookPreparationSaveDto,
   BookExportCommitRequestDto,
   BookExportSaveDto,
@@ -52,6 +54,8 @@ import type {
   BookEditSaveRequestDto,
   BookLinkNavigationDto,
   BookReadingProgressDto,
+  BookResourceDto,
+  BookResourceRequestDto,
   BookReaderResult,
   BookSearchProgressDto,
   BookSearchRequestDto,
@@ -77,6 +81,10 @@ export interface IpcInvokeChannels {
   'lb::books::read-chapter': {
     args: [sessionId: string, nodeId: string]
     ret: BookReaderResult<BookChapterDto>
+  }
+  'lb::books::read-resource': {
+    args: [request: BookResourceRequestDto]
+    ret: BookReaderResult<BookResourceDto>
   }
   'lb::books::begin-edit': {
     args: [sessionId: string, nodeId: string]
@@ -120,6 +128,18 @@ export interface IpcInvokeChannels {
   }
   'lb::books::select-preparation-source': {
     args: [preparationId: string, sourceNodeId: string]
+    ret: BookReaderResult<BookPreparationDto>
+  }
+  'lb::books::apply-preparation-draft': {
+    args: [request: BookPreparationDraftApplyRequestDto]
+    ret: BookReaderResult<BookPreparationDto>
+  }
+  'lb::books::restore-preparation-draft': {
+    args: [request: BookPreparationRecoveryRequestDto]
+    ret: BookReaderResult<BookPreparationDto>
+  }
+  'lb::books::discard-preparation-draft': {
+    args: [request: BookPreparationRecoveryRequestDto]
     ret: BookReaderResult<BookPreparationDto>
   }
   'lb::books::commit-preparation': {

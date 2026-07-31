@@ -6,7 +6,7 @@ import type {
     Token,
 } from './types';
 import escapeCharactersMap from '../config/escapeCharacter';
-import { isLengthEven, union } from '../utils';
+import { isLengthEven, union } from '../utils/inlinePure';
 import { beginRules, inlineRules, linkValidateRules, validateRules } from './rules';
 import {
     correctUrl,

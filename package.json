@@ -37,6 +37,8 @@
     "build:mac:x64": "pnpm --filter leafbook build:mac:x64",
     "build:mac:arm64": "pnpm --filter leafbook build:mac:arm64",
     "build:linux": "pnpm --filter leafbook build:linux",
+    "build:linux:x64": "pnpm --filter leafbook build:linux:x64",
+    "build:linux:arm64": "pnpm --filter leafbook build:linux:arm64",
     "perf:inspect": "pnpm --filter leafbook perf:inspect",
     "perf:inspect-brk": "pnpm --filter leafbook perf:inspect-brk",
     "test": "pnpm --filter leafbook test",
@@ -46,7 +48,9 @@
     "typecheck:watch": "pnpm --filter leafbook typecheck:watch",
     "check": "pnpm lint && pnpm typecheck",
     "gen-third-party": "tsx scripts/generateThirdPartyLicense.ts",
-    "validate-licenses": "tsx scripts/validateLicenses.ts"
+    "validate-licenses": "tsx scripts/validateLicenses.ts",
+    "generate:release-sbom": "node scripts/generate-release-sbom.mjs",
+    "verify:release-notes": "node scripts/verify-release-notes.mjs"
   },
   "pnpm": {
     "overrides": {
@@ -67,6 +71,7 @@
     "prettier": "^3.8.4",
     "tsx": "^4.22.4",
     "typescript-eslint": "^8.61.1",
-    "vue-eslint-parser": "^10.4.1"
+    "vue-eslint-parser": "^10.4.1",
+    "yaml": "^2.9.0"
   }
 }

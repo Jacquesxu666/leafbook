@@ -16,6 +16,7 @@ const deferred = <T>(): { promise: Promise<T>; resolve: (value: T) => void } => 
 const inferredSession = (): BookSessionDto => ({
   libraryId: 'library-id-0001',
   sessionId: 'session-id-00001',
+  resourceToken: 'resource-token-0001',
   title: 'Book',
   navigationSource: 'inferred',
   nodes: [{ nodeId: 'old-source-node-01', type: 'chapter', title: 'Manuscript', children: [] }],
@@ -46,11 +47,17 @@ const prepared = (requiresSelection = false): BookPreparationDto => ({
   chapters: requiresSelection
     ? []
     : [
-        { ordinal: 1, line: 1, title: 'First', fragment: 'first' },
-        { ordinal: 2, line: 10, title: 'Second', fragment: 'second' }
+        { chapterId: 'chapter-1', ordinal: 1, line: 1, title: 'First', fragment: 'first' },
+        { chapterId: 'chapter-2', ordinal: 2, line: 10, title: 'Second', fragment: 'second' }
       ],
+  removedChapters: [],
   summaryPreview: requiresSelection ? null : '# Contents\n\n- First\n- Second\n',
-  requiresSelection
+  requiresSelection,
+  recovery: null,
+  draftPersisted: false,
+  draftDurabilityUncertain: false,
+  draftId: null,
+  draftNonce: 0
 })
 
 const allow = (payload: unknown): void => (payload as (value: boolean) => void)(true)
@@ -61,10 +68,235 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  vi.useRealTimers()
   bus.off('lb::prepare-return-to-book', allow)
 })
 
 describe('book preparation renderer store', () => {
+  it('flushes every chapter rename in order before moves, Create, and Close', async () => {
+    let current = prepared()
+    const applyPreparationDraft = vi.fn(
+      async (request: {
+        nonce: number
+        operation: { type: string; chapterId: string; title?: string }
+      }) => {
+        const chapters = current.chapters.map((chapter) => ({ ...chapter }))
+        if (request.operation.type === 'rename') {
+          const chapter = chapters.find((item) => item.chapterId === request.operation.chapterId)
+          if (chapter) chapter.title = request.operation.title ?? chapter.title
+        }
+        current = {
+          ...current,
+          chapters,
+          draftPersisted: true,
+          draftId: 'draft-id-00000001',
+          draftNonce: request.nonce,
+          revision: request.nonce.toString(16).padStart(64, '0')
+        }
+        return { ok: true as const, value: current }
+      }
+    )
+    const commitPreparation = vi.fn().mockResolvedValue({
+      ok: false,
+      error: { code: 'preparation-conflict', message: 'Synthetic stop.' }
+    })
+    const closePreparation = vi.fn().mockResolvedValue({ ok: true, value: true })
+    Object.defineProperty(window, 'electron', {
+      configurable: true,
+      value: { books: { applyPreparationDraft, commitPreparation, closePreparation } }
+    })
+    const store = useBooksStore()
+    store.session = inferredSession()
+    store.mode = 'reader'
+    store.preparation = current
+
+    await store.schedulePreparationDraft({
+      type: 'rename',
+      chapterId: 'chapter-1',
+      title: 'First A'
+    })
+    await store.schedulePreparationDraft({
+      type: 'rename',
+      chapterId: 'chapter-2',
+      title: 'Second B'
+    })
+    await store.flushPreparationDraft()
+    expect(applyPreparationDraft.mock.calls.slice(0, 2).map(([request]) => request)).toMatchObject([
+      { nonce: 1, operation: { type: 'rename', chapterId: 'chapter-1', title: 'First A' } },
+      { nonce: 2, operation: { type: 'rename', chapterId: 'chapter-2', title: 'Second B' } }
+    ])
+
+    await store.schedulePreparationDraft({
+      type: 'rename',
+      chapterId: 'chapter-1',
+      title: 'First moved'
+    })
+    await store.schedulePreparationDraft({ type: 'move-down', chapterId: 'chapter-1' })
+    expect(applyPreparationDraft.mock.calls.slice(2, 4).map(([request]) => request)).toMatchObject([
+      { nonce: 3, operation: { type: 'rename', chapterId: 'chapter-1' } },
+      { nonce: 4, operation: { type: 'move-down', chapterId: 'chapter-1' } }
+    ])
+
+    await store.schedulePreparationDraft({
+      type: 'rename',
+      chapterId: 'chapter-2',
+      title: 'Before create'
+    })
+    await store.commitPreparation()
+    expect(applyPreparationDraft).toHaveBeenCalledTimes(5)
+    expect(applyPreparationDraft.mock.invocationCallOrder[4]).toBeLessThan(
+      commitPreparation.mock.invocationCallOrder[0]
+    )
+
+    await store.schedulePreparationDraft({
+      type: 'rename',
+      chapterId: 'chapter-1',
+      title: 'Before close'
+    })
+    await store.closePreparation()
+    expect(applyPreparationDraft).toHaveBeenCalledTimes(6)
+    expect(applyPreparationDraft.mock.invocationCallOrder[5]).toBeLessThan(
+      closePreparation.mock.invocationCallOrder[0]
+    )
+  })
+
+  it('stops a rename drain on its first failure, preserves the error, and retries the queue', async () => {
+    let current = prepared()
+    const draftError = { code: 'preparation-draft-write-failed' as const, message: 'Disk failed.' }
+    const applyPreparationDraft = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: false, error: draftError })
+      .mockImplementation(async (request: { nonce: number }) => {
+        current = {
+          ...current,
+          draftPersisted: true,
+          draftId: 'draft-id-00000001',
+          draftNonce: request.nonce,
+          revision: request.nonce.toString(16).padStart(64, '0')
+        }
+        return { ok: true as const, value: current }
+      })
+    Object.defineProperty(window, 'electron', {
+      configurable: true,
+      value: { books: { applyPreparationDraft } }
+    })
+    const store = useBooksStore()
+    store.preparation = current
+    await store.schedulePreparationDraft({
+      type: 'rename',
+      chapterId: 'chapter-1',
+      title: 'First queued'
+    })
+    await store.schedulePreparationDraft({
+      type: 'rename',
+      chapterId: 'chapter-2',
+      title: 'Second queued'
+    })
+
+    expect(await store.flushPreparationDraft()).toBe(false)
+    expect(applyPreparationDraft).toHaveBeenCalledTimes(1)
+    expect(store.preparationError).toEqual(draftError)
+
+    expect(await store.flushPreparationDraft()).toBe(true)
+    expect(applyPreparationDraft.mock.calls.map(([request]) => request)).toMatchObject([
+      { nonce: 1, operation: { chapterId: 'chapter-1' } },
+      { nonce: 1, operation: { chapterId: 'chapter-1' } },
+      { nonce: 2, operation: { chapterId: 'chapter-2' } }
+    ])
+  })
+
+  it.each([
+    { type: 'move-down' as const, chapterId: 'chapter-1' },
+    { type: 'remove' as const, chapterId: 'chapter-2' }
+  ])('does not dispatch $type after a queued rename fails', async (operation) => {
+    const draftError = { code: 'preparation-draft-write-failed' as const, message: 'Disk failed.' }
+    const applyPreparationDraft = vi.fn().mockResolvedValue({ ok: false, error: draftError })
+    Object.defineProperty(window, 'electron', {
+      configurable: true,
+      value: { books: { applyPreparationDraft } }
+    })
+    const store = useBooksStore()
+    store.preparation = prepared()
+    await store.schedulePreparationDraft({
+      type: 'rename',
+      chapterId: 'chapter-1',
+      title: 'Must persist first'
+    })
+    expect(await store.schedulePreparationDraft(operation)).toBe(false)
+    expect(applyPreparationDraft).toHaveBeenCalledTimes(1)
+    expect(applyPreparationDraft).toHaveBeenCalledWith(
+      expect.objectContaining({ operation: expect.objectContaining({ type: 'rename' }) })
+    )
+    expect(store.preparationError).toEqual(draftError)
+  })
+
+  it.each(['Create', 'Close'] as const)(
+    'keeps preparation open and does not dispatch %s when rename flush fails',
+    async (journey) => {
+      const draftError = {
+        code: 'preparation-draft-write-failed' as const,
+        message: 'Disk failed.'
+      }
+      const applyPreparationDraft = vi.fn().mockResolvedValue({ ok: false, error: draftError })
+      const commitPreparation = vi.fn()
+      const closePreparation = vi.fn()
+      Object.defineProperty(window, 'electron', {
+        configurable: true,
+        value: { books: { applyPreparationDraft, commitPreparation, closePreparation } }
+      })
+      const store = useBooksStore()
+      store.session = inferredSession()
+      store.mode = 'reader'
+      store.preparation = prepared()
+      await store.schedulePreparationDraft({
+        type: 'rename',
+        chapterId: 'chapter-1',
+        title: `Before ${journey}`
+      })
+      if (journey === 'Create') await store.commitPreparation()
+      else await store.closePreparation()
+      expect(commitPreparation).not.toHaveBeenCalled()
+      expect(closePreparation).not.toHaveBeenCalled()
+      expect(store.preparation).not.toBeNull()
+      expect(store.preparationError).toEqual(draftError)
+    }
+  )
+
+  it('retains a timer-fired rename while busy and persists it on the next flush', async () => {
+    vi.useFakeTimers()
+    let current = prepared()
+    const applyPreparationDraft = vi.fn(async (request: { nonce: number }) => {
+      current = {
+        ...current,
+        draftPersisted: true,
+        draftId: 'draft-id-00000001',
+        draftNonce: request.nonce,
+        revision: request.nonce.toString(16).padStart(64, '0')
+      }
+      return { ok: true as const, value: current }
+    })
+    Object.defineProperty(window, 'electron', {
+      configurable: true,
+      value: { books: { applyPreparationDraft } }
+    })
+    const store = useBooksStore()
+    store.preparation = current
+    store.preparationPending = true
+    store.preparationError = { code: 'preparation-conflict', message: 'Keep this error.' }
+    await store.schedulePreparationDraft({
+      type: 'rename',
+      chapterId: 'chapter-1',
+      title: 'Queued while busy'
+    })
+    await vi.advanceTimersByTimeAsync(300)
+    expect(applyPreparationDraft).not.toHaveBeenCalled()
+    expect(store.preparationError?.message).toBe('Keep this error.')
+
+    store.preparationPending = false
+    expect(await store.flushPreparationDraft()).toBe(true)
+    expect(applyPreparationDraft).toHaveBeenCalledTimes(1)
+  })
+
   it('stops at the dirty guard without dispatching begin', async () => {
     bus.off('lb::prepare-return-to-book', allow)
     const reject = (payload: unknown): void => (payload as (value: boolean) => void)(false)
