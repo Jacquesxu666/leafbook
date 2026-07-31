@@ -255,6 +255,8 @@ interface FileIdentity {
   dev: bigint
   ino: bigint
   mode: number
+  size?: bigint
+  mtimeNs?: bigint
 }
 
 interface PathComponentIdentity extends FileIdentity {
@@ -519,7 +521,13 @@ const fileIdentity = async (
     if (stat.isSymbolicLink() || (requireDirectory ? !stat.isDirectory() : !stat.isFile())) {
       return null
     }
-    return { dev: stat.dev, ino: stat.ino, mode: Number(stat.mode) }
+    return {
+      dev: stat.dev,
+      ino: stat.ino,
+      mode: Number(stat.mode),
+      size: stat.size,
+      mtimeNs: stat.mtimeNs
+    }
   } catch {
     return null
   }
@@ -531,7 +539,13 @@ const fileIdentitySync = (targetPath: string, requireDirectory = false): FileIde
     if (stat.isSymbolicLink() || (requireDirectory ? !stat.isDirectory() : !stat.isFile())) {
       return null
     }
-    return { dev: stat.dev, ino: stat.ino, mode: Number(stat.mode) }
+    return {
+      dev: stat.dev,
+      ino: stat.ino,
+      mode: Number(stat.mode),
+      size: stat.size,
+      mtimeNs: stat.mtimeNs
+    }
   } catch {
     return null
   }
@@ -3999,6 +4013,8 @@ export class BookSessionManager {
           targetStat !== null &&
           !targetStat.isSymbolicLink() &&
           targetStat.nlink === lease.targetLinkCount &&
+          (lease.targetIdentity.size === undefined ||
+            targetStat.size === lease.targetIdentity.size) &&
           targetStat.nlink === 1n
       : targetIdentity === null && targetStat === null
   }
