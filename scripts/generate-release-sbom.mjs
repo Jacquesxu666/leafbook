@@ -146,7 +146,10 @@ const generate = async () => {
     { cwd: repositoryRoot, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 }
   )
   if (licenseResult.status !== 0) {
-    process.stderr.write(licenseResult.stderr || 'pnpm license inventory failed.\n')
+    process.stderr.write(
+      licenseResult.stderr ||
+        `pnpm license inventory failed (status=${licenseResult.status}, signal=${licenseResult.signal ?? 'none'}).\n${licenseResult.stdout ?? ''}`
+    )
     process.exitCode = 1
     return
   }
