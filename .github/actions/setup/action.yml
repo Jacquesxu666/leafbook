@@ -26,4 +26,5 @@ runs:
       shell: bash
       run: |
         pnpm store prune
+        pnpm fetch --force --frozen-lockfile
         pnpm install --frozen-lockfile --ignore-scripts --force
