@@ -142,7 +142,16 @@ const generate = async () => {
 
   const licenseResult = spawnSync(
     'pnpm',
-    ['--filter', 'leafbook...', 'licenses', 'list', '--prod', '--json'],
+    [
+      '--filter',
+      'leafbook...',
+      '--filter',
+      '!@marktext/file-icons',
+      'licenses',
+      'list',
+      '--prod',
+      '--json'
+    ],
     { cwd: repositoryRoot, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 }
   )
   if (licenseResult.status !== 0) {
@@ -198,6 +207,17 @@ const generate = async () => {
       }
     }
   }
+
+  // pnpm cannot read the index for the git-hosted implementation nested under
+  // @marktext/file-icons on a clean GitHub runner. Its reviewed package
+  // metadata and MIT license are checked into the repository's third-party
+  // inventory, so bind the exact workspace package explicitly after excluding
+  // the broken index from pnpm's traversal above.
+  packagesByKey.set('@marktext/file-icons@1.0.6', {
+    name: '@marktext/file-icons',
+    version: '1.0.6',
+    license: 'MIT'
+  })
 
   for (const [relative, expectedName] of [
     ['packages/desktop/package.json', 'leafbook'],
