@@ -24,4 +24,6 @@ runs:
 
     - name: Install Dependencies
       shell: bash
-      run: pnpm install --frozen-lockfile --ignore-scripts --force
+      run: |
+        pnpm store prune
+        pnpm install --frozen-lockfile --ignore-scripts --force
