@@ -25,6 +25,5 @@ runs:
     - name: Install Dependencies
       shell: bash
       run: |
-        pnpm store prune
-        pnpm fetch --force --frozen-lockfile
+        pnpm config set store-dir "$RUNNER_TEMP/leafbook-pnpm-store"
         pnpm install --frozen-lockfile --ignore-scripts

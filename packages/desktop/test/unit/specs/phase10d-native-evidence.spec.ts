@@ -330,7 +330,7 @@ describe('Phase 10D native release evidence', () => {
     expect(install?.name).toBe('Install Dependencies')
     expect(install?.shell).toBe('bash')
     expect(install?.run).toContain('pnpm install --frozen-lockfile --ignore-scripts')
-    expect(install?.run).toContain('pnpm fetch --force --frozen-lockfile')
+    expect(install?.run).toContain('pnpm config set store-dir "$RUNNER_TEMP/leafbook-pnpm-store"')
     expect(JSON.stringify(install)).not.toContain('GITHUB_TOKEN')
     for (const workflow of [
       '.github/workflows/build.yml',
