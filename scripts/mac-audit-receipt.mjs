@@ -6,6 +6,7 @@ import fs from 'node:fs'
 import fsPromises from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { parse as parsePlistXml } from 'plist'
 
 export const RECEIPT_SCHEMA = 'leafbook-macos-content-tree-receipt/v2'
 export const AUDIT_CONFIG_VERSION = 2
@@ -22,12 +23,17 @@ const CRITICAL_FILES = [
 ]
 
 const parsePlist = (bytes) => {
-  const output = execFileSync('/usr/bin/plutil', ['-convert', 'json', '-o', '-', '--', '-'], {
-    input: bytes,
-    maxBuffer: 8 * 1024 * 1024,
-    stdio: ['pipe', 'pipe', 'pipe']
-  })
-  const plist = JSON.parse(output.toString('utf8'))
+  let plist
+  if (fs.existsSync('/usr/bin/plutil')) {
+    const output = execFileSync('/usr/bin/plutil', ['-convert', 'json', '-o', '-', '--', '-'], {
+      input: bytes,
+      maxBuffer: 8 * 1024 * 1024,
+      stdio: ['pipe', 'pipe', 'pipe']
+    })
+    plist = JSON.parse(output.toString('utf8'))
+  } else {
+    plist = parsePlistXml(bytes.toString('utf8'))
+  }
   const identity = {
     bundleIdentifier: plist.CFBundleIdentifier,
     displayName: plist.CFBundleDisplayName,

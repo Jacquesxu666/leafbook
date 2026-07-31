@@ -46,7 +46,8 @@ verify_listing() {
 # Electron or substituting a fake pnpm binary.
 if [[ "${1:-}" == "--check-list" ]]; then
   [[ -f "${2:-}" ]] || { echo "Missing Playwright listing fixture." >&2; exit 1; }
-  [[ "$(stat -f '%z' "$2")" -le 65536 ]] || { echo "Listing fixture is too large." >&2; exit 1; }
+  fixture_bytes="$(wc -c < "$2")"
+  [[ "$fixture_bytes" -le 65536 ]] || { echo "Listing fixture is too large." >&2; exit 1; }
   verify_listing "$(<"$2")"
   exit
 fi

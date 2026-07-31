@@ -68,6 +68,7 @@
     "eslint-plugin-vue": "^10.9.2",
     "license-checker": "^25.0.1",
     "neostandard": "^0.13.0",
+    "plist": "^5.0.0",
     "prettier": "^3.8.4",
     "tsx": "^4.22.4",
     "typescript-eslint": "^8.61.1",

@@ -74,8 +74,9 @@ export function isSafeLocalResource(source: unknown): boolean {
     }
 }
 
-export const isNetworkFileSource = (source: unknown): boolean =>
-    !isSafeLocalResource(source);
+export function isNetworkFileSource(source: unknown): boolean {
+    return !isSafeLocalResource(source);
+}
 
 function localPathToFileUrl(localPath: string): string {
     const normalized = localPath.replace(/\\/g, '/');
