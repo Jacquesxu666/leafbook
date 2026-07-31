@@ -3998,7 +3998,8 @@ export class BookSessionManager {
           sameFileIdentity(targetIdentity, lease.targetIdentity) &&
           targetStat !== null &&
           !targetStat.isSymbolicLink() &&
-          targetStat.nlink === lease.targetLinkCount
+          targetStat.nlink === lease.targetLinkCount &&
+          targetStat.nlink === 1n
       : targetIdentity === null && targetStat === null
   }
 

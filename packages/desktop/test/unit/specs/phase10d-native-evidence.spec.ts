@@ -327,11 +327,10 @@ describe('Phase 10D native release evidence', () => {
     const setupText = read('.github/actions/setup/action.yml')
     expect(setupText).not.toMatch(/github\.token|GITHUB_TOKEN/u)
     const install = action.runs.steps.find(({ name }) => name === 'Install Dependencies')
-    expect(install).toEqual({
-      name: 'Install Dependencies',
-      shell: 'bash',
-      run: 'pnpm install --frozen-lockfile --ignore-scripts'
-    })
+    expect(install?.name).toBe('Install Dependencies')
+    expect(install?.shell).toBe('bash')
+    expect(install?.run).toContain('pnpm install --frozen-lockfile --ignore-scripts')
+    expect(install?.run).toContain('pnpm fetch --force --frozen-lockfile')
     expect(JSON.stringify(install)).not.toContain('GITHUB_TOKEN')
     for (const workflow of [
       '.github/workflows/build.yml',

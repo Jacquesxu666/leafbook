@@ -41,8 +41,6 @@ def main() -> int:
                 resource.setrlimit(resource.RLIMIT_AS, (address_bytes, address_bytes))
             _, nofile_hard = resource.getrlimit(resource.RLIMIT_NOFILE)
             resource.setrlimit(resource.RLIMIT_NOFILE, (min(256, nofile_hard), nofile_hard))
-            if sys.platform.startswith("linux") and hasattr(resource, "RLIMIT_NPROC"):
-                resource.setrlimit(resource.RLIMIT_NPROC, (64, 64))
 
         kwargs["preexec_fn"] = limits
     elif os.name == "nt":
