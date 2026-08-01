@@ -225,7 +225,6 @@ const allowedNative = (relative, platform, architecture) => {
 
 const allowedScriptExecutable = (relative, carrierKind) =>
   (carrierKind === 'appimage' && relative === 'AppRun') ||
-  (['deb', 'rpm'].includes(carrierKind) && relative === 'usr/bin/leafbook') ||
   (carrierKind === 'snap' && relative === 'command.sh')
 
 const requireRegular = (entries, name, message) => {
@@ -477,8 +476,6 @@ const validateCarrierShape = async ({ root, entries, carrierKind, version }) => 
     const allowed = [
       /^opt$/,
       /^usr$/,
-      /^usr\/bin$/,
-      /^usr\/bin\/leafbook$/,
       /^usr\/share$/,
       /^usr\/share\/applications$/,
       /^usr\/share\/applications\/leafbook\.desktop$/,
@@ -498,7 +495,7 @@ const validateCarrierShape = async ({ root, entries, carrierKind, version }) => 
       if (!allowed.some((pattern) => pattern.test(entry.path))) {
         throw new Error(`${carrierKind} carrier contains unapproved metadata: ${entry.path}`)
       }
-      if (entry.type === 'symlink' && entry.path !== 'usr/bin/leafbook') {
+      if (entry.type === 'symlink') {
         throw new Error(`${carrierKind} carrier contains an unapproved symlink: ${entry.path}`)
       }
     }
@@ -614,20 +611,8 @@ const validateCarrierShape = async ({ root, entries, carrierKind, version }) => 
 }
 
 const validateLauncher = async ({ root, entries, carrierKind, platform, architecture }) => {
-  if (platform === 'windows' || carrierKind === 'archive') return
-  if (carrierKind === 'deb' || carrierKind === 'rpm') {
-    const launcher = entries.find((entry) => entry.path === 'usr/bin/leafbook')
-    if (!launcher) throw new Error(`${carrierKind} carrier is missing usr/bin/leafbook launcher`)
-    if (launcher.type === 'symlink') {
-      const target = launcher.target.replaceAll('\\', '/')
-      const expected = '/opt/LeafBook/leafbook'
-      if (target !== expected && target !== '../../opt/LeafBook/leafbook') {
-        throw new Error(`${carrierKind} launcher does not bind the audited executable`)
-      }
-    } else {
-      throw new Error(`${carrierKind} launcher must be the canonical symlink`)
-    }
-  } else if (carrierKind === 'appimage') {
+  if (platform === 'windows' || ['archive', 'deb', 'rpm'].includes(carrierKind)) return
+  if (carrierKind === 'appimage') {
     const launcher = entries.find((entry) => entry.path === 'AppRun')
     if (!launcher) throw new Error('AppImage carrier is missing AppRun')
     if (launcher.type !== 'file') throw new Error('AppRun must be the pinned regular template')

@@ -948,8 +948,6 @@ gh release create "\${GITHUB_REF_NAME}" final-release/assets/* "\${release_flags
         const app = path.join(tree, 'opt', 'LeafBook')
         fs.mkdirSync(app, { recursive: true })
         writePayload(app)
-        fs.mkdirSync(path.join(tree, 'usr', 'bin'), { recursive: true })
-        fs.symlinkSync('/opt/LeafBook/leafbook', path.join(tree, 'usr', 'bin', 'leafbook'))
         fs.mkdirSync(path.join(tree, 'usr', 'share', 'applications'), { recursive: true })
         fs.writeFileSync(
           path.join(tree, 'usr', 'share', 'applications', 'leafbook.desktop'),

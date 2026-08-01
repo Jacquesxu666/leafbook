@@ -7039,3 +7039,28 @@ book_structure_ready=true code=0`. The harness verified the original sample
 - Remaining issues: hosted runners must reveal and validate the next carrier
   checks; protected signing/notarization credentials remain unconfigured.
 - Git commit: pending.
+
+### 2026-07-31 Package-managed Linux launcher contract
+
+- User goal: keep advancing every native carrier audit and finish the formal
+  LeafBook 1.0 release path.
+- Completed: aligned DEB and RPM application-layout validation with their real
+  electron-builder packages: neither archive contains `usr/bin/leafbook`;
+  their already hash-pinned `POSTIN`/`postinst` scripts create and register the
+  launcher at installation time.
+- Completed: removed the obsolete launcher allowlist entirely, so a packaged
+  `usr/bin` file or symlink is now rejected as unexpected metadata rather than
+  accepted redundantly.
+- Files: `scripts/audit-application-layout.mjs`,
+  `packages/desktop/test/unit/specs/release-gate-static.spec.ts`, and this log.
+- Tests: focused static release suite passed 35/35; generated metadata,
+  targeted ESLint and Prettier, and `git diff --check` passed. Hosted Windows
+  x64 and ARM64 both passed their complete PR carrier audits and uploaded both
+  architecture-qualified artifact sets.
+- Key decision: bind launcher behavior to the exact audited package-manager
+  scripts instead of requiring a second, nonexistent symlink inside the
+  payload archive.
+- Remaining issues: hosted Linux must continue through RPM and AppImage after
+  this correction; protected signing/notarization credentials remain
+  unconfigured.
+- Git commit: pending.
