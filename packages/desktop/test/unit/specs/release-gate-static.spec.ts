@@ -131,6 +131,19 @@ describe('Phase 8D static release gate', () => {
     ])
   })
 
+  it('prevents rpmbuild from injecting unaudited build-id symlinks', () => {
+    const document = parseDocument(read('packages/desktop/electron-builder.yml'), {
+      merge: false,
+      strict: true,
+      uniqueKeys: true
+    })
+    expect(document.errors).toEqual([])
+    const builder = document.toJS({ maxAliasCount: 0 }) as {
+      rpm: { fpm: string[] }
+    }
+    expect(builder.rpm.fpm).toEqual(['--rpm-rpmbuild-define', '_build_id_links none'])
+  })
+
   it('pins the local package command to no publish, signing, or notarization', () => {
     const script = read('scripts/package-mac-unsigned-dir.sh')
     const builder = read('packages/desktop/electron-builder.yml')

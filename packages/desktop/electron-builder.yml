@@ -163,3 +163,10 @@ linux:
       name: 'Markdown'
       description: 'Markdown document'
       mimeType: 'text/markdown'
+rpm:
+  # rpmbuild otherwise injects /usr/lib/.build-id symlinks for ELF files under
+  # /opt/LeafBook. They are debugger conveniences, not application payload,
+  # and make the native carrier differ from the audited canonical app tree.
+  fpm:
+    - '--rpm-rpmbuild-define'
+    - '_build_id_links none'

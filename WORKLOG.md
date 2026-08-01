@@ -7086,3 +7086,26 @@ book_structure_ready=true code=0`. The harness verified the original sample
   through the remaining RPM/AppImage audits; formal signing/notarization
   credentials remain unconfigured.
 - Git commit: pending.
+
+### 2026-07-31 Deterministic RPM application payload
+
+- User goal: keep resolving every hosted carrier failure on the path to the
+  formal LeafBook 1.0 release.
+- Completed: traced RPM's unexpected `usr/lib` tree to rpmbuild-generated ELF
+  build-id convenience symlinks and disabled them with the target-specific
+  `_build_id_links none` macro.
+- Completed: locked the exact two-argument fpm configuration in the static
+  release gate, while keeping `/usr/lib` wholly rejected by the extracted-tree
+  audit instead of broadening its metadata allowlist.
+- Files: `packages/desktop/electron-builder.yml`,
+  `packages/desktop/test/unit/specs/release-gate-static.spec.ts`, and this log.
+- Tests: focused static release suite passed 36/36; targeted ESLint and
+  Prettier passed. A real local electron-builder RPM probe reached fpm and
+  showed the exact `--rpm-rpmbuild-define _build_id_links none` invocation;
+  final RPM creation correctly stopped because local macOS has no `rpmbuild`.
+- Key decision: remove debugger-only RPM mutations at the build source rather
+  than accept a large generated symlink namespace outside LeafBook's canonical
+  application tree.
+- Remaining issues: hosted Linux must confirm the RPM payload and continue to
+  AppImage; formal signing/notarization credentials remain unconfigured.
+- Git commit: pending.
