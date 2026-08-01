@@ -6755,3 +6755,28 @@ book_structure_ready=true code=0`. The harness verified the original sample
   upstream branding and should only be replaced when LeafBook-specific manuals
   are ready.
 - Git commit: pending.
+
+### 2026-07-31 LeafBook 1.0 release blocker remediation
+
+- User goal: clear every CI failure and continue through the formal LeafBook
+  1.0 release workflow.
+- Completed: aligned PlantUML, remote-image, and auto-pair E2E coverage with
+  LeafBook's offline renderer policy; made icon verification resilient to
+  macOS tool metadata differences; and removed the unstable git-hosted
+  `file-icons` tarball from the production dependency graph.
+- Completed: added a private MIT `file-icons` compatibility workspace because
+  `@marktext/file-icons` ships all runtime JS, CSS, and fonts prebuilt and uses
+  the replaced package only during its own upstream build.
+- Files: CI setup/license workflows, E2E tests, icon verification, root package
+  metadata and lockfile, SBOM generator, `packages/file-icons-compat`, and this
+  log.
+- Tests: license validation passed; deterministic SPDX generation produced 471
+  packages twice with byte-identical output; focused release tests passed
+  58/58; lint passed with 0 errors; Desktop typecheck passed; full Desktop unit
+  suite passed 1520 with 1 skipped.
+- Key decision: eliminate the non-reproducible production tarball rather than
+  continue mutating pnpm's runner cache or weakening the SBOM gate.
+- Remaining issues: hosted CI must validate the new dependency graph. Formal
+  macOS/Windows publication still requires protected-Environment signing
+  credentials, native receipts, approval, and release evidence.
+- Git commit: pending.
