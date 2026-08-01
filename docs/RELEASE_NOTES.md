@@ -1,4 +1,4 @@
-# LeafBook 0.1.0
+# LeafBook 1.0.0
 
 ## Highlights
 

@@ -1,6 +1,6 @@
 {
   "name": "leafbook",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "LeafBook — a local-first Markdown book reader and editor",
   "license": "MIT",
   "main": "./out/main/index.js",

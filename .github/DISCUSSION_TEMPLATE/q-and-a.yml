@@ -1,4 +1,4 @@
-title: "[Question] "
+title: '[Question] '
 labels: []
 body:
   - type: markdown
@@ -18,6 +18,6 @@ body:
     id: leafbook-version
     attributes:
       label: LeafBook version
-      placeholder: "e.g. 0.1.0"
+      placeholder: 'e.g. 1.0.0'
     validations:
       required: true

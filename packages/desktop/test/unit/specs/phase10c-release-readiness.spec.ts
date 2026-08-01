@@ -9,6 +9,8 @@ import { parseDocument } from 'yaml'
 
 const root = path.resolve(__dirname, '../../../../..')
 const read = (relative: string): string => fs.readFileSync(path.join(root, relative), 'utf8')
+const desktopVersion = (JSON.parse(read('packages/desktop/package.json')) as { version: string })
+  .version
 const runNode = (script: string, args: string[] = [], env?: NodeJS.ProcessEnv) =>
   spawnSync(process.execPath, [path.join(root, script), ...args], {
     cwd: root,
@@ -172,7 +174,7 @@ describe('Phase 10C release-readiness definitions', () => {
       expect(ignored).toBe(namespace)
       const baseline = module.digestSbomPayload(payload)
       expect(namespace).toBe(
-        `https://github.com/Jacquesxu666/leafbook/sbom/leafbook-0.1.0/${baseline}`
+        `https://github.com/Jacquesxu666/leafbook/sbom/leafbook-${desktopVersion}/${baseline}`
       )
       expect(module.digestSbomPayload(structuredClone(payload))).toBe(baseline)
       expect(module.canonicalJson({ z: 1, a: { y: 2, b: 3 } })).toBe(
@@ -215,7 +217,7 @@ describe('Phase 10C release-readiness definitions', () => {
         mutate(changed)
         expect(module.digestSbomPayload(changed), field).not.toBe(baseline)
         expect(
-          module.buildSbomDocument({ version: '0.1.0', payload: changed }).documentNamespace,
+          module.buildSbomDocument({ version: desktopVersion, payload: changed }).documentNamespace,
           field
         ).not.toBe(namespace)
       }

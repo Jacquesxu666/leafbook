@@ -6769,6 +6769,25 @@ book_structure_ready=true code=0`. The harness verified the original sample
   the release branch can advance to tagging.
 - Git commit: pending.
 
+#### LeafBook 1.0.0 release candidate metadata
+
+- Completed: promoted the Desktop package, formal release notes, and Linux
+  AppStream release entry from `0.1.0` to the stable `1.0.0` candidate.
+- Files: `packages/desktop/package.json`, `docs/RELEASE_NOTES.md`,
+  `packages/desktop/build/linux/leafbook.appdata.xml`, the GitHub issue and
+  discussion templates, and this log.
+- Tests: stable `v1.0.0` tag validation, release-notes validation, and LeafBook
+  generated-metadata validation passed; focused release-readiness, native-
+  evidence, and static release-gate suites passed 68/68; targeted Prettier and
+  `git diff --check` passed.
+- Key decision: keep the release notes' fail-closed disclosures until hosted
+  signing, notarization, native evidence, and human publication approval have
+  actually completed.
+- Remaining issues: the `v1.0.0` tag must not be created until the candidate
+  commit passes CI and the protected signing environments contain their real
+  credentials.
+- Git commit: pending.
+
 ### 2026-07-31 LeafBook 1.0 release blocker remediation
 
 - User goal: clear every CI failure and continue through the formal LeafBook

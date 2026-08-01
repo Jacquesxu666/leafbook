@@ -11,6 +11,8 @@ import { parseDocument } from 'yaml'
 const root = path.resolve(__dirname, '../../../../..')
 const read = (relative: string): string => fs.readFileSync(path.join(root, relative), 'utf8')
 const nodeRequire = createRequire(import.meta.url)
+const desktopVersion = (JSON.parse(read('packages/desktop/package.json')) as { version: string })
+  .version
 
 interface WorkflowStep {
   id?: string
@@ -790,7 +792,7 @@ gh release create "\${GITHUB_REF_NAME}" final-release/assets/* "\${release_flags
           productName: 'LeafBook',
           sanitizedProductName: 'LeafBook',
           description: 'LeafBook — a local-first Markdown book reader and editor',
-          buildVersion: '0.1.0'
+          buildVersion: desktopVersion
         },
         executableName: 'leafbook',
         info: { metadata: { desktopName: 'leafbook' } },
@@ -803,7 +805,7 @@ gh release create "\${GITHUB_REF_NAME}" final-release/assets/* "\${release_flags
     const appImageDesktop = await desktopHelper.computeDesktopEntry(
       desktopOptions(),
       'AppRun --no-sandbox %U',
-      { 'X-AppImage-Version': '0.1.0' }
+      { 'X-AppImage-Version': desktopVersion }
     )
     const snapDesktop = await desktopHelper.computeDesktopEntry(desktopOptions(), 'leafbook %U', {
       Icon: `${String.fromCharCode(36)}{SNAP}/meta/gui/icon.png`
@@ -993,7 +995,7 @@ gh release create "\${GITHUB_REF_NAME}" final-release/assets/* "\${release_flags
 
       fs.writeFileSync(
         path.join(appimage, 'leafbook.desktop'),
-        appImageDesktop.replace('X-AppImage-Version=0.1.0', 'X-AppImage-Version=9.9.9')
+        appImageDesktop.replace(`X-AppImage-Version=${desktopVersion}`, 'X-AppImage-Version=9.9.9')
       )
       await expect(
         module.auditApplicationLayout({
