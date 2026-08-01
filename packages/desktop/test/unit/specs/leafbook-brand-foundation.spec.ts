@@ -34,7 +34,7 @@ describe('LeafBook public identity', () => {
       APP_NAME: 'LeafBook',
       APP_SLUG: 'leafbook',
       APP_ID: 'com.jacquesxu.leafbook',
-      REPOSITORY_URL: 'https://github.com/Jacquesxu666/marktext'
+      REPOSITORY_URL: 'https://github.com/Jacquesxu666/leafbook'
     })
   })
 

@@ -6,7 +6,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        **Before reporting:** Search [existing issues](https://github.com/Jacquesxu666/marktext/issues) to avoid duplicates. If you find a match, use 👍 instead of opening a new issue.
+        **Before reporting:** Search [existing issues](https://github.com/Jacquesxu666/leafbook/issues) to avoid duplicates. If you find a match, use 👍 instead of opening a new issue.
 
   - type: textarea
     id: description

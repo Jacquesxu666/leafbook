@@ -14,10 +14,10 @@
       "url": "https://github.com/Jacquesxu666"
     }
   ],
-  "homepage": "https://github.com/Jacquesxu666/marktext",
+  "homepage": "https://github.com/Jacquesxu666/leafbook",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Jacquesxu666/marktext.git"
+    "url": "git+https://github.com/Jacquesxu666/leafbook.git"
   },
   "scripts": {
     "minify-locales": "tsx ../../scripts/minify-locales.ts",

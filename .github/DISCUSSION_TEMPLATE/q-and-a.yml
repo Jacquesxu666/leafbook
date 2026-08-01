@@ -5,7 +5,7 @@ body:
     attributes:
       value: |
         Thanks for using LeafBook. Search existing discussions and the
-        [current documentation](https://github.com/Jacquesxu666/marktext/blob/develop/README.md)
+        [current documentation](https://github.com/Jacquesxu666/leafbook/blob/develop/README.md)
         before posting.
   - type: textarea
     id: question

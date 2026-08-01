@@ -7,7 +7,7 @@
 export const APP_NAME = 'LeafBook'
 export const APP_SLUG = 'leafbook'
 export const APP_ID = 'com.jacquesxu.leafbook'
-export const REPOSITORY_URL = 'https://github.com/Jacquesxu666/marktext'
+export const REPOSITORY_URL = 'https://github.com/Jacquesxu666/leafbook'
 export const README_URL = `${REPOSITORY_URL}/blob/develop/README.md`
 export const ISSUES_URL = `${REPOSITORY_URL}/issues`
 export const DISCUSSIONS_URL = `${REPOSITORY_URL}/discussions`

@@ -236,7 +236,7 @@ def validate_deb_control(fields: dict[str, str], expected_version: str, expected
         "Architecture": expected_arch,
         "Maintainer": "LeafBook Contributors",
         "Priority": "optional",
-        "Homepage": "https://github.com/Jacquesxu666/marktext",
+        "Homepage": "https://github.com/Jacquesxu666/leafbook",
     }
     for name, expected in exact.items():
         if fields[name] != expected:

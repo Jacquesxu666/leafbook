@@ -54,7 +54,7 @@ If you fix a bug:
 ### Where should I start?
 
 A good way to start is to find a
-[LeafBook issue](https://github.com/Jacquesxu666/marktext/issues) labeled
+[LeafBook issue](https://github.com/Jacquesxu666/leafbook/issues) labeled
 `bug`, `help wanted`, or `feature request`. Discuss larger changes first.
 
 Other ways to help:
@@ -69,7 +69,7 @@ Other ways to help:
 ## Quick start
 
 1. Fork the repository.
-2. Clone your fork: `git clone git@github.com:<username>/marktext.git`
+2. Clone your fork: `git clone git@github.com:<username>/leafbook.git`
 3. Create a feature branch: `git checkout -b feature`
 4. Make your changes and push your branch.
 5. Create a PR against `develop` and describe your changes.

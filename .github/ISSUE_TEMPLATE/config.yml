@@ -1,8 +1,8 @@
 blank_issues_enabled: false
 contact_links:
   - name: Ask a Question
-    url: https://github.com/Jacquesxu666/marktext/discussions
+    url: https://github.com/Jacquesxu666/leafbook/discussions
     about: Use GitHub Discussions for questions, help, and general conversation about LeafBook.
   - name: Documentation
-    url: https://github.com/Jacquesxu666/marktext/blob/develop/README.md
+    url: https://github.com/Jacquesxu666/leafbook/blob/develop/README.md
     about: Read the LeafBook project overview and current documentation links first.

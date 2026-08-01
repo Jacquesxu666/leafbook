@@ -120,7 +120,7 @@ export const buildSbomDocument = ({ version, payload }) => {
   if (typeof version !== 'string' || version.length === 0) {
     throw new Error('SBOM document version is required')
   }
-  const documentNamespace = `https://github.com/Jacquesxu666/marktext/sbom/leafbook-${version}/${digestSbomPayload(payload)}`
+  const documentNamespace = `https://github.com/Jacquesxu666/leafbook/sbom/leafbook-${version}/${digestSbomPayload(payload)}`
   return {
     spdxVersion: payload.spdxVersion,
     dataLicense: payload.dataLicense,

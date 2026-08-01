@@ -7,13 +7,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Project Overview
 
 LeafBook is a local-first Markdown book reader and editor derived from MarkText.
-The current fork lives at `https://github.com/Jacquesxu666/marktext`; inherited
+The project lives at `https://github.com/Jacquesxu666/leafbook`; inherited
 editor documentation and internal package names may still refer to the upstream
 MarkText project.
 
 - **Version**: `packages/desktop/package.json` is the single source of truth
 - **License**: MIT
-- **Repository**: https://github.com/Jacquesxu666/marktext
+- **Repository**: https://github.com/Jacquesxu666/leafbook
 - **Upstream**: https://github.com/marktext/marktext
 
 ## Tech Stack

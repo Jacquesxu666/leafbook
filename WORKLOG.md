@@ -6730,3 +6730,28 @@ book_structure_ready=true code=0`. The harness verified the original sample
 - Application source and `dist`: untouched. No secret value, credential, tag,
   release, dispatch, publication, push, commit, or `dist` operation occurred.
 - Git commit: none.
+
+### 2026-07-31 LeafBook brand migration
+
+- User goal: retire the inherited `marktext` project identity and make the
+  personal project consistently publish as LeafBook.
+- Completed: renamed the GitHub repository from `Jacquesxu666/marktext` to
+  `Jacquesxu666/leafbook`, updated the local `origin`, and kept `upstream`
+  pointed at the original MarkText repository.
+- Completed: changed project-owned package metadata, public URLs, issue and
+  discussion templates, website download links, Linux AppStream metadata,
+  archive metadata, SBOM namespace, and release tests to `leafbook`.
+- Preserved: MarkText attribution, license notices, upstream URLs, and
+  `@marktext/*`/Muya identifiers that belong to inherited source or third-party
+  compatibility rather than LeafBook branding.
+- Files: project manifests, desktop branding metadata, website links, GitHub
+  templates, release scripts/tests, `CLAUDE.md`, `.vscode/settings.json`, and
+  this log.
+- Tests: targeted LeafBook branding, Phase 10C release-readiness, and static
+  release-gate suites passed (72/72).
+- Key decision: use the lowercase GitHub slug `leafbook`; GitHub's old URL is
+  retained by redirect, while all new project-owned links use the new slug.
+- Remaining issues: inherited localized MarkText documentation still contains
+  upstream branding and should only be replaced when LeafBook-specific manuals
+  are ready.
+- Git commit: pending.

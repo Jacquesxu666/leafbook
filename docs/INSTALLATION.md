@@ -20,7 +20,7 @@ sha256sum -c SHA256SUMS.txt
 
 On macOS, use `shasum -a 256 <file>` and compare the complete digest when GNU
 `sha256sum` is unavailable. A future attested candidate must additionally pass
-`gh attestation verify <file> -R Jacquesxu666/marktext`; checksums establish
+`gh attestation verify <file> -R Jacquesxu666/leafbook`; checksums establish
 integrity, while attestation binds artifacts to a GitHub workflow identity.
 
 ## Install and upgrade

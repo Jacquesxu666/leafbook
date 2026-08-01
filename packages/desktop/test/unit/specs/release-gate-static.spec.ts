@@ -1240,7 +1240,7 @@ gh release create "\${GITHUB_REF_NAME}" final-release/assets/* "\${release_flags
           '   header=f"{name}/".ljust(16)+f"{0:<12}{0:<6}{0:<6}{0o100644:<8}{len(body):<10}`\\n"',
           '   out.write(header.encode("ascii")); out.write(body)',
           '   if len(body)%2: out.write(b"\\n")',
-          'fields=["Package: leafbook","Version: 0.1.0","License: MIT","Vendor: LeafBook Contributors","Architecture: amd64","Maintainer: LeafBook Contributors","Installed-Size: 1024","Depends: libgtk-3-0, libnotify4, libnss3, libxss1, libxtst6, xdg-utils, libatspi2.0-0, libuuid1, libsecret-1-0","Recommends: libappindicator3-1","Section: default","Priority: optional","Homepage: https://github.com/Jacquesxu666/marktext","Description: A local-first Markdown book reader and editor."]',
+          'fields=["Package: leafbook","Version: 0.1.0","License: MIT","Vendor: LeafBook Contributors","Architecture: amd64","Maintainer: LeafBook Contributors","Installed-Size: 1024","Depends: libgtk-3-0, libnotify4, libnss3, libxss1, libxtst6, xdg-utils, libatspi2.0-0, libuuid1, libsecret-1-0","Recommends: libappindicator3-1","Section: default","Priority: optional","Homepage: https://github.com/Jacquesxu666/leafbook","Description: A local-first Markdown book reader and editor."]',
           'body=("\\n".join(fields)+"\\n").encode()',
           'control=tar([("./control",body,0o644),("./md5sums",b"d41d8cd98f00b204e9800998ecf8427e  opt/LeafBook/resources/app.asar\\n",0o644)])',
           'ar(sys.argv[1],control)',

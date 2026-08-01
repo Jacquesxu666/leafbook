@@ -172,7 +172,7 @@ describe('Phase 10C release-readiness definitions', () => {
       expect(ignored).toBe(namespace)
       const baseline = module.digestSbomPayload(payload)
       expect(namespace).toBe(
-        `https://github.com/Jacquesxu666/marktext/sbom/leafbook-0.1.0/${baseline}`
+        `https://github.com/Jacquesxu666/leafbook/sbom/leafbook-0.1.0/${baseline}`
       )
       expect(module.digestSbomPayload(structuredClone(payload))).toBe(baseline)
       expect(module.canonicalJson({ z: 1, a: { y: 2, b: 3 } })).toBe(

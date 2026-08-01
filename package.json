@@ -1,9 +1,9 @@
 {
-  "name": "marktext-monorepo",
+  "name": "leafbook-monorepo",
   "description": "LeafBook monorepo root",
   "license": "MIT",
   "private": true,
-  "homepage": "https://github.com/Jacquesxu666/marktext",
+  "homepage": "https://github.com/Jacquesxu666/leafbook",
   "packageManager": "pnpm@10.33.4",
   "engines": {
     "node": ">=20.19.0",
