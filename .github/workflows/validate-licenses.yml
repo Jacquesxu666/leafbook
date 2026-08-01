@@ -50,7 +50,10 @@ jobs:
       - name: Validate dependency licenses
         run: pnpm run validate-licenses
       - name: Repair package indexes for SBOM inventory
-        run: pnpm install --frozen-lockfile
+        # The setup action intentionally skips lifecycle scripts. Keep this
+        # repair install script-free as well: SBOM inventory needs pnpm's
+        # package indexes, not Electron native rebuilds or X11 headers.
+        run: pnpm install --frozen-lockfile --ignore-scripts
       - name: Bind SBOM time to exact source commit
         shell: bash
         run: |

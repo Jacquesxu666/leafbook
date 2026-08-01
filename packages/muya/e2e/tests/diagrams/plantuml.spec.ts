@@ -30,7 +30,7 @@ test.describe('plantuml diagram', () => {
         });
     });
 
-    test('setContent with @startuml renders an <img> pointing at plantuml.com', async ({ page }) => {
+    test('setContent with @startuml renders an offline placeholder', async ({ page }) => {
         await page.evaluate((text) => {
             const state: TState[] = [{
                 name: 'diagram',
@@ -44,14 +44,10 @@ test.describe('plantuml diagram', () => {
         // diagram preview synchronously after the loader resolves. Wait for
         // the `<img>` to appear.
         const img = page.locator(`${editor.diagramPreview} img`).first();
-        await expect(img).toBeVisible({ timeout: 10_000 });
+        await expect(page.locator(editor.diagramPreview))
+            .toContainText('PlantUML preview is disabled in offline mode.');
+        await expect(img).toHaveCount(0);
 
-        const src = await img.getAttribute('src');
-        expect(src).toBeTruthy();
-        // The encoded URL points at the public service. We can't assert the
-        // exact encoded blob (it's deflate+base64), but the prefix shape is
-        // stable.
-        expect(src).toMatch(/^https?:\/\/(www\.)?plantuml\.com\/plantuml\/svg\//);
     });
 
     test('plantuml diagram round-trips through getMarkdown', async ({ page }) => {
@@ -64,8 +60,8 @@ test.describe('plantuml diagram', () => {
             window.muya!.setContent(state);
         }, PLANTUML_SOURCE);
 
-        await expect(page.locator(`${editor.diagramPreview} img`).first())
-            .toBeVisible({ timeout: 10_000 });
+        await expect(page.locator(editor.diagramPreview))
+            .toContainText('PlantUML preview is disabled in offline mode.');
 
         const md = await page.evaluate(() => window.muya!.getMarkdown());
         expect(md).toContain('```plantuml');

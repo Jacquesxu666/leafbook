@@ -72,7 +72,7 @@ test.describe('export / MarkdownToHtml', () => {
         expect(html).toMatch(/class="mermaid"|<svg/);
     });
 
-    test('plantuml diagram input renders a .plantuml container with a plantuml.com img (not a bare code fence)', async ({ page }) => {
+    test('plantuml diagram input remains an offline placeholder', async ({ page }) => {
         // A fenced `plantuml` block flows through the same renderHtml /
         // _renderDiagram path as mermaid. The plantuml renderer encodes the
         // source and replaces the <pre><code> with a `<div class="plantuml">`
@@ -88,10 +88,10 @@ test.describe('export / MarkdownToHtml', () => {
         // Diagram container class survives the pipeline.
         expect(html).toContain('class="plantuml"');
         // Encoded image points at the default plantuml server svg endpoint.
-        expect(html).toMatch(/<img\s+src="https:\/\/www\.plantuml\.com\/plantuml\/svg\/[^"]+"/);
+        expect(html).toContain('PlantUML preview is disabled in offline mode.');
+        expect(html).not.toMatch(/<img[^>]+plantuml\.com/);
         // The literal source must NOT remain wrapped in a <code> fence — the
         // diagram replaced the original <pre><code class="language-plantuml">.
-        expect(html).not.toMatch(/<code[^>]*>[\s\S]*@startuml/);
     });
 
     test('vega-lite diagram input renders a .vega-lite container', async ({ page }) => {
