@@ -6756,6 +6756,20 @@ book_structure_ready=true code=0`. The harness verified the original sample
   are ready.
 - Git commit: pending.
 
+#### LeafBook 1.0.0 hosted unit-test follow-up
+
+- Completed: made the community-template branding assertion validate the YAML
+  placeholder value independently of Prettier's valid single- versus double-
+  quote choice.
+- Files: `packages/desktop/test/unit/specs/leafbook-brand-foundation.spec.ts`
+  and this log.
+- Tests: the preceding hosted run passed 1519 tests with 1 skipped and exposed
+  this single formatting-only assertion; the focused branding suite passed
+  14/14 and the full Desktop suite passed 1520 with 1 skipped after the fix;
+  targeted Prettier and `git diff --check` passed.
+- Remaining issues: hosted CI must validate the refreshed candidate.
+- Git commit: pending.
+
 #### Hosted CI follow-up
 
 - Completed: updated the native-evidence regression test to validate the

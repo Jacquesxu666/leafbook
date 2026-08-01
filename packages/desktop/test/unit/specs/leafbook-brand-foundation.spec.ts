@@ -166,12 +166,11 @@ describe('LeafBook public identity', () => {
     )
     expect(releaseWorkflow).not.toContain('dist/*.blockmap')
     expect(releaseWorkflow).not.toContain('dist/*.yml')
-    expect(repositoryFile('.github/ISSUE_TEMPLATE/bug_report.yml')).toContain(
-      `placeholder: 'e.g. ${desktopPackage.version}'`
+    const versionPlaceholder = new RegExp(
+      `placeholder: ['"]e\\.g\\. ${desktopPackage.version.replaceAll('.', '\\.')}['"]`
     )
-    expect(repositoryFile('.github/DISCUSSION_TEMPLATE/q-and-a.yml')).toContain(
-      `placeholder: "e.g. ${desktopPackage.version}"`
-    )
+    expect(repositoryFile('.github/ISSUE_TEMPLATE/bug_report.yml')).toMatch(versionPlaceholder)
+    expect(repositoryFile('.github/DISCUSSION_TEMPLATE/q-and-a.yml')).toMatch(versionPlaceholder)
     expect(repositoryFile('packages/desktop/build/linux/leafbook.appdata.xml')).toContain(
       `version="${desktopPackage.version}"`
     )
