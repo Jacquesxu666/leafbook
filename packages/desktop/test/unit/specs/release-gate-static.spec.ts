@@ -1248,18 +1248,40 @@ gh release create "\${GITHUB_REF_NAME}" final-release/assets/* "\${release_flags
     }
   })
 
-  it('discovers exactly one AppImage SquashFS marker with a fixed-memory scanner', () => {
+  it('discovers exactly one valid AppImage SquashFS payload with a fixed-memory scanner', () => {
+    if (process.platform === 'win32') return
     const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'leafbook-appimage-marker-'))
     const scanner = path.join(root, 'scripts/find-squashfs-offset.py')
     try {
       const one = path.join(temporary, 'one.AppImage')
+      const falsePositive = path.join(temporary, 'false-positive.AppImage')
       const multiple = path.join(temporary, 'multiple.AppImage')
+      const validator = path.join(temporary, 'mock-unsquashfs')
       fs.writeFileSync(one, Buffer.concat([Buffer.alloc(1024 * 1024 + 2), Buffer.from('hsqs')]))
-      fs.writeFileSync(multiple, Buffer.from('prefix-hsqs-middle-hsqs-suffix'))
-      const valid = spawnSync('python3', [scanner, one], { encoding: 'utf8' })
-      expect(valid.status).toBe(0)
+      fs.writeFileSync(falsePositive, Buffer.from('prefix-hsqs-middle-hsqs-suffix'))
+      fs.writeFileSync(multiple, Buffer.from('hsqs-middle-hsqs'))
+      fs.writeFileSync(
+        validator,
+        [
+          '#!/usr/bin/env python3',
+          'import os,sys',
+          'name=os.path.basename(sys.argv[4])',
+          'offset=int(sys.argv[3])',
+          'valid=(name == "one.AppImage" and offset == 1048578) or (name == "false-positive.AppImage" and offset == 19) or name == "multiple.AppImage"',
+          'raise SystemExit(0 if valid else 1)',
+          ''
+        ].join('\n')
+      )
+      fs.chmodSync(validator, 0o755)
+      const valid = spawnSync('python3', [scanner, one, validator], { encoding: 'utf8' })
+      expect(valid.status, valid.stderr).toBe(0)
       expect(valid.stdout.trim()).toBe(String(1024 * 1024 + 2))
-      const invalid = spawnSync('python3', [scanner, multiple], { encoding: 'utf8' })
+      const filtered = spawnSync('python3', [scanner, falsePositive, validator], {
+        encoding: 'utf8'
+      })
+      expect(filtered.status, filtered.stderr).toBe(0)
+      expect(filtered.stdout.trim()).toBe('19')
+      const invalid = spawnSync('python3', [scanner, multiple, validator], { encoding: 'utf8' })
       expect(invalid.status).toBe(1)
       expect(invalid.stderr).toContain('exactly one')
     } finally {

@@ -7109,3 +7109,25 @@ book_structure_ready=true code=0`. The harness verified the original sample
 - Remaining issues: hosted Linux must confirm the RPM payload and continue to
   AppImage; formal signing/notarization credentials remain unconfigured.
 - Git commit: pending.
+
+### 2026-07-31 Validated AppImage payload discovery
+
+- User goal: continue through the final Linux carrier failures without
+  weakening the formal LeafBook 1.0 release gate.
+- Completed: replaced raw `hsqs` marker counting with bounded candidate
+  discovery plus exact-offset `unsquashfs -s` validation, so compressed data
+  false positives are ignored while zero or multiple real payloads still fail.
+- Completed: capped marker candidates and each validator invocation, retained
+  the outer wall-clock/output limits, and added fixtures proving one valid
+  payload among false markers succeeds while two valid payloads are rejected.
+- Files: `scripts/find-squashfs-offset.py`,
+  `packages/desktop/test/unit/specs/release-gate-static.spec.ts`, and this log.
+- Tests: focused static release suite passed 36/36; Python compilation,
+  targeted ESLint, Prettier, and `git diff --check` passed. Hosted Linux ARM64
+  passed all four carriers; Linux x64 reached AppImage and exposed the marker
+  false positive this change addresses; all four macOS/Windows jobs passed.
+- Key decision: authenticate candidate offsets with the same pinned extractor
+  used for preflight and extraction instead of trusting a four-byte signature.
+- Remaining issues: hosted Linux x64 and ARM64 must validate this last scanner
+  change; formal signing/notarization credentials remain unconfigured.
+- Git commit: pending.
