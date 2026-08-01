@@ -6964,3 +6964,27 @@ book_structure_ready=true code=0`. The harness verified the original sample
 - Remaining issues: rerun all six hosted package builds and continue through
   every remaining fail-closed carrier check.
 - Git commit: pending.
+
+### 2026-07-31 Canonical Linux maintainer scripts and Windows path handoff
+
+- User goal: clear the completed six-platform CI failures and continue directly
+  through the formal LeafBook 1.0 release.
+- Completed: allowed only electron-builder 26.15.3's deterministic DEB
+  `postinst` and `postrm` scripts, with exact SHA-256 bodies, root ownership,
+  executable modes, required presence, and tamper tests; all other maintainer
+  hooks and metadata remain rejected before extraction.
+- Completed: made the application-layout audit return its already-validated
+  logical resources path instead of recomputing it between Git Bash and native
+  Windows path syntaxes.
+- Files: `scripts/preflight-archive.py`,
+  `scripts/audit-application-layout.mjs`,
+  `packages/desktop/test/unit/specs/release-gate-static.spec.ts`, and this log.
+- Tests: full Desktop unit suite passed 1522 with 1 skipped; focused static
+  release suite passed 35/35; release-notes and generated-metadata gates,
+  targeted ESLint, Prettier, Bash syntax, and `git diff --check` passed.
+- Key decision: trust only byte-identical scripts rendered from the pinned
+  packager templates, rather than broadly permitting package-manager hooks.
+- Remaining issues: hosted Linux must advance through RPM/AppImage audits and
+  hosted Windows must validate the corrected path handoff; formal publication
+  still requires the protected signing credentials.
+- Git commit: pending.

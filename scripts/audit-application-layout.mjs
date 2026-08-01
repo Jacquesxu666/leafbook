@@ -790,6 +790,7 @@ export const auditApplicationLayout = async ({
 
   return {
     appRoot,
+    resourcesRelative,
     resources: path.join(canonicalTree, ...resourcesRelative.split('/')),
     executable: path.join(canonicalTree, ...executableRelative.split('/')),
     manifest: appManifest,
@@ -812,7 +813,7 @@ if (isMain) {
       carrierKind,
       expectedVersion
     })
-    const resourcesRelative = path.relative(path.resolve(tree), result.resources)
+    const resourcesRelative = result.resourcesRelative
     if (
       !resourcesRelative ||
       path.isAbsolute(resourcesRelative) ||

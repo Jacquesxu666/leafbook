@@ -3,6 +3,7 @@ import fs from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { createRequire } from 'node:module'
 import { pathToFileURL } from 'node:url'
 import { describe, expect, it } from 'vitest'
@@ -1282,6 +1283,24 @@ gh release create "\${GITHUB_REF_NAME}" final-release/assets/* "\${release_flags
   it('rejects Debian maintainer hooks before extraction and accepts fixed control metadata', () => {
     const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'leafbook-deb-control-'))
     const clean = path.join(temporary, 'clean.deb')
+    const renderMaintainerScript = (template: 'after-install.tpl' | 'after-remove.tpl') =>
+      fs
+        .readFileSync(nodeRequire.resolve(`app-builder-lib/templates/linux/${template}`), 'utf8')
+        .replaceAll('$' + '{executable}', 'leafbook')
+        .replaceAll('$' + '{sanitizedProductName}', 'LeafBook')
+        .replaceAll('$' + '{productFilename}', 'LeafBook')
+    const postinst = path.join(temporary, 'postinst')
+    const postrm = path.join(temporary, 'postrm')
+    const postinstBody = renderMaintainerScript('after-install.tpl')
+    const postrmBody = renderMaintainerScript('after-remove.tpl')
+    expect(createHash('sha256').update(postinstBody).digest('hex')).toBe(
+      'b41f43732ac478993a67a156ead287b6bfbeb72b2bbabc5fbbb7fbb618e90cb6'
+    )
+    expect(createHash('sha256').update(postrmBody).digest('hex')).toBe(
+      '6cad66957fed4a5d34f1cce633e7d90184bcd1cc5999f913d134420ffa25a83f'
+    )
+    fs.writeFileSync(postinst, postinstBody)
+    fs.writeFileSync(postrm, postrmBody)
     const build = spawnSync(
       'python3',
       [
@@ -1305,19 +1324,24 @@ gh release create "\${GITHUB_REF_NAME}" final-release/assets/* "\${release_flags
           '   header=f"{name}/".ljust(16)+f"{0:<12}{0:<6}{0:<6}{0o100644:<8}{len(body):<10}`\\n"',
           '   out.write(header.encode("ascii")); out.write(body)',
           '   if len(body)%2: out.write(b"\\n")',
+          'postinst=open(sys.argv[3],"rb").read(); postrm=open(sys.argv[4],"rb").read()',
           'fields=["Package: leafbook","Version: 0.1.0","License: MIT","Vendor: LeafBook Contributors","Architecture: amd64","Maintainer: LeafBook Contributors","Installed-Size: 1024","Depends: libgtk-3-0, libnotify4, libnss3, libxss1, libxtst6, xdg-utils, libatspi2.0-0, libuuid1, libsecret-1-0","Recommends: libappindicator3-1","Section: default","Priority: optional","Homepage: https://github.com/Jacquesxu666/leafbook","Description: A local-first Markdown book reader and editor."]',
           'body=("\\n".join(fields)+"\\n").encode()',
-          'control=tar([("./control",body,0o644),("./md5sums",b"d41d8cd98f00b204e9800998ecf8427e  opt/LeafBook/resources/app.asar\\n",0o644)])',
+          'fixed=[("./md5sums",b"d41d8cd98f00b204e9800998ecf8427e  opt/LeafBook/resources/app.asar\\n",0o644),("./postinst",postinst,0o755),("./postrm",postrm,0o755)]',
+          'control=tar([("./control",body,0o644),*fixed])',
           'ar(sys.argv[1],control)',
           'for field in ("Pre-Depends: curl","Conflicts: bash","Replaces: coreutils","Essential: yes","Protected: yes","X-Danger: command"):',
-          ' poisoned=tar([("./control",body+field.encode()+b"\\n",0o644)])',
+          ' poisoned=tar([("./control",body+field.encode()+b"\\n",0o644),*fixed])',
           ' ar(f"{sys.argv[2]}/{field.split(chr(58),1)[0]}.deb",poisoned)',
           'for hook in ("preinst","postinst","prerm","postrm","config","templates","triggers"):',
-          ' scripted=tar([("./control",body,0o644),(f"./{hook}",b"#!/bin/sh\\ntouch /tmp/pwned\\n",0o755)])',
+          ' scripts=[entry for entry in fixed if entry[0] != f"./{hook}"]',
+          ' scripted=tar([("./control",body,0o644),*scripts,(f"./{hook}",b"#!/bin/sh\\ntouch /tmp/pwned\\n",0o755)])',
           ' ar(f"{sys.argv[2]}/{hook}.deb",scripted)'
         ].join('\n'),
         clean,
-        temporary
+        temporary,
+        postinst,
+        postrm
       ],
       { encoding: 'utf8' }
     )
@@ -1353,7 +1377,11 @@ gh release create "\${GITHUB_REF_NAME}" final-release/assets/* "\${release_flags
         const hookFixture = path.join(temporary, `${hook}.deb`)
         const rejected = run(hookFixture)
         expect(rejected.status).not.toBe(0)
-        expect(rejected.stderr).toContain('unapproved maintainer metadata or script')
+        expect(rejected.stderr).toContain(
+          hook === 'postinst' || hook === 'postrm'
+            ? 'maintainer script is not canonical'
+            : 'unapproved maintainer metadata or script'
+        )
       }
     } finally {
       fs.rmSync(temporary, { recursive: true, force: true })

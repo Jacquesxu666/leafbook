@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Fail-closed archive metadata budget check. This never extracts payload bytes."""
 
+import hashlib
 import io
 import os
 import posixpath
@@ -44,6 +45,10 @@ DEB_REQUIRED_FIELDS = {
     "Priority",
     "Homepage",
     "Description",
+}
+DEB_MAINTAINER_SCRIPT_SHA256 = {
+    "postinst": "b41f43732ac478993a67a156ead287b6bfbeb72b2bbabc5fbbb7fbb618e90cb6",
+    "postrm": "6cad66957fed4a5d34f1cce633e7d90184bcd1cc5999f913d134420ffa25a83f",
 }
 DEB_DEPENDS = (
     "libgtk-3-0",
@@ -268,7 +273,7 @@ def validate_deb_control(fields: dict[str, str], expected_version: str, expected
 
 
 def check_deb_control(fileobj, expected_version: str, expected_arch: str):
-    allowed = {"control", "md5sums"}
+    allowed = {"control", "md5sums", *DEB_MAINTAINER_SCRIPT_SHA256}
     seen = set()
     control_body = None
     with tarfile.open(fileobj=fileobj, mode="r:*") as archive:
@@ -289,6 +294,9 @@ def check_deb_control(fileobj, expected_version: str, expected_arch: str):
                 )
             if not member.isfile() or member.issym() or member.islnk():
                 raise ValueError(f"Debian control metadata must be a regular file: {name}")
+            expected_mode = 0o755 if name in DEB_MAINTAINER_SCRIPT_SHA256 else 0o644
+            if member.mode != expected_mode or member.uid != 0 or member.gid != 0:
+                raise ValueError(f"Debian control metadata has non-canonical ownership or mode: {name}")
             limit = 64 * 1024 if name == "control" else 16 * 1024 * 1024
             if member.size < 1 or member.size > limit:
                 raise ValueError(f"Debian control metadata exceeds fixed budget: {name}")
@@ -297,8 +305,16 @@ def check_deb_control(fileobj, expected_version: str, expected_arch: str):
                 if extracted is None:
                     raise ValueError("Debian control metadata cannot be read")
                 control_body = extracted.read(limit + 1)
-    if "control" not in seen:
-        raise ValueError("Debian control archive is missing control metadata")
+            elif name in DEB_MAINTAINER_SCRIPT_SHA256:
+                extracted = archive.extractfile(member)
+                if extracted is None:
+                    raise ValueError(f"Debian maintainer script cannot be read: {name}")
+                body = extracted.read(limit + 1)
+                if hashlib.sha256(body).hexdigest() != DEB_MAINTAINER_SCRIPT_SHA256[name]:
+                    raise ValueError(f"Debian maintainer script is not canonical: {name}")
+    missing = allowed - seen
+    if missing:
+        raise ValueError(f"Debian control archive is missing required metadata: {sorted(missing)}")
     if control_body is None:
         raise ValueError("Debian control archive is missing control metadata")
     validate_deb_control(
