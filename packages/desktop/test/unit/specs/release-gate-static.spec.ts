@@ -1291,6 +1291,7 @@ gh release create "\${GITHUB_REF_NAME}" final-release/assets/* "\${release_flags
           'def tar(entries):',
           ' out=io.BytesIO()',
           ' with tarfile.open(fileobj=out,mode="w:gz") as t:',
+          '  d=tarfile.TarInfo("."); d.type=tarfile.DIRTYPE; t.addfile(d)',
           '  for name,body,mode in entries:',
           '   info=tarfile.TarInfo(name); info.size=len(body); info.mode=mode',
           '   t.addfile(info,io.BytesIO(body))',

@@ -6940,3 +6940,27 @@ book_structure_ready=true code=0`. The harness verified the original sample
 - Remaining issues: rerun all six hosted package builds to discover the next
   fail-closed carrier assertion, if any.
 - Git commit: pending.
+
+### 2026-07-31 Native carrier path-boundary portability
+
+- User goal: eliminate the next hosted carrier-audit failures and continue the
+  LeafBook 1.0 release without weakening safety boundaries.
+- Completed: made the Debian control-archive parser accept only an exact empty
+  root-directory marker before validating the fixed control-file allowlist.
+- Completed: changed the application-layout subprocess contract to return a
+  validated relative resources path; the shell now joins that path to its own
+  extraction root, avoiding unsafe Windows/Git-Bash absolute-path spelling
+  mismatches.
+- Files: `scripts/preflight-archive.py`,
+  `scripts/audit-application-layout.mjs`,
+  `scripts/audit-platform-artifacts.sh`,
+  `packages/desktop/test/unit/specs/release-gate-static.spec.ts`, and this log.
+- Tests: focused release suites passed 70/70; release-note and generated-
+  metadata gates passed; targeted ESLint, Prettier, Bash syntax, Python usage,
+  and `git diff --check` passed. A real local Electron 42 Linux tar was built
+  and its standalone archive preflight passed.
+- Key decision: exchange only a carrier-relative path across Node and Bash so
+  each runtime owns native path conversion while traversal remains rejected.
+- Remaining issues: rerun all six hosted package builds and continue through
+  every remaining fail-closed carrier check.
+- Git commit: pending.

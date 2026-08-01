@@ -273,10 +273,16 @@ def check_deb_control(fileobj, expected_version: str, expected_arch: str):
     control_body = None
     with tarfile.open(fileobj=fileobj, mode="r:*") as archive:
         for member in archive:
-            name = checked_name(member.name)
+            name = checked_name(member.name, allow_root=member.isdir())
             if name in seen:
                 raise ValueError(f"duplicate Debian control path: {name!r}")
             seen.add(name)
+            if name == ".":
+                if not member.isdir() or member.size != 0 or member.linkname:
+                    raise ValueError(
+                        "Debian control root directory marker contains unexpected metadata"
+                    )
+                continue
             if name not in allowed:
                 raise ValueError(
                     f"Debian control archive contains unapproved maintainer metadata or script: {name}"

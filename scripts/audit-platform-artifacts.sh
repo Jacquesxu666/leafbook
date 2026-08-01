@@ -136,15 +136,22 @@ audit_extracted_tree() {
   local carrier_kind="$3"
   "$repository_root/scripts/check-safe-artifact-path.sh" directory "$tree" "$temporary_root"
   "$repository_root/scripts/check-no-updater-files.sh" "$tree"
-  local layout_json resources_directory manifest_digest
+  local layout_json resources_relative resources_directory manifest_digest
   layout_json="$(
     node "$repository_root/scripts/audit-application-layout.mjs" \
       "$platform" "$architecture" "$tree" "$carrier_kind" "$version"
   )"
-  resources_directory="$(
-    node -e 'process.stdout.write(Buffer.from(JSON.parse(process.argv[1]).resourcesBase64, "base64"))' \
+  resources_relative="$(
+    node -e 'process.stdout.write(Buffer.from(JSON.parse(process.argv[1]).resourcesRelativeBase64, "base64"))' \
       "$layout_json"
   )"
+  case "$resources_relative" in
+    ''|/*|../*|*/../*|*/..)
+      echo "$carrier returned an unsafe relative resources directory." >&2
+      exit 1
+      ;;
+  esac
+  resources_directory="$tree/$resources_relative"
   manifest_digest="$(
     node -e 'process.stdout.write(JSON.parse(process.argv[1]).manifestDigest)' "$layout_json"
   )"

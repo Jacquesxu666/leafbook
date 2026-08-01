@@ -812,9 +812,20 @@ if (isMain) {
       carrierKind,
       expectedVersion
     })
+    const resourcesRelative = path.relative(path.resolve(tree), result.resources)
+    if (
+      !resourcesRelative ||
+      path.isAbsolute(resourcesRelative) ||
+      resourcesRelative === '..' ||
+      resourcesRelative.startsWith(`..${path.sep}`)
+    ) {
+      throw new Error('Audited resources directory is not relative to the carrier tree')
+    }
     process.stdout.write(
       `${JSON.stringify({
-        resourcesBase64: Buffer.from(result.resources).toString('base64'),
+        resourcesRelativeBase64: Buffer.from(resourcesRelative.split(path.sep).join('/')).toString(
+          'base64'
+        ),
         manifestDigest: result.manifestDigest,
         carrierManifestDigest: result.carrierManifestDigest,
         nativeFileCount: result.nativeFiles.length
