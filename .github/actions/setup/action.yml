@@ -26,4 +26,6 @@ runs:
       shell: bash
       run: |
         pnpm config set store-dir "$RUNNER_TEMP/leafbook-pnpm-store"
+        git_hosted_store="$RUNNER_TEMP/leafbook-pnpm-store/v10/https+++codeload.github.com+file-icons+atom+tar.gz+28520868aee66e576145a0b18aa2cde5444a897a"
+        rm -rf -- "$git_hosted_store"
         pnpm install --frozen-lockfile --ignore-scripts

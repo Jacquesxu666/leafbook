@@ -53,7 +53,10 @@ jobs:
         # The setup action intentionally skips lifecycle scripts. Keep this
         # repair install script-free as well: SBOM inventory needs pnpm's
         # package indexes, not Electron native rebuilds or X11 headers.
-        run: pnpm install --frozen-lockfile --force --ignore-scripts
+        run: |
+          git_hosted_store="$RUNNER_TEMP/leafbook-pnpm-store/v10/https+++codeload.github.com+file-icons+atom+tar.gz+28520868aee66e576145a0b18aa2cde5444a897a"
+          rm -rf -- "$git_hosted_store"
+          pnpm install --frozen-lockfile --ignore-scripts
       - name: Bind SBOM time to exact source commit
         shell: bash
         run: |
