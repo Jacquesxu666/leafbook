@@ -6819,6 +6819,18 @@ book_structure_ready=true code=0`. The harness verified the original sample
   and AppImage with the production ripgrep payload.
 - Git commit: pending.
 
+#### Complete PR build-matrix diagnostics
+
+- Completed: disabled matrix fail-fast for PR packaging so one platform failure
+  no longer cancels unrelated macOS, Windows, and Linux evidence jobs.
+- Files: `.github/workflows/build.yml` and this log.
+- Tests: focused release-readiness and static release-gate suites passed 58/58;
+  targeted Prettier and `git diff --check` passed.
+- Key decision: retain per-job failure semantics while collecting the complete
+  cross-platform result in a single hosted run.
+- Remaining issues: hosted CI must validate the workflow and all six jobs.
+- Git commit: pending.
+
 #### Hosted CI follow-up
 
 - Completed: updated the native-evidence regression test to validate the
