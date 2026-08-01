@@ -124,8 +124,6 @@ linux:
   description: 'A local-first Markdown book reader and editor.'
   maintainer: 'LeafBook Contributors'
   category: 'Office;TextEditor;Utility'
-  mimeTypes:
-    - 'text/markdown'
   icon: 'static/icon.png'
   desktop:
     entry:

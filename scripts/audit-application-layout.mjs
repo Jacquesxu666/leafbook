@@ -238,7 +238,6 @@ const expectedDesktopFile = async (carrierKind, version) => {
   const targetSpecificOptions = {
     description: 'A local-first Markdown book reader and editor.',
     category: 'Office;TextEditor;Utility',
-    mimeTypes: ['text/markdown'],
     desktop: {
       entry: {
         StartupWMClass: 'leafbook',

@@ -7014,3 +7014,28 @@ book_structure_ready=true code=0`. The harness verified the original sample
 - Remaining issues: hosted runners must advance through the remaining carrier
   tree checks; stable signing/notarization credentials remain unconfigured.
 - Git commit: pending.
+
+### 2026-07-31 Deterministic Linux desktop metadata and Windows ASAR paths
+
+- User goal: continue through every hosted carrier failure until LeafBook 1.0
+  is ready for formal publication.
+- Completed: removed the redundant Linux `mimeTypes` array that
+  electron-builder mutates while producing multiple targets; MIME declarations
+  now come only from the seven explicit Markdown file associations and remain
+  byte-identical across repeated desktop-entry generation.
+- Completed: normalized `@electron/asar` listing separators to `/`, so the
+  Windows audit recognizes the same fixed KaTeX ESM path as Linux and macOS.
+- Files: `packages/desktop/electron-builder.yml`,
+  `scripts/audit-application-layout.mjs`,
+  `scripts/audit-platform-artifacts.sh`,
+  `packages/desktop/test/unit/specs/release-gate-static.spec.ts`, and this log.
+- Tests: focused static release suite passed 35/35, including a new repeated-
+  generation immutability assertion; generated metadata verification, targeted
+  ESLint, Prettier, Bash syntax, a bounded normalized ASAR listing probe, and
+  `git diff --check` passed.
+- Key decision: eliminate mutable duplicate build input instead of accepting
+  carrier-specific MIME duplication; normalize only the presentation of paths,
+  not their ASAR contents.
+- Remaining issues: hosted runners must reveal and validate the next carrier
+  checks; protected signing/notarization credentials remain unconfigured.
+- Git commit: pending.

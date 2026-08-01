@@ -821,7 +821,6 @@ gh release create "\${GITHUB_REF_NAME}" final-release/assets/* "\${release_flags
     const desktopOptions = () => ({
       description: 'A local-first Markdown book reader and editor.',
       category: 'Office;TextEditor;Utility',
-      mimeTypes: ['text/markdown'],
       desktop: {
         entry: {
           StartupWMClass: 'leafbook',
@@ -854,6 +853,13 @@ gh release create "\${GITHUB_REF_NAME}" final-release/assets/* "\${release_flags
         platformSpecificBuildOptions: { protocols: [] }
       })
     const desktopHelper = createDesktopHelper()
+    const sharedDesktopOptions = desktopOptions()
+    const firstSharedDesktop = await desktopHelper.computeDesktopEntry(sharedDesktopOptions)
+    const secondSharedDesktop = await desktopHelper.computeDesktopEntry(sharedDesktopOptions)
+    expect(secondSharedDesktop).toBe(firstSharedDesktop)
+    expect(firstSharedDesktop.match(/text\/markdown/g)).toHaveLength(
+      associationModule.LINUX_MARKDOWN_FILE_ASSOCIATIONS.length
+    )
     const packageDesktop = await desktopHelper.computeDesktopEntry(desktopOptions())
     const appImageDesktop = await desktopHelper.computeDesktopEntry(
       desktopOptions(),

@@ -210,7 +210,7 @@ audit_extracted_tree() {
     node "$repository_root/scripts/preflight-asar.mjs" "$asar"
   python3 "$repository_root/scripts/run-bounded.py" 120 90 536870912 -- \
     node -e \
-    'const { listPackage } = require("@electron/asar"); for (const item of listPackage(process.argv[1])) console.log(item)' \
+    'const path = require("node:path"); const { listPackage } = require("@electron/asar"); for (const item of listPackage(process.argv[1])) console.log(item.split(path.sep).join("/"))' \
     "$asar" > "$asar_listing"
   "$repository_root/scripts/check-asar-listing-no-updater.sh" "$asar_listing"
   grep -qx '/node_modules/katex/dist/katex.mjs' "$asar_listing" || {
