@@ -609,6 +609,10 @@ gh release create "\${GITHUB_REF_NAME}" final-release/assets/* "\${release_flags
       expect(audit).toContain(carrierAudit)
     }
     expect(audit.match(/audit_extracted_tree /g)?.length).toBeGreaterThanOrEqual(5)
+    expect(audit).toContain('tar_app_root="$tar_root/leafbook-linux-$architecture-$version"')
+    expect(audit).toContain(
+      'Linux tar carrier requires one canonical versioned application directory'
+    )
     expect(audit).not.toContain('leafbook-linux-$architecture-$version.snap')
     expect(audit).toContain('Windows setup carrier is not a valid PE file')
     expect(audit).toContain('7z t "$dist_dir/$setup"')
@@ -1392,7 +1396,7 @@ gh release create "\${GITHUB_REF_NAME}" final-release/assets/* "\${release_flags
       expect(audit).toContain(tag)
     }
     expect(audit).toContain('RPM carrier contains unapproved $surface.')
-    const rpmFixture = 'preflight_rpm_scriptlets "$dist_dir/$' + '{expected[3]}"'
+    const rpmFixture = 'preflight_rpm_scriptlets "$dist_dir/$' + '{expected[2]}"'
     expect(audit.indexOf(rpmFixture)).toBeLessThan(audit.indexOf('rpm2cpio "$2"'))
   })
 

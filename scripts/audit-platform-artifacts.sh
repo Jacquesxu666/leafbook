@@ -239,7 +239,22 @@ if [[ "$platform" == "linux" ]]; then
   preflight_python_archive tar "$dist_dir/${expected[3]}"
   python3 "$repository_root/scripts/run-bounded.py" 120 90 536870912 -- \
     tar -xzf "$dist_dir/${expected[3]}" -C "$tar_root"
-  audit_extracted_tree "$tar_root" "${expected[3]}" archive
+  tar_app_root="$tar_root/leafbook-linux-$architecture-$version"
+  node - "$tar_root" "$(basename "$tar_app_root")" <<'NODE'
+const fs = require('node:fs')
+const [root, expected] = process.argv.slice(2)
+const entries = fs.readdirSync(root, { withFileTypes: true })
+if (
+  entries.length !== 1 ||
+  entries[0].name !== expected ||
+  !entries[0].isDirectory() ||
+  entries[0].isSymbolicLink()
+) {
+  throw new Error('Linux tar carrier requires one canonical versioned application directory')
+}
+NODE
+  "$repository_root/scripts/check-safe-artifact-path.sh" directory "$tar_app_root" "$tar_root"
+  audit_extracted_tree "$tar_app_root" "${expected[3]}" archive
 
   deb_root="$temporary_root/deb"
   expected_deb_arch="$([[ "$architecture" == "x64" ]] && echo amd64 || echo arm64)"

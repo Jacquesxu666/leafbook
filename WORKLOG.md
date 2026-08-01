@@ -6787,6 +6787,22 @@ book_structure_ready=true code=0`. The harness verified the original sample
   carrier alongside the other platform jobs.
 - Git commit: pending.
 
+#### Linux tar carrier-root remediation
+
+- Completed: aligned the Linux tar audit with electron-builder's single
+  versioned application directory while requiring that exact directory as the
+  only extraction-root entry before auditing its complete payload.
+- Completed: corrected the RPM scriptlet regression assertion to reference the
+  RPM carrier index rather than the tar carrier index.
+- Files: `scripts/audit-platform-artifacts.sh`,
+  `packages/desktop/test/unit/specs/release-gate-static.spec.ts`, and this log.
+- Tests: `bash -n` passed; focused static release-gate suite passed 35/35;
+  targeted ESLint, Prettier, and `git diff --check` passed.
+- Key decision: unwrap exactly one canonical tar directory; reject siblings,
+  symlinks, files, and alternate names before application-layout inspection.
+- Remaining issues: hosted Linux carrier audits must validate all four formats.
+- Git commit: pending.
+
 #### Hosted CI follow-up
 
 - Completed: updated the native-evidence regression test to validate the
