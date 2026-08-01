@@ -26,4 +26,4 @@ runs:
       shell: bash
       run: |
         pnpm config set store-dir "$RUNNER_TEMP/leafbook-pnpm-store"
-        pnpm install --frozen-lockfile --ignore-scripts
+      pnpm install --frozen-lockfile --ignore-scripts --prefer-online
