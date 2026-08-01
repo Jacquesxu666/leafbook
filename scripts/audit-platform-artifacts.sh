@@ -16,7 +16,7 @@ if [[ "$is_prerelease" != "true" && "$is_prerelease" != "false" ]]; then
   exit 1
 fi
 
-if [[ ! -d "$dist_dir" || -L "$dist_dir" || "$(realpath "$dist_dir")" != "$repository_root/dist" ]]; then
+if [[ ! -d "$dist_dir" || -L "$dist_dir" || "$dist_dir" != "$repository_root/dist" ]]; then
   echo "Artifact directory must be the canonical fixed repository dist directory." >&2
   exit 1
 fi
@@ -171,8 +171,14 @@ audit_extracted_tree() {
       exit 1
     fi
   done
-  grep -q "MarkText Contributors" "$resources_directory/licenses/LICENSE"
-  grep -q "independent derivative project" "$resources_directory/licenses/NOTICE"
+  grep -q "MarkText Contributors" "$resources_directory/licenses/LICENSE" || {
+    echo "$carrier license is missing the required upstream attribution." >&2
+    exit 1
+  }
+  grep -q "independent derivative project" "$resources_directory/licenses/NOTICE" || {
+    echo "$carrier notice is missing the required derivative-project declaration." >&2
+    exit 1
+  }
   if grep -q '^undefined$' "$resources_directory/licenses/THIRD-PARTY-LICENSES.txt"; then
     echo "$carrier contains an invalid third-party notice body." >&2
     exit 1
@@ -209,9 +215,15 @@ if (metadata.author?.name !== 'Jacquesxu666') {
 }
 NODE
   if [[ "$platform" == "windows" ]]; then
-    find "$tree" -type f -name 'leafbook.exe' -print -quit | grep -q .
+    if ! find "$tree" -type f -name 'leafbook.exe' -print -quit | grep -q .; then
+      echo "$carrier application tree is missing leafbook.exe." >&2
+      exit 1
+    fi
   else
-    find "$tree" -type f -name 'leafbook' -print -quit | grep -q .
+    if ! find "$tree" -type f -name 'leafbook' -print -quit | grep -q .; then
+      echo "$carrier application tree is missing the leafbook executable." >&2
+      exit 1
+    fi
   fi
 }
 
@@ -260,9 +272,18 @@ NODE
   expected_deb_arch="$([[ "$architecture" == "x64" ]] && echo amd64 || echo arm64)"
   preflight_python_archive deb "$dist_dir/${expected[1]}" "$version" "$expected_deb_arch"
   dpkg-deb --info "$dist_dir/${expected[1]}" >/dev/null
-  [[ "$(dpkg-deb -f "$dist_dir/${expected[1]}" Package)" == "leafbook" ]]
-  [[ "$(dpkg-deb -f "$dist_dir/${expected[1]}" Version)" == "$version" ]]
-  [[ "$(dpkg-deb -f "$dist_dir/${expected[1]}" Architecture)" == "$expected_deb_arch" ]]
+  [[ "$(dpkg-deb -f "$dist_dir/${expected[1]}" Package)" == "leafbook" ]] || {
+    echo "DEB package identity is not leafbook." >&2
+    exit 1
+  }
+  [[ "$(dpkg-deb -f "$dist_dir/${expected[1]}" Version)" == "$version" ]] || {
+    echo "DEB package version is not $version." >&2
+    exit 1
+  }
+  [[ "$(dpkg-deb -f "$dist_dir/${expected[1]}" Architecture)" == "$expected_deb_arch" ]] || {
+    echo "DEB package architecture is not $expected_deb_arch." >&2
+    exit 1
+  }
   python3 "$repository_root/scripts/run-bounded.py" 120 90 536870912 -- \
     dpkg-deb --extract "$dist_dir/${expected[1]}" "$deb_root"
   audit_extracted_tree "$deb_root" "${expected[1]}" deb
@@ -272,10 +293,19 @@ NODE
   preflight_rpm "$dist_dir/${expected[2]}"
   preflight_rpm_scriptlets "$dist_dir/${expected[2]}"
   rpm -qip "$dist_dir/${expected[2]}" >/dev/null
-  [[ "$(rpm -qp --queryformat '%{NAME}' "$dist_dir/${expected[2]}")" == "leafbook" ]]
-  [[ "$(rpm -qp --queryformat '%{VERSION}' "$dist_dir/${expected[2]}")" == "$version" ]]
+  [[ "$(rpm -qp --queryformat '%{NAME}' "$dist_dir/${expected[2]}")" == "leafbook" ]] || {
+    echo "RPM package identity is not leafbook." >&2
+    exit 1
+  }
+  [[ "$(rpm -qp --queryformat '%{VERSION}' "$dist_dir/${expected[2]}")" == "$version" ]] || {
+    echo "RPM package version is not $version." >&2
+    exit 1
+  }
   expected_rpm_arch="$([[ "$architecture" == "x64" ]] && echo x86_64 || echo aarch64)"
-  [[ "$(rpm -qp --queryformat '%{ARCH}' "$dist_dir/${expected[2]}")" == "$expected_rpm_arch" ]]
+  [[ "$(rpm -qp --queryformat '%{ARCH}' "$dist_dir/${expected[2]}")" == "$expected_rpm_arch" ]] || {
+    echo "RPM package architecture is not $expected_rpm_arch." >&2
+    exit 1
+  }
   python3 "$repository_root/scripts/run-bounded.py" 120 90 536870912 -- \
     bash -c 'set -euo pipefail; cd "$1"; rpm2cpio "$2" | cpio -idm --quiet' \
     bash "$rpm_root" "$dist_dir/${expected[2]}"
@@ -286,10 +316,22 @@ NODE
   audit_extracted_tree "$appimage_root" "${expected[0]}" appimage
   appimage_desktop="$(find "$appimage_root" -maxdepth 2 -type f -name '*.desktop' -print -quit)"
   "$repository_root/scripts/check-safe-artifact-path.sh" regular "$appimage_desktop" "$appimage_root"
-  grep -qx 'Name=LeafBook' "$appimage_desktop"
-  grep -Eq '^Exec=.+$' "$appimage_desktop"
-  grep -qx 'StartupWMClass=leafbook' "$appimage_desktop"
-  grep -Eq '^MimeType=.*text/markdown' "$appimage_desktop"
+  grep -qx 'Name=LeafBook' "$appimage_desktop" || {
+    echo "AppImage desktop entry has a non-canonical name." >&2
+    exit 1
+  }
+  grep -Eq '^Exec=.+$' "$appimage_desktop" || {
+    echo "AppImage desktop entry is missing Exec." >&2
+    exit 1
+  }
+  grep -qx 'StartupWMClass=leafbook' "$appimage_desktop" || {
+    echo "AppImage desktop entry has a non-canonical StartupWMClass." >&2
+    exit 1
+  }
+  grep -Eq '^MimeType=.*text/markdown' "$appimage_desktop" || {
+    echo "AppImage desktop entry is missing the Markdown MIME type." >&2
+    exit 1
+  }
 
 else
   zip_root="$temporary_root/zip"

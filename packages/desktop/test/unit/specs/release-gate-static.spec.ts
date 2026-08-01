@@ -90,6 +90,9 @@ describe('Phase 8D static release gate', () => {
     expect(desktop.description).toContain('LeafBook')
     expect(builder).toContain('appId: com.jacquesxu.leafbook')
     expect(builder).toContain('productName: LeafBook')
+    expect(
+      builder.match(/!node_modules\/font-list\/libs\/darwin\/\{fontlist,fontlist\.m\}/g)
+    ).toHaveLength(2)
     expect(main).toContain("app.setPath('userData', path.join(app.getPath('appData'), APP_SLUG))")
   })
 

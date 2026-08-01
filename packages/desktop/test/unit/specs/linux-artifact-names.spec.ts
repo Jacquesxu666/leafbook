@@ -8,42 +8,76 @@ import { describe, expect, it } from 'vitest'
 const root = path.resolve(__dirname, '../../../../..')
 
 describe('Linux artifact names', () => {
-  it('normalizes electron-builder aarch64 RPM output to the canonical arm64 carrier', async () => {
-    const module = (await import(
-      pathToFileURL(path.join(root, 'scripts/normalize-linux-artifact-names.mjs')).href
-    )) as {
-      normalizeLinuxArtifactNames(options: {
-        architecture: string
-        distDirectory: string
-        version: string
-      }): Promise<string>
+  it.each([
+    {
+      architecture: 'x64',
+      builderNames: [
+        'x86_64-1.0.0.AppImage',
+        'amd64-1.0.0.deb',
+        'x86_64-1.0.0.rpm',
+        'x64-1.0.0.tar.gz'
+      ]
+    },
+    {
+      architecture: 'arm64',
+      builderNames: [
+        'arm64-1.0.0.AppImage',
+        'arm64-1.0.0.deb',
+        'aarch64-1.0.0.rpm',
+        'arm64-1.0.0.tar.gz'
+      ]
     }
-    const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'leafbook-linux-rpm-name-'))
-    try {
-      const source = path.join(temporary, 'leafbook-linux-aarch64-1.0.0.rpm')
-      const destination = path.join(temporary, 'leafbook-linux-arm64-1.0.0.rpm')
-      fs.writeFileSync(source, 'rpm')
+  ])(
+    'normalizes electron-builder $architecture output to canonical carrier names',
+    async ({ architecture, builderNames }) => {
+      const module = (await import(
+        pathToFileURL(path.join(root, 'scripts/normalize-linux-artifact-names.mjs')).href
+      )) as {
+        normalizeLinuxArtifactNames(options: {
+          architecture: string
+          distDirectory: string
+          version: string
+        }): Promise<string[]>
+      }
+      const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'leafbook-linux-rpm-name-'))
+      try {
+        for (const builderName of builderNames) {
+          fs.writeFileSync(path.join(temporary, `leafbook-linux-${builderName}`), builderName)
+        }
 
-      await expect(
-        module.normalizeLinuxArtifactNames({
-          architecture: 'arm64',
-          distDirectory: temporary,
-          version: '1.0.0'
-        })
-      ).resolves.toBe(destination)
-      expect(fs.existsSync(source)).toBe(false)
-      expect(fs.readFileSync(destination, 'utf8')).toBe('rpm')
+        await expect(
+          module.normalizeLinuxArtifactNames({
+            architecture,
+            distDirectory: temporary,
+            version: '1.0.0'
+          })
+        ).resolves.toEqual(
+          ['AppImage', 'deb', 'rpm', 'tar.gz'].map((extension) =>
+            path.join(temporary, `leafbook-linux-${architecture}-1.0.0.${extension}`)
+          )
+        )
+        for (const extension of ['AppImage', 'deb', 'rpm', 'tar.gz']) {
+          expect(
+            fs.statSync(path.join(temporary, `leafbook-linux-${architecture}-1.0.0.${extension}`))
+              .size
+          ).toBeGreaterThan(0)
+        }
 
-      fs.writeFileSync(source, 'duplicate')
-      await expect(
-        module.normalizeLinuxArtifactNames({
-          architecture: 'arm64',
-          distDirectory: temporary,
-          version: '1.0.0'
-        })
-      ).rejects.toThrow('Both legacy and canonical')
-    } finally {
-      fs.rmSync(temporary, { recursive: true, force: true })
+        const duplicateSourceArchitecture = architecture === 'x64' ? 'x86_64' : 'aarch64'
+        fs.writeFileSync(
+          path.join(temporary, `leafbook-linux-${duplicateSourceArchitecture}-1.0.0.rpm`),
+          'duplicate'
+        )
+        await expect(
+          module.normalizeLinuxArtifactNames({
+            architecture,
+            distDirectory: temporary,
+            version: '1.0.0'
+          })
+        ).rejects.toThrow('Both builder and canonical')
+      } finally {
+        fs.rmSync(temporary, { recursive: true, force: true })
+      }
     }
-  })
+  )
 })

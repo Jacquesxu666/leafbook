@@ -25,40 +25,63 @@ const requireSafeRegular = (stats, label) => {
 }
 
 export const normalizeLinuxArtifactNames = async ({ architecture, distDirectory, version }) => {
-  if (architecture !== 'arm64') {
-    throw new Error('Linux artifact normalization only supports arm64')
+  if (architecture !== 'x64' && architecture !== 'arm64') {
+    throw new Error('Linux artifact normalization only supports x64 or arm64')
   }
   if (!/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?$/.test(version)) {
     throw new Error('Linux artifact normalization requires a canonical package version')
   }
 
-  const source = path.join(distDirectory, `leafbook-linux-aarch64-${version}.rpm`)
-  const destination = path.join(distDirectory, `leafbook-linux-arm64-${version}.rpm`)
-  const [sourceStats, destinationStats] = await Promise.all([
-    lstatIfPresent(source),
-    lstatIfPresent(destination)
-  ])
+  const builderArchitectures =
+    architecture === 'x64'
+      ? { AppImage: 'x86_64', deb: 'amd64', rpm: 'x86_64', 'tar.gz': 'x64' }
+      : { AppImage: 'arm64', deb: 'arm64', rpm: 'aarch64', 'tar.gz': 'arm64' }
+  const normalized = []
 
-  if (sourceStats && destinationStats) {
-    throw new Error('Both legacy and canonical Linux ARM64 RPM names exist')
-  }
-  if (destinationStats) {
-    requireSafeRegular(destinationStats, 'Canonical Linux ARM64 RPM')
-    return destination
-  }
-  requireSafeRegular(sourceStats, 'electron-builder Linux ARM64 RPM')
+  for (const [extension, builderArchitecture] of Object.entries(builderArchitectures)) {
+    const source = path.join(
+      distDirectory,
+      `leafbook-linux-${builderArchitecture}-${version}.${extension}`
+    )
+    const destination = path.join(
+      distDirectory,
+      `leafbook-linux-${architecture}-${version}.${extension}`
+    )
+    if (source === destination) {
+      requireSafeRegular(await lstatIfPresent(destination), `Canonical Linux ${extension}`)
+      normalized.push(destination)
+      continue
+    }
 
-  await fs.rename(source, destination)
-  const normalizedStats = await fs.lstat(destination)
-  requireSafeRegular(normalizedStats, 'Normalized Linux ARM64 RPM')
-  if (
-    normalizedStats.dev !== sourceStats.dev ||
-    normalizedStats.ino !== sourceStats.ino ||
-    normalizedStats.size !== sourceStats.size
-  ) {
-    throw new Error('Normalized Linux ARM64 RPM identity changed during rename')
+    const [sourceStats, destinationStats] = await Promise.all([
+      lstatIfPresent(source),
+      lstatIfPresent(destination)
+    ])
+    if (sourceStats && destinationStats) {
+      throw new Error(`Both builder and canonical Linux ${architecture} ${extension} names exist`)
+    }
+    if (destinationStats) {
+      requireSafeRegular(destinationStats, `Canonical Linux ${architecture} ${extension}`)
+      normalized.push(destination)
+      continue
+    }
+    requireSafeRegular(sourceStats, `electron-builder Linux ${architecture} ${extension}`)
+
+    await fs.rename(source, destination)
+    const normalizedStats = await fs.lstat(destination)
+    requireSafeRegular(normalizedStats, `Normalized Linux ${architecture} ${extension}`)
+    if (
+      normalizedStats.dev !== sourceStats.dev ||
+      normalizedStats.ino !== sourceStats.ino ||
+      normalizedStats.size !== sourceStats.size
+    ) {
+      throw new Error(
+        `Normalized Linux ${architecture} ${extension} identity changed during rename`
+      )
+    }
+    normalized.push(destination)
   }
-  return destination
+  return normalized
 }
 
 const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href
@@ -74,5 +97,7 @@ if (isMain) {
     distDirectory,
     version: desktop.version
   })
-  console.log(`Normalized Linux artifact: ${path.basename(normalized)}`)
+  console.log(
+    `Normalized Linux artifacts: ${normalized.map((file) => path.basename(file)).join(', ')}`
+  )
 }

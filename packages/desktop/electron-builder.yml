@@ -65,6 +65,8 @@ asarUnpack:
 # top-level associations before our installer prompt. The custom NSIS include
 # below is the sole Windows owner and writes them only after explicit consent.
 win:
+  files:
+    - '!node_modules/font-list/libs/darwin/{fontlist,fontlist.m}'
   executableName: leafbook
   artifactName: 'leafbook-win-${arch}-${version}.${ext}'
   target:
@@ -115,6 +117,8 @@ dmg:
       y: 240
       type: 'file'
 linux:
+  files:
+    - '!node_modules/font-list/libs/darwin/{fontlist,fontlist.m}'
   artifactName: 'leafbook-linux-${arch}-${version}.${ext}'
   executableName: 'leafbook'
   description: 'A local-first Markdown book reader and editor.'

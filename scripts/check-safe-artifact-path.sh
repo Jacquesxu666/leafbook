@@ -13,7 +13,6 @@ containment="${3:-}"
   exit 1
 }
 canonical_root="$(realpath "$containment")"
-[[ "$canonical_root" == "$(cd "$containment" && pwd -P)" ]] || exit 1
 
 case "$kind" in
   directory)
@@ -42,7 +41,8 @@ case "$canonical_target" in
     exit 1
     ;;
 esac
-[[ "$canonical_target" == "$(cd "$(dirname "$target")" && pwd -P)/$(basename "$target")" ]] || {
+canonical_parent="$(realpath "$(dirname "$target")")"
+[[ "$canonical_target" == "$canonical_parent/$(basename "$target")" ]] || {
   echo "Artifact path contains a symlink component: $target" >&2
   exit 1
 }

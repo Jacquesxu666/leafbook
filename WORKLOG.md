@@ -6887,3 +6887,33 @@ book_structure_ready=true code=0`. The harness verified the original sample
   macOS/Windows publication still requires protected-Environment signing
   credentials, native receipts, approval, and release evidence.
 - Git commit: pending.
+
+### 2026-07-31 Cross-platform carrier normalization and audit portability
+
+- User goal: fix every remaining hosted build failure and carry LeafBook 1.0
+  through the formal release process.
+- Completed: normalized all Linux x64 and ARM64 AppImage, DEB, RPM, and tar
+  filenames from electron-builder's target-specific architecture aliases to
+  LeafBook's canonical release names.
+- Completed: excluded the Darwin-only `font-list` executable and Objective-C
+  source from Windows and Linux packages, while leaving the required macOS
+  runtime intact.
+- Completed: made safe-path comparison portable to Git Bash on Windows and
+  replaced silent carrier assertions with actionable audit diagnostics.
+- Files: `packages/desktop/electron-builder.yml`,
+  `packages/desktop/package.json`,
+  `packages/desktop/test/unit/specs/linux-artifact-names.spec.ts`,
+  `packages/desktop/test/unit/specs/release-gate-static.spec.ts`,
+  `scripts/audit-platform-artifacts.sh`,
+  `scripts/check-safe-artifact-path.sh`,
+  `scripts/normalize-linux-artifact-names.mjs`, and this log.
+- Tests: focused release, native-evidence, artifact-name, and static-gate suites
+  passed 70/70; release-notes and LeafBook metadata verification passed;
+  targeted ESLint, Prettier, Bash syntax, and `git diff --check` passed.
+- Key decision: preserve fail-closed native-format auditing and remove foreign
+  payloads at package construction rather than weakening the executable
+  allowlist.
+- Remaining issues: the refreshed six-platform hosted build must verify the
+  fixes; formal signing/notarization still requires user-owned protected
+  credentials that are not configured in GitHub.
+- Git commit: pending.
