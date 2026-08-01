@@ -309,6 +309,7 @@ test('Reader displays sanitized local SVG while malicious SVG stays inert and of
 })
 
 test('prepares an inferred manuscript without changing its bytes and exports it once', async () => {
+  test.setTimeout(60_000)
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'leafbook-e2e-prepare-'))
   const destination = await fs.mkdtemp(path.join(os.tmpdir(), 'leafbook-e2e-prepare-output-'))
   const manuscriptPath = path.join(root, 'manuscript.md')

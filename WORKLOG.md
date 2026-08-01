@@ -7131,3 +7131,23 @@ book_structure_ready=true code=0`. The harness verified the original sample
 - Remaining issues: hosted Linux x64 and ARM64 must validate this last scanner
   change; formal signing/notarization credentials remain unconfigured.
 - Git commit: pending.
+
+### 2026-07-31 Stable inferred-manuscript E2E budget
+
+- User goal: clear the final required PR check after all six release-build
+  platforms passed.
+- Completed: assigned the existing 60-second complex-workflow budget to the
+  inferred-manuscript E2E that exercises four preparation cycles, a race,
+  export, navigation, and two Electron launches.
+- Files: `packages/desktop/test/e2e/book-reader.spec.ts` and this log.
+- Tests: targeted ESLint, Prettier, and `git diff --check` passed. The preceding
+  hosted run passed 232/238 Electron E2Es and every other required check; this
+  test alone exhausted the global 30-second default. A focused local launch
+  could not execute because the local `ced` native binding is absent; hosted
+  setup rebuilds that dependency. Assertions and production behavior are
+  unchanged.
+- Key decision: use the suite's established 60-second budget for multi-launch
+  workflows rather than remove assertions or add retries.
+- Remaining issues: hosted E2E must confirm the timing correction; formal
+  signing/notarization credentials remain unconfigured.
+- Git commit: pending.
