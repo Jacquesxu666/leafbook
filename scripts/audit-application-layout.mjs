@@ -316,6 +316,17 @@ const expectedAppRun = () =>
     MimeTypeFile: 'usr/share/mime/packages/leafbook.xml'
   })
 
+const expectedAppArmorProfile = async () =>
+  (
+    await fs.readFile(
+      require.resolve('app-builder-lib/templates/linux/apparmor-profile.tpl'),
+      'utf8'
+    )
+  )
+    .replaceAll('$' + '{executable}', 'leafbook')
+    .replaceAll('$' + '{sanitizedProductName}', 'LeafBook')
+    .replaceAll('$' + '{productFilename}', 'LeafBook')
+
 const validateSnapMetadata = async (root, architecture) => {
   const yaml = await fs.readFile(path.join(root, 'meta/snap.yaml'), 'utf8')
   if (/[\0\r]/.test(yaml) || Buffer.byteLength(yaml) > 256 * 1024) {
@@ -509,6 +520,14 @@ const validateCarrierShape = async ({ root, entries, carrierKind, version }) => 
       'usr/share/applications/leafbook.desktop',
       await expectedDesktopFile(carrierKind, version)
     )
+    const appArmorPath = 'opt/LeafBook/resources/apparmor-profile'
+    requireRegular(entries, appArmorPath, `${carrierKind} carrier is missing its AppArmor profile`)
+    if (
+      (await fs.readFile(path.join(root, ...appArmorPath.split('/')), 'utf8')) !==
+      (await expectedAppArmorProfile())
+    ) {
+      throw new Error(`${carrierKind} carrier AppArmor profile differs from the pinned template`)
+    }
     return
   }
 
@@ -765,6 +784,10 @@ export const auditApplicationLayout = async ({
       ...entry,
       path: appRootRelative === '.' ? entry.path : entry.path.slice(appPrefix.length)
     }))
+    .filter(
+      (entry) =>
+        !(['deb', 'rpm'].includes(carrierKind) && entry.path === 'resources/apparmor-profile')
+    )
   const manifestDigest = createHash('sha256').update(JSON.stringify(appManifest)).digest('hex')
   const carrierManifestDigest = createHash('sha256').update(JSON.stringify(entries)).digest('hex')
   const appRoot =

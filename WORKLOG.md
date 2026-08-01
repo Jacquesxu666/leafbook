@@ -7064,3 +7064,25 @@ book_structure_ready=true code=0`. The harness verified the original sample
   this correction; protected signing/notarization credentials remain
   unconfigured.
 - Git commit: pending.
+
+### 2026-07-31 Exact Linux AppArmor carrier integration
+
+- User goal: continue fixing every release failure and take LeafBook 1.0 as
+  far as possible toward formal publication.
+- Completed: identified electron-builder's DEB/RPM-only AppArmor profile as
+  the remaining intentional application-tree difference; both carriers now
+  require its exact content rendered from the pinned builder template.
+- Completed: excluded only that already validated integration file from the
+  cross-carrier application-payload digest while retaining it in each full
+  carrier manifest, so missing, substituted, or tampered profiles still fail.
+- Files: `scripts/audit-application-layout.mjs`,
+  `packages/desktop/test/unit/specs/release-gate-static.spec.ts`, and this log.
+- Tests: focused static release suite passed 35/35, including a tampered-
+  profile rejection; generated metadata verification, targeted ESLint,
+  Prettier, and `git diff --check` passed.
+- Key decision: explicitly model the deterministic native-package addition
+  rather than weakening the shared application-tree comparison.
+- Remaining issues: hosted Linux must validate the correction and advance
+  through the remaining RPM/AppImage audits; formal signing/notarization
+  credentials remain unconfigured.
+- Git commit: pending.

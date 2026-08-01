@@ -853,6 +853,14 @@ gh release create "\${GITHUB_REF_NAME}" final-release/assets/* "\${release_flags
         platformSpecificBuildOptions: { protocols: [] }
       })
     const desktopHelper = createDesktopHelper()
+    const appArmorProfile = fs
+      .readFileSync(
+        nodeRequire.resolve('app-builder-lib/templates/linux/apparmor-profile.tpl'),
+        'utf8'
+      )
+      .replaceAll('$' + '{executable}', 'leafbook')
+      .replaceAll('$' + '{sanitizedProductName}', 'LeafBook')
+      .replaceAll('$' + '{productFilename}', 'LeafBook')
     const sharedDesktopOptions = desktopOptions()
     const firstSharedDesktop = await desktopHelper.computeDesktopEntry(sharedDesktopOptions)
     const secondSharedDesktop = await desktopHelper.computeDesktopEntry(sharedDesktopOptions)
@@ -948,6 +956,7 @@ gh release create "\${GITHUB_REF_NAME}" final-release/assets/* "\${release_flags
         const app = path.join(tree, 'opt', 'LeafBook')
         fs.mkdirSync(app, { recursive: true })
         writePayload(app)
+        fs.writeFileSync(path.join(app, 'resources', 'apparmor-profile'), appArmorProfile)
         fs.mkdirSync(path.join(tree, 'usr', 'share', 'applications'), { recursive: true })
         fs.writeFileSync(
           path.join(tree, 'usr', 'share', 'applications', 'leafbook.desktop'),
@@ -1065,6 +1074,17 @@ gh release create "\${GITHUB_REF_NAME}" final-release/assets/* "\${release_flags
       fs.writeFileSync(path.join(appimage, 'leafbook.desktop'), appImageDesktop)
 
       const debTree = fixtures.find(([carrier]) => carrier === 'deb')?.[1] as string
+      const debAppArmor = path.join(debTree, 'opt/LeafBook/resources/apparmor-profile')
+      fs.writeFileSync(debAppArmor, `${appArmorProfile}# tampered\n`)
+      await expect(
+        module.auditApplicationLayout({
+          tree: debTree,
+          platform: 'linux',
+          architecture: 'x64',
+          carrierKind: 'deb'
+        })
+      ).rejects.toThrow('AppArmor profile differs from the pinned template')
+      fs.writeFileSync(debAppArmor, appArmorProfile)
       fs.writeFileSync(
         path.join(debTree, 'usr/share/applications/leafbook.desktop'),
         packageDesktop.replace('Exec=/opt/LeafBook/leafbook %U', 'Exec=leafbook --side-effect %U')
