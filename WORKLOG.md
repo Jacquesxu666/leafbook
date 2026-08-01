@@ -6917,3 +6917,26 @@ book_structure_ready=true code=0`. The harness verified the original sample
   fixes; formal signing/notarization still requires user-owned protected
   credentials that are not configured in GitHub.
 - Git commit: pending.
+
+### 2026-07-31 Electron 42 carrier-contract compatibility
+
+- User goal: continue clearing hosted failures until the LeafBook 1.0 release
+  candidate is fully validated.
+- Completed: accepted a zero-sized tar extraction-root directory marker only
+  when its normalized name is exactly `.`, while retaining traversal, duplicate,
+  link, size, and depth rejection for every archive entry.
+- Completed: added the exact Electron 42 Windows runtime libraries
+  `dxcompiler.dll`, `dxil.dll`, and `vulkan-1.dll` to the top-level carrier
+  contract; their PE format and target architecture remain independently
+  verified by the native-binary audit.
+- Files: `scripts/preflight-archive.py`,
+  `scripts/audit-application-layout.mjs`,
+  `packages/desktop/test/unit/specs/release-gate-static.spec.ts`, and this log.
+- Tests: focused artifact-name, release-readiness, native-evidence, and static
+  release suites passed 70/70; targeted ESLint, Prettier, Bash syntax, Python
+  execution, and `git diff --check` passed.
+- Key decision: model standard carrier metadata and Electron runtime files
+  explicitly instead of broadly allowing dot paths or arbitrary DLLs.
+- Remaining issues: rerun all six hosted package builds to discover the next
+  fail-closed carrier assertion, if any.
+- Git commit: pending.

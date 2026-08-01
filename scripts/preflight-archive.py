@@ -58,11 +58,13 @@ DEB_DEPENDS = (
 )
 
 
-def checked_name(name: str) -> str:
+def checked_name(name: str, allow_root: bool = False) -> str:
     name = name.replace("\\", "/")
     if "\0" in name or name.startswith("/") or len(name.encode("utf-8")) > MAX_PATH_BYTES:
         raise ValueError(f"unsafe archive path: {name!r}")
     normalized = posixpath.normpath(name)
+    if normalized == "." and allow_root:
+        return normalized
     if normalized in ("", ".", "..") or normalized.startswith("../"):
         raise ValueError(f"unsafe archive path: {name!r}")
     if len([part for part in normalized.split("/") if part]) > MAX_DEPTH:
@@ -75,13 +77,17 @@ def check_entries(entries) -> None:
     total = 0
     names = set()
     for name, size, kind, link in entries:
-        normalized = checked_name(name)
+        normalized = checked_name(name, allow_root=kind == "directory")
         if normalized in names:
             raise ValueError(f"duplicate archive path: {normalized!r}")
         names.add(normalized)
         count += 1
         if count > MAX_ENTRIES:
             raise ValueError("archive exceeds entry-count budget")
+        if normalized == ".":
+            if size != 0 or link:
+                raise ValueError("archive root directory marker contains unexpected metadata")
+            continue
         if size < 0 or size > MAX_ENTRY_BYTES:
             raise ValueError(f"archive entry exceeds size budget: {normalized!r}")
         if kind == "file":

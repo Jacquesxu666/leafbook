@@ -670,6 +670,11 @@ gh release create "\${GITHUB_REF_NAME}" final-release/assets/* "\${release_flags
       ] as const) {
         const tree = createTree(`${platform}-${architecture}`, platform, architecture)
         const executableName = platform === 'windows' ? 'leafbook.exe' : 'leafbook'
+        if (platform === 'windows') {
+          for (const runtime of ['dxcompiler.dll', 'dxil.dll', 'vulkan-1.dll']) {
+            fs.copyFileSync(path.join(tree, executableName), path.join(tree, runtime))
+          }
+        }
         const ripgrepPackage =
           platform === 'windows'
             ? `@vscode/ripgrep-win32-${architecture}`
@@ -1229,20 +1234,25 @@ gh release create "\${GITHUB_REF_NAME}" final-release/assets/* "\${release_flags
     const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'leafbook-archive-preflight-'))
     const traversal = path.join(temporary, 'traversal.tar')
     const oversized = path.join(temporary, 'oversized.tar')
+    const rooted = path.join(temporary, 'rooted.tar')
     const build = spawnSync(
       'python3',
       [
         '-c',
         [
           'import io,tarfile,sys',
-          'trav,huge=sys.argv[1:]',
+          'trav,huge,rooted=sys.argv[1:]',
           'with tarfile.open(trav,"w") as t:',
           ' i=tarfile.TarInfo("../escape"); b=b"x"; i.size=len(b); t.addfile(i,io.BytesIO(b))',
           'with open(huge,"wb") as f:',
-          ' i=tarfile.TarInfo("huge.bin"); i.size=536870913; f.write(i.tobuf()); f.write(b"\\0"*1024)'
+          ' i=tarfile.TarInfo("huge.bin"); i.size=536870913; f.write(i.tobuf()); f.write(b"\\0"*1024)',
+          'with tarfile.open(rooted,"w") as t:',
+          ' d=tarfile.TarInfo("."); d.type=tarfile.DIRTYPE; t.addfile(d)',
+          ' i=tarfile.TarInfo("leafbook/file"); b=b"x"; i.size=len(b); t.addfile(i,io.BytesIO(b))'
         ].join('\n'),
         traversal,
-        oversized
+        oversized,
+        rooted
       ],
       { encoding: 'utf8' }
     )
@@ -1259,6 +1269,11 @@ gh release create "\${GITHUB_REF_NAME}" final-release/assets/* "\${release_flags
         expect(result.status).not.toBe(0)
         expect(result.stderr).toContain(error)
       }
+      const validRoot = spawnSync('python3', ['scripts/preflight-archive.py', 'tar', rooted], {
+        cwd: root,
+        encoding: 'utf8'
+      })
+      expect(validRoot.status, validRoot.stderr).toBe(0)
     } finally {
       fs.rmSync(temporary, { recursive: true, force: true })
     }

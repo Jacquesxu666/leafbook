@@ -176,7 +176,12 @@ const allowedRoot = (platform, carrierKind, name) => {
   const common =
     /^(leafbook(?:\.exe)?|resources|resources\.pak|locales|chrome-sandbox|chrome_crashpad_handler(?:\.exe)?|chrome_[^/]+|icudtl\.dat|snapshot_blob\.bin|v8_context_snapshot\.bin|vk_swiftshader_icd\.json|d3dcompiler_47\.dll|ffmpeg\.dll|lib[^/]+|LICENSE(?:\.electron\.txt|S\.chromium\.html)?)$/i
   if (common.test(name) || name === 'command.sh') return true
-  if (platform === 'windows' && /^(resources\.pak|version|vk_swiftshader\.dll)$/i.test(name)) {
+  if (
+    platform === 'windows' &&
+    /^(dxcompiler\.dll|dxil\.dll|resources\.pak|version|vk_swiftshader\.dll|vulkan-1\.dll)$/i.test(
+      name
+    )
+  ) {
     return true
   }
   if (
