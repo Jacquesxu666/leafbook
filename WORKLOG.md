@@ -6803,6 +6803,22 @@ book_structure_ready=true code=0`. The harness verified the original sample
 - Remaining issues: hosted Linux carrier audits must validate all four formats.
 - Git commit: pending.
 
+#### Platform-bound ripgrep native allowlist
+
+- Completed: admitted LeafBook's required packaged ripgrep executable only at
+  the exact `app.asar.unpacked` package path matching the audited OS and CPU;
+  mismatched package architecture and arbitrary `rg` binaries remain denied.
+- Files: `scripts/audit-application-layout.mjs`,
+  `packages/desktop/test/unit/specs/release-gate-static.spec.ts`, and this log.
+- Tests: focused static release-gate suite passed 35/35, including valid
+  Linux/Windows x64/ARM64 ripgrep fixtures and a mismatched-package rejection;
+  targeted ESLint, Prettier, and `git diff --check` passed.
+- Key decision: bind the executable allowlist to the full dependency package
+  path, platform, and architecture instead of permitting a generic basename.
+- Remaining issues: hosted Linux audits must progress through tar, deb, RPM,
+  and AppImage with the production ripgrep payload.
+- Git commit: pending.
+
 #### Hosted CI follow-up
 
 - Completed: updated the native-evidence regression test to validate the

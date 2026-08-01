@@ -665,9 +665,27 @@ gh release create "\${GITHUB_REF_NAME}" final-release/assets/* "\${release_flags
         ['windows', 'x64'],
         ['windows', 'arm64']
       ] as const) {
+        const tree = createTree(`${platform}-${architecture}`, platform, architecture)
+        const executableName = platform === 'windows' ? 'leafbook.exe' : 'leafbook'
+        const ripgrepPackage =
+          platform === 'windows'
+            ? `@vscode/ripgrep-win32-${architecture}`
+            : `@vscode/ripgrep-linux-${architecture}`
+        const ripgrep = path.join(
+          tree,
+          'resources',
+          'app.asar.unpacked',
+          'node_modules',
+          ripgrepPackage,
+          'bin',
+          platform === 'windows' ? 'rg.exe' : 'rg'
+        )
+        fs.mkdirSync(path.dirname(ripgrep), { recursive: true })
+        fs.copyFileSync(path.join(tree, executableName), ripgrep)
+        fs.chmodSync(ripgrep, 0o755)
         await expect(
           module.auditApplicationLayout({
-            tree: createTree(`${platform}-${architecture}`, platform, architecture),
+            tree,
             platform,
             architecture
           })
@@ -707,6 +725,28 @@ gh release create "\${GITHUB_REF_NAME}" final-release/assets/* "\${release_flags
           architecture: 'x64'
         })
       ).rejects.toThrow(/non-canonical top-level entry|unexpected native executable/)
+
+      const wrongRipgrepPackage = createTree('wrong-ripgrep-package', 'linux', 'x64')
+      const wrongRipgrep = path.join(
+        wrongRipgrepPackage,
+        'resources',
+        'app.asar.unpacked',
+        'node_modules',
+        '@vscode',
+        'ripgrep-linux-arm64',
+        'bin',
+        'rg'
+      )
+      fs.mkdirSync(path.dirname(wrongRipgrep), { recursive: true })
+      fs.copyFileSync(path.join(wrongRipgrepPackage, 'leafbook'), wrongRipgrep)
+      fs.chmodSync(wrongRipgrep, 0o755)
+      await expect(
+        module.auditApplicationLayout({
+          tree: wrongRipgrepPackage,
+          platform: 'linux',
+          architecture: 'x64'
+        })
+      ).rejects.toThrow('unexpected native executable')
 
       const mixedHelper = createTree('mixed-helper', 'linux', 'x64')
       const armHelper = Buffer.alloc(512)

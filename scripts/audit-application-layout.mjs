@@ -189,8 +189,18 @@ const allowedRoot = (platform, carrierKind, name) => {
   return false
 }
 
-const allowedNative = (relative, platform) => {
+const allowedNative = (relative, platform, architecture) => {
   const name = path.posix.basename(relative)
+  const ripgrepPackage =
+    platform === 'linux'
+      ? `@vscode/ripgrep-linux-${architecture}/bin/rg`
+      : `@vscode/ripgrep-win32-${architecture}/bin/rg.exe`
+  if (
+    relative.endsWith(`/resources/app.asar.unpacked/node_modules/${ripgrepPackage}`) ||
+    relative === `resources/app.asar.unpacked/node_modules/${ripgrepPackage}`
+  ) {
+    return true
+  }
   if (platform === 'linux') {
     return (
       name === 'leafbook' ||
@@ -733,7 +743,7 @@ export const auditApplicationLayout = async ({
     if (!identity.architectures.includes(architecture)) {
       throw new Error(`Native binary does not match ${architecture}: ${entry.path}`)
     }
-    if (!allowedNative(entry.path, platform)) {
+    if (!allowedNative(entry.path, platform, architecture)) {
       throw new Error(`Carrier contains an unexpected native executable: ${entry.path}`)
     }
     nativeFiles.push(entry.path)
