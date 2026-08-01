@@ -1,0 +1,269 @@
+name: Windows signed native evidence (manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected-commit:
+        description: Full lowercase commit SHA resolved by the selected release tag
+        required: true
+        type: string
+      expected-signer-thumbprint:
+        description: Expected uppercase SHA-1 thumbprint of the public Windows signing certificate
+        required: true
+        type: string
+  workflow_call:
+    inputs:
+      expected-commit:
+        description: Full lowercase commit SHA resolved by the selected release tag
+        required: true
+        type: string
+      expected-signer-thumbprint:
+        description: Expected uppercase SHA-1 thumbprint of the public Windows signing certificate
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  signed-build:
+    name: Signed build only (${{ matrix.arch }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    environment: windows-signing
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            os: windows-2025
+          - arch: arm64
+            os: windows-11-arm
+    steps:
+      - name: Bind manual selection to an exact release tag commit
+        shell: bash
+        env:
+          EXPECTED_COMMIT: ${{ inputs.expected-commit }}
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF_TYPE:-}" != "tag" ]] ||
+            [[ ! "${GITHUB_REF_NAME:-}" =~ ^v[0-9A-Za-z.+-]+$ ]] ||
+            [[ ! "${GITHUB_SHA:-}" =~ ^[0-9a-f]{40}$ ]] ||
+            [[ ! "$EXPECTED_COMMIT" =~ ^[0-9a-f]{40}$ ]] ||
+            [[ "$GITHUB_SHA" != "$EXPECTED_COMMIT" ]]; then
+            echo 'BLOCKED: invocation is not bound to the selected release tag commit.' >&2
+            exit 1
+          fi
+
+      - name: Check out exact source revision
+        # actions/checkout v4.3.1
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.expected-commit }}
+
+      - name: Validate exact tag and package version
+        run: node scripts/validate-release-tag.mjs "$GITHUB_REF_NAME"
+
+      - name: Setup frozen dependency graph without repository credentials
+        uses: ./.github/actions/setup
+        with:
+          node-version: '24.14.1'
+
+      - name: Run postinstall and native rebuild without repository credentials
+        shell: bash
+        run: pnpm tsx scripts/postinstall.ts
+        env:
+          npm_config_user_agent: pnpm
+
+      - name: Build signed Windows carriers without publishing
+        shell: pwsh
+        env:
+          WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
+          WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ([string]::IsNullOrWhiteSpace($env:WIN_CSC_LINK) -or [string]::IsNullOrWhiteSpace($env:WIN_CSC_KEY_PASSWORD)) {
+            throw 'Protected Windows signing inputs are unavailable.'
+          }
+          $env:CSC_LINK = $env:WIN_CSC_LINK
+          $env:CSC_KEY_PASSWORD = $env:WIN_CSC_KEY_PASSWORD
+          pnpm run build:win:${{ matrix.arch }}
+          if ($LASTEXITCODE -ne 0) { throw 'Signed Windows build failed.' }
+        # electron-builder scripts are pinned to --publish never.
+
+      - name: Audit signed carrier structure without claiming runtime evidence
+        shell: bash
+        env:
+          LEAFBOOK_IS_PRERELEASE: 'true'
+        run: pnpm audit:platform-artifacts -- windows ${{ matrix.arch }}
+
+      - name: Stage exact same-byte carrier set
+        shell: bash
+        run: |
+          node scripts/stage-release-evidence.mjs windows ${{ matrix.arch }} dist evidence
+          node scripts/release-checksums.mjs verify evidence
+
+      - name: Upload signed carriers for fresh-machine validation
+        # actions/upload-artifact v4.6.2
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: leafbook-windows-${{ matrix.arch }}-signed-candidate
+          retention-days: 7
+          if-no-files-found: error
+          path: evidence/*
+
+  fresh-runtime-validation:
+    name: Fresh signed install lifecycle (${{ matrix.arch }})
+    needs: signed-build
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            os: windows-2025
+          - arch: arm64
+            os: windows-11-arm
+    steps:
+      - name: Check out exact receipt verifier source
+        # actions/checkout v4.3.1
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.expected-commit }}
+
+      - name: Rebind fresh runner to exact release tag and commit
+        shell: bash
+        env:
+          EXPECTED_COMMIT: ${{ inputs.expected-commit }}
+        run: |
+          set -euo pipefail
+          [[ "${GITHUB_REF_TYPE:-}" == "tag" ]]
+          [[ "${GITHUB_SHA:-}" == "$EXPECTED_COMMIT" ]]
+          node scripts/validate-release-tag.mjs "$GITHUB_REF_NAME"
+
+      - name: Download signed carriers built by the protected job
+        # actions/download-artifact v4.3.0
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: leafbook-windows-${{ matrix.arch }}-signed-candidate
+          path: evidence
+
+      - name: Verify downloaded same-byte carrier manifest
+        run: node scripts/release-checksums.mjs verify evidence
+
+      - name: Silently install with default-negative associations, launch, and uninstall
+        shell: pwsh
+        env:
+          EXPECTED_SIGNER_THUMBPRINT: ${{ inputs.expected-signer-thumbprint }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Set-StrictMode -Version Latest
+          function Write-Observation([string]$Name, [object]$Value) {
+            [IO.File]::WriteAllText("$Name-observation.json", ($Value | ConvertTo-Json -Depth 4) + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
+          }
+          $version = (Get-Content packages/desktop/package.json -Raw | ConvertFrom-Json).version
+          $setup = (Resolve-Path "evidence/leafbook-win-${{ matrix.arch }}-$version-setup.exe").Path
+          $install = Join-Path $env:RUNNER_TEMP 'LeafBookNativeEvidence'
+          $extensions = @('md','markdown','mmd','mdown','mdtxt','mdtext','mdx')
+          foreach ($extension in $extensions) {
+            if (Test-Path "Registry::HKEY_CURRENT_USER\Software\Classes\.$extension") {
+              throw "Fresh runner already has .$extension state; cannot prove default-negative behavior."
+            }
+          }
+          foreach ($protocol in @('leafbook','com.jacquesxu.leafbook')) {
+            if (Test-Path "Registry::HKEY_CURRENT_USER\Software\Classes\$protocol") {
+              throw "Fresh runner already has protocol state; cannot prove negative behavior."
+            }
+          }
+          $installer = Start-Process -FilePath $setup -ArgumentList @('/S', "/D=$install") -Wait -PassThru
+          if ($installer.ExitCode -ne 0) { throw "NSIS install failed: $($installer.ExitCode)" }
+          $executable = Join-Path $install 'leafbook.exe'
+          $uninstaller = Join-Path $install 'Uninstall LeafBook.exe'
+          if (-not (Test-Path -LiteralPath $executable -PathType Leaf) -or -not (Test-Path -LiteralPath $uninstaller -PathType Leaf)) {
+            throw 'Installed executable or uninstaller is missing.'
+          }
+          Write-Observation 'install' ([ordered]@{ passed = $true })
+          foreach ($extension in $extensions) {
+            if (Test-Path "Registry::HKEY_CURRENT_USER\Software\Classes\.$extension") { throw "Silent install registered .$extension." }
+          }
+          foreach ($protocol in @('leafbook','com.jacquesxu.leafbook')) {
+            if (Test-Path "Registry::HKEY_CURRENT_USER\Software\Classes\$protocol") { throw "Silent install registered protocol $protocol." }
+          }
+          Write-Observation 'associations' ([ordered]@{ defaultNo = $true; extensionsUnchanged = $true; protocolsAbsent = $true })
+          $desktopShortcut = Join-Path ([Environment]::GetFolderPath('Desktop')) 'LeafBook.lnk'
+          $startShortcut = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\LeafBook.lnk'
+          if (-not (Test-Path -LiteralPath $desktopShortcut) -or -not (Test-Path -LiteralPath $startShortcut)) { throw 'Expected per-user shortcuts are missing.' }
+          Write-Observation 'shortcuts' ([ordered]@{ passed = $true })
+          $application = Start-Process -FilePath $executable -PassThru
+          Start-Sleep -Seconds 12
+          if ($application.HasExited) { throw "Installed LeafBook exited before smoke observation: $($application.ExitCode)" }
+          Stop-Process -Id $application.Id -Force
+          $application.WaitForExit()
+          & './scripts/verify-windows-authenticode.ps1' -Setup $setup -InstalledExecutable $executable -ExpectedSignerThumbprint $env:EXPECTED_SIGNER_THUMBPRINT -Output authenticode-report.json
+          Write-Observation 'smoke' ([ordered]@{ passed = $true })
+          $uninstall = Start-Process -FilePath $uninstaller -ArgumentList '/S' -Wait -PassThru
+          if ($uninstall.ExitCode -ne 0) { throw "NSIS uninstall failed: $($uninstall.ExitCode)" }
+          Write-Observation 'uninstall' ([ordered]@{ passed = $true })
+          Start-Sleep -Seconds 3
+          if ((Test-Path -LiteralPath $install) -or (Test-Path -LiteralPath $desktopShortcut) -or (Test-Path -LiteralPath $startShortcut)) { throw 'Executable, install directory, or shortcuts remain after uninstall.' }
+          foreach ($extension in $extensions) {
+            if (Test-Path "Registry::HKEY_CURRENT_USER\Software\Classes\.$extension") { throw "Association residue remains for .$extension." }
+          }
+          foreach ($protocol in @('leafbook','com.jacquesxu.leafbook')) {
+            if (Test-Path "Registry::HKEY_CURRENT_USER\Software\Classes\$protocol") { throw "Protocol residue remains for $protocol." }
+          }
+          Write-Observation 'residue' ([ordered]@{ passed = $true })
+
+      - name: Aggregate actual Windows stage observations and hosted image identity
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Set-StrictMode -Version Latest
+          $runtime = [ordered]@{}
+          foreach ($stage in @('associations','install','residue','shortcuts','smoke','uninstall')) {
+            $path = "$stage-observation.json"
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Missing stage observation: $stage" }
+            $runtime[$stage] = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+          }
+          [IO.File]::WriteAllText('runtime-report.json', ($runtime | ConvertTo-Json -Depth 5) + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
+          foreach ($name in @('RUNNER_NAME','RUNNER_OS','RUNNER_ARCH','ImageOS','ImageVersion')) {
+            if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
+              throw "Hosted Windows runner identity is incomplete: $name"
+            }
+          }
+          $environment = [ordered]@{ image = $env:ImageOS; imageDigest = 'not-applicable'; imageId = $env:ImageVersion; kind = 'host' }
+          [IO.File]::WriteAllText('environment-report.json', ($environment | ConvertTo-Json -Depth 3) + [Environment]::NewLine, [Text.UTF8Encoding]::new($false))
+
+      - name: Generate and verify the fixed native evidence receipt
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${RUNNER_NAME:-}" || -z "${RUNNER_OS:-}" || -z "${RUNNER_ARCH:-}" ||
+            -z "${ImageOS:-}" || -z "${ImageVersion:-}" ]]; then
+            echo 'Hosted Windows runner identity is incomplete.' >&2
+            exit 1
+          fi
+          node scripts/native-evidence-receipt.mjs write \
+            --platform windows --architecture '${{ matrix.arch }}' \
+            --tag "$GITHUB_REF_NAME" --commit "$GITHUB_SHA" \
+            --runner-label "$RUNNER_NAME" \
+            --runner-os "$RUNNER_OS" --runner-arch "$RUNNER_ARCH" \
+            --image-os "$ImageOS" --image-version "$ImageVersion" \
+            --carriers evidence --signature-report authenticode-report.json \
+            --runtime-report runtime-report.json --environment-report environment-report.json \
+            --output leafbook-windows-${{ matrix.arch }}-native-evidence.json
+          node scripts/native-evidence-receipt.mjs verify \
+            --receipt leafbook-windows-${{ matrix.arch }}-native-evidence.json \
+            --carriers evidence
+
+      - name: Upload machine receipt only after complete fresh-runner validation
+        # actions/upload-artifact v4.6.2
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: leafbook-windows-${{ matrix.arch }}-native-receipt
+          retention-days: 14
+          if-no-files-found: error
+          path: leafbook-windows-${{ matrix.arch }}-native-evidence.json

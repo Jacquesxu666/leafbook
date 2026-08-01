@@ -4,11 +4,7 @@ import type { Config } from './dompurify';
 import { EVENT_KEYS } from '../config';
 import runSanitize from './dompurify';
 
-interface IUnion {
-    start: number;
-    end: number;
-    active?: boolean;
-}
+export { isLengthEven, union } from './inlinePure';
 
 // `never[]` in the contravariant arg-tuple position lets the @methodMixins
 // decorator accept any concrete class constructor (`new (muya: Muya, …)`),
@@ -45,8 +41,6 @@ export const isOdd = (n: number) => Math.abs(n) % 2 === 1;
 
 export const isEven = (n: number) => Math.abs(n) % 2 === 0;
 
-export const isLengthEven = (str = '') => str.length % 2 === 0;
-
 export function snakeToCamel(name: string) {
     return name.replace(/_([a-z])/g, (_p0, p1) => p1.toUpperCase());
 }
@@ -63,27 +57,6 @@ export function firstWordOfInfo(info: string): string {
  */
 export function conflict(arr1: [number, number], arr2: [number, number]) {
     return !(arr1[1] < arr2[0] || arr2[1] < arr1[0]);
-}
-
-export function union({ start: tStart, end: tEnd }: IUnion, { start: lStart, end: lEnd, active }: IUnion) {
-    if (!(tEnd <= lStart || lEnd <= tStart)) {
-        if (lStart < tStart) {
-            return {
-                start: tStart,
-                end: tEnd < lEnd ? tEnd : lEnd,
-                active,
-            };
-        }
-        else {
-            return {
-                start: lStart,
-                end: tEnd < lEnd ? tEnd : lEnd,
-                active,
-            };
-        }
-    }
-
-    return null;
 }
 
 // https://github.com/jashkenas/underscore

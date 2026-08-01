@@ -1,4 +1,4 @@
-import { resolveLocalImageSrc } from '../util/resolveImageSrc'
+import { createInertImagePlaceholder, resolveLocalImageSrc } from '../util/resolveImageSrc'
 
 class MarkdownPrint {
   private container: HTMLElement | null = null
@@ -22,16 +22,27 @@ class MarkdownPrint {
       printContainer.setAttribute('dir', dir)
     }
     this.container = printContainer
-    printContainer.innerHTML = html
 
     // Fix images when rendering for static files like PDF (GH#678).
     if (renderStatic) {
-      // Traverse through the DOM tree and fix all relative image sources.
-      const images = printContainer.getElementsByTagName('img')
+      // Parse inside an inert template so unsafe image sources are never
+      // connected to a document and cannot trigger SMB/network access before
+      // validation replaces them.
+      const template = document.createElement('template')
+      template.innerHTML = html
+      const images = template.content.querySelectorAll('img')
       for (const image of Array.from(images)) {
         const rawSrc = image.getAttribute('src') ?? ''
-        image.src = resolveLocalImageSrc(rawSrc)
+        const resolved = resolveLocalImageSrc(rawSrc)
+        if (rawSrc && !resolved) {
+          image.replaceWith(createInertImagePlaceholder())
+        } else {
+          image.src = resolved
+        }
       }
+      printContainer.append(template.content)
+    } else {
+      printContainer.innerHTML = html
     }
 
     document.body.appendChild(printContainer)

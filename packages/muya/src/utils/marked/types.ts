@@ -6,6 +6,7 @@ export interface ILexOption {
     isGitlabCompatibilityEnabled?: boolean;
     frontMatter?: boolean;
     superSubScript?: boolean;
+    imageRenderer?: (token: Tokens.Image) => string | false;
 }
 
 export type Heading = Tokens.Heading & {

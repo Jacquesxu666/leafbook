@@ -1,0 +1,8 @@
+{
+  "name": "file-icons",
+  "version": "2.1.47",
+  "description": "LeafBook compatibility placeholder for the build-only file-icons dependency",
+  "license": "MIT",
+  "private": true,
+  "main": "index.js"
+}

@@ -62,7 +62,6 @@ async function renderDiagram({
     target,
     vegaTheme,
     mermaidTheme,
-    plantumlServer,
     sequenceTheme,
 }: IRenderOptions) {
     const render = await loadRenderer(type);
@@ -81,9 +80,12 @@ async function renderDiagram({
     }
 
     if (type === 'plantuml') {
-        const diagram = render.parse(code, plantumlServer);
-        target.innerHTML = '';
-        diagram.insertImgElement(target);
+        // PlantUML's renderer is a remote image service. Automatic rendering
+        // would disclose document contents and violate LeafBook's offline-open
+        // guarantee, so keep the source editable and show an inert placeholder.
+        // A future explicit, consented export capability may render it outside
+        // the renderer sandbox.
+        target.textContent = 'PlantUML preview is disabled in offline mode.';
     }
     else if (type === 'vega-lite') {
         await render(target, JSON.parse(code), options);

@@ -1,0 +1,215 @@
+# Prepare an inferred Markdown book
+
+LeafBook can turn one root-level Markdown manuscript into book navigation
+without splitting or rewriting the manuscript. The feature is available only
+when a folder has inferred navigation and no `SUMMARY.md`.
+
+When more than one source can be prepared, the renderer receives only an opaque
+node ID, its title, and a deterministic `Document N` display label. The ordinal
+follows the already stable candidate order, so duplicate titles remain
+distinguishable without exposing an absolute path, relative path, or document
+body.
+
+## Use Prepare Book
+
+1. Open the folder in LeafBook.
+2. Choose **Prepare Book**.
+3. If LeafBook cannot identify one manuscript from the folder name, choose a
+   manuscript from the displayed list.
+4. Reorder, rename, remove, or add back chapters as needed. These changes are
+   saved as a private LeafBook draft and never modify the manuscript.
+5. Review the level-one chapter preview, then choose **Create SUMMARY.md**.
+
+LeafBook recognizes top-level ATX headings written as `# Chapter title`. It
+requires at least two headings. Setext headings, headings inside containers,
+empty titles, duplicate normalized fragments, and documents beyond the safety
+limits are rejected with an explanation.
+
+The preview renders at most 200 chapter titles for responsiveness. The status
+message reports how many additional chapters will still be included. Title
+input is debounced for 300 ms. Edits to different chapters retain their order,
+while repeated edits to one chapter coalesce to its latest title. Reorder,
+remove, add-back, Create, and Close first flush every pending title; if any
+draft write fails, LeafBook retains that edit and all later queued edits,
+preserves the error, and does not continue or close the preparation.
+
+## Private drafts and recovery
+
+Prepare edits are persisted by the main process under
+`userData/leafbook-preparation-drafts`. The directory is mode `0700`; its
+random 32-byte root-key and every draft are mode `0600`. A filename is
+HMAC-SHA256 of the canonical root path with that private key, never a raw path
+or unsalted hash. The schema-1 checksum envelope contains only the bounded
+relative manuscript identifier, base source/root identity and digest, ordered
+chapter identifiers/titles/fragments, inclusion state, and latest nonce. It
+contains no Markdown body or absolute path.
+
+Draft writes use an exclusive no-follow temporary file, file sync, atomic
+rename, and draft-directory sync. Startup cleanup recognizes only its exact
+temporary naming grammar and removes a regular entry only after its pathname
+and descriptor identities match. Unknown or changed entries are untouched.
+All files are bounded to 2 MiB and 2,000 chapters before allocation/parsing.
+Schema mismatch, truncation, checksum failure, excess size, symlink, hard-link,
+or unsafe permissions is shown only as a non-restorable draft that can be
+explicitly discarded by an identity-bound main-process operation.
+
+Node does not expose directory-descriptor-relative `unlinkat` for the draft
+store. Draft deletion is therefore a documented P3 same-user race boundary:
+LeafBook performs no asynchronous yield between the final no-follow
+pathname/descriptor identity check and unlink, refuses directories, and syncs
+the still-bound private directory afterward, but it does not claim protection
+against a process with the same account and equal filesystem authority racing
+that final pathname syscall.
+
+Restart never silently restores or applies a draft. Opening Prepare for the
+same book displays **Restore draft** and **Discard draft**. Restore is enabled
+only after main revalidates the current root, session, selected manuscript
+identity, and base digest; a changed source or same-path replacement root is
+stale and cannot be restored. Draft filenames isolate different books, and a
+persisted monotonic nonce makes out-of-order or competing-window saves
+latest-wins. Close/Cancel retains an existing draft; only explicit Discard
+removes it and resets to the current analyzed base.
+
+After **Create SUMMARY.md**, the draft is removed only after the exact source
+file has been verified and file plus directory durability succeeds. A failed
+or durability-uncertain source commit retains the draft.
+
+## Write boundary
+
+Preparation is create-only. It creates one new root `SUMMARY.md`; it does not
+edit, split, rename, or move the selected manuscript or any other book file.
+Cancel and Escape create no source-book file; a previously saved private draft
+is retained. If any case variant of `SUMMARY.md` already
+exists, or another process creates one before confirmation, LeafBook stops
+without overwriting it.
+
+“Case variant” uses locale-independent full Unicode Default Case Folding, not a
+locale-sensitive lowercase heuristic. LeafBook normalizes each name to NFC and
+then applies the Unicode 16.0.0 `CaseFolding.txt` C (common) and F (full)
+mappings; S and Turkic T mappings are excluded. The same helper is used for
+the initial asynchronous SUMMARY scan, the final synchronous scan, the
+post-open prewrite scan, and exact manuscript-stem auto-selection. Thus names
+such as `ſummary.md` conflict with `SUMMARY.md`, and roots/candidates such as
+`Straße`/`STRASSE`, Greek normal/final sigma, the Kelvin sign/K, and NFC/NFD
+equivalents compare consistently. Ill-formed UTF-16 names make the relevant
+scan or automatic selection fail closed.
+
+The compact mapping is generated by
+`scripts/generateUnicodeCaseFold.mjs` from the official Unicode 16.0.0 data at
+`https://www.unicode.org/Public/16.0.0/ucd/CaseFolding.txt`, whose pinned
+SHA-256 is
+`6f1f9c588eb4a5c718d9e8f93b782685e5c7fec872cf05e8e6878053599e09bb`.
+Generate and format with this exact two-step command:
+
+```sh
+node scripts/generateUnicodeCaseFold.mjs CaseFolding.txt packages/desktop/src/common/book/unicodeCaseFold.ts
+pnpm exec prettier --write packages/desktop/src/common/book/unicodeCaseFold.ts
+```
+
+run the same command with `--self-test` as the output argument to verify the
+official source and the fail-closed hash, version, malformed-line, and
+duplicate-mapping checks. The generated runtime table has no network or
+filesystem dependency. Regeneration must pin and review a newer Unicode data
+version; newly assigned mappings from later Unicode releases intentionally
+remain unmatched until that explicit update.
+
+After creation, the book reloads with summary navigation. Heading chapters can
+be opened independently even though they share one physical Markdown file.
+Arrange, export, and website generation then use the new navigation while
+deduplicating the physical manuscript body.
+
+## Safety limits
+
+- source manuscript: 8 MiB;
+- scanned lines: 250,000;
+- top-level chapters: 2–2,000;
+- visible title: 512 Unicode characters;
+- generated `SUMMARY.md`: 2 MiB.
+
+The main process owns file paths and preparation leases. The renderer receives
+opaque identifiers, plain titles, heading ordinals/lines/fragments, and a
+path-free preview; it cannot nominate an arbitrary filesystem path.
+
+Every manuscript read, including automatic selection, explicit selection, and
+the final synchronous revalidation, requires
+`O_RDONLY | O_NOFOLLOW | O_NONBLOCK`. LeafBook immediately requires the opened
+descriptor to be a bounded, single-link regular file. It binds device, inode,
+mode, link count, size, modification time, change time, and digest to the
+prepared lease, then rechecks the same state before and after the final
+fixed-buffer read. A symlink, FIFO, socket, device, directory, hard-link
+change, metadata mutation, content mutation, or
+replaced pathname is rejected without waiting for a producer and is left
+unchanged. The final root-directory synchronization similarly requires
+`O_DIRECTORY | O_NOFOLLOW | O_NONBLOCK` and verifies the root descriptor's
+type and inode. If any required flag is unavailable on a platform, preparation
+is unavailable; there is no blocking or follow-links fallback.
+
+If LeafBook reports that `SUMMARY.md` was created but durable storage could not
+be confirmed, do not retry immediately. Refresh the folder and verify the file
+first, because the create may already have committed.
+
+Immediately before creation, LeafBook synchronously revalidates the exact
+preparation lease, session generation, root and parent identity, manuscript
+identity and digest, case-folded `SUMMARY` absence, and exact target absence.
+It then opens `SUMMARY.md` directly with the platform's exclusive-create,
+no-follow, and non-blocking flags and mode `0600`. Platforms without those
+flags fail closed; there is no less-safe fallback. An existing file, symlink,
+FIFO, or case-folded SUMMARY winner is never overwritten.
+
+After exclusive creation, LeafBook keeps the target descriptor open and, before
+writing any canonical byte, performs one more synchronous prewrite boundary. It
+revalidates the exact lease and session generation; the original root and parent
+realpath, device, and inode; the case-folded entries and exact `SUMMARY.md`
+pathname; the pathname-to-descriptor identity; an empty, single-link regular
+target with its opened mode; and the manuscript's complete bound state and
+digest. Close, session refresh, owner cleanup, source mutation, root redirection,
+case-folded competitors, and pathname replacement therefore fail with zero
+canonical bytes written. If the pathname still names the same empty descriptor
+inode, LeafBook may remove that empty create even when the root identity changed;
+otherwise it closes the descriptor, leaves the proven-empty residue untouched,
+and reports commit uncertainty.
+
+Only after that boundary succeeds does LeafBook enter the synchronous critical
+turn and write the canonical bytes with a bounded write loop. Immediately after
+writing, again after file synchronization, and immediately before directory
+synchronization, it verifies that the root, parent, pathname, and still-open
+descriptor retain the expected identity, regular-file type, single-link state,
+exact bounded size, mode, timestamps, and content digest. Content verification
+reopens the path with the mandatory safe read flags, proves it is the same inode
+as the exclusive-create descriptor, and streams through one fixed 64 KiB buffer
+with an exact-length read and EOF probe. It never allocates from an
+attacker-controlled target size. Cancellation before the prewrite boundary can
+win with zero writes; once canonical writing starts, cancellation reports that
+creation is already in progress instead of claiming it was stopped.
+
+If a post-open write, synchronization, or identity check fails, LeafBook
+removes the pathname only when the root, parent, pathname, and open descriptor
+still prove that it owns that exact inode. A successful safe removal is
+reported as not committed. If that proof is unavailable, LeafBook never
+performs pathname cleanup: it revokes the preparation lease and reports
+`committed: true` with commit/durability uncertainty so the user must inspect
+the folder. A directory-sync failure likewise reports a created file with
+uncertain durability.
+
+Direct exclusive creation deliberately does not claim crash-atomic content.
+Abrupt process termination or power loss during the bounded write may leave a
+partial `SUMMARY.md`. On the next attempt its case-folded presence fails closed;
+the user must inspect and manually remove the partial file before retrying.
+
+Node does not expose an `openat`-style directory-descriptor-relative transaction
+for this operation. The precheck, exclusive open, synchronous prewrite
+revalidation, and write are therefore separate same-user syscalls, retained as
+a documented P3 limitation. The tested observable guarantee is narrower: an
+ancestor or root redirect before open cannot receive generated content, and a
+root redirect, target replacement, cancellation, or source change after open
+but before prewrite never receives canonical bytes. A same-account process with
+equal filesystem authority can still race between individual syscalls.
+
+The release matrix must exercise this exact flag and failure behavior on
+macOS, Windows, and Linux. A platform passes only if source and target FIFOs or
+FIFO-like leaves reject promptly, exclusive create never overwrites an existing
+regular file or symlink, and unsupported no-follow, non-blocking, or directory
+flags make preparation unavailable. Windows builds retain the mandatory flags
+statically and must fail closed when the runtime does not implement them.
+Packaging must not substitute a pathname staging, hard-link, blocking open, or
+follow-links fallback.

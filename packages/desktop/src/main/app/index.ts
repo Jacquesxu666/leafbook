@@ -3,7 +3,7 @@ import fsPromises from 'fs/promises'
 import { exec } from 'child_process'
 import dayjs from 'dayjs'
 import log from 'electron-log'
-import { app, BrowserWindow, clipboard, dialog, nativeTheme, shell, ipcMain } from 'electron'
+import { app, BrowserWindow, clipboard, dialog, nativeTheme, ipcMain, session } from 'electron'
 import type { BrowserWindowConstructorOptions } from 'electron'
 import { isChildOfDirectory } from 'common/filesystem/paths'
 import type { IUserPreferences } from '@shared/types/preferences'
@@ -24,6 +24,7 @@ import { setLanguage } from '../i18n'
 import { getNativeThemeSource, isDarkApplicationTheme } from './nativeTheme'
 import type Accessor from './accessor'
 import type WindowManager from './windowManager'
+import { installRendererNetworkPolicy } from '../security/rendererNetworkPolicy'
 
 interface CliArgs {
   _: string[]
@@ -224,6 +225,9 @@ class App {
   }
 
   ready = (): void => {
+    // Install before creating the first BrowserWindow. This is defense in
+    // depth behind CSP and renderer-side offline placeholders.
+    installRendererNetworkPolicy(session.defaultSession)
     const { _args: args, _openFilesCache } = this
     const { preferences, editorBufferStore } = this._accessor
 
@@ -285,54 +289,52 @@ class App {
       selectTheme(newTheme)
     }
 
-    onInternalChannel(
-      'broadcast-preferences-changed',
-      (change: Partial<IUserPreferences>) => {
-        const nextPreferences = {
-          ...preferences.getAll(),
-          ...change
-        }
-        nativeTheme.themeSource = getNativeThemeSource(nextPreferences)
+    onInternalChannel('broadcast-preferences-changed', (change: Partial<IUserPreferences>) => {
+      const nextPreferences = {
+        ...preferences.getAll(),
+        ...change
+      }
+      nativeTheme.themeSource = getNativeThemeSource(nextPreferences)
 
       // When followSystemTheme is enabled, immediately switch to match system
-        if (change.followSystemTheme === true) {
-          const systemIsDark = nativeTheme.shouldUseDarkColors
-          const lightModeTheme = preferences.getItem<string>('lightModeTheme')
-          const darkModeTheme = preferences.getItem<string>('darkModeTheme')
-          const newTheme = systemIsDark ? darkModeTheme : lightModeTheme
+      if (change.followSystemTheme === true) {
+        const systemIsDark = nativeTheme.shouldUseDarkColors
+        const lightModeTheme = preferences.getItem<string>('lightModeTheme')
+        const darkModeTheme = preferences.getItem<string>('darkModeTheme')
+        const newTheme = systemIsDark ? darkModeTheme : lightModeTheme
 
-          log.info(
-            `followSystemTheme enabled, switching to: ${newTheme} (system ${systemIsDark ? 'dark' : 'light'})`
-          )
-          selectTheme(newTheme)
-          preferences.setItem('theme', newTheme)
-        }
+        log.info(
+          `followSystemTheme enabled, switching to: ${newTheme} (system ${systemIsDark ? 'dark' : 'light'})`
+        )
+        selectTheme(newTheme)
+        preferences.setItem('theme', newTheme)
+      }
       // When light/dark mode theme preferences change, apply immediately if following system
-        if (
-          preferences.getItem<boolean>('followSystemTheme') &&
+      if (
+        preferences.getItem<boolean>('followSystemTheme') &&
         (change.lightModeTheme || change.darkModeTheme)
-        ) {
-          const systemIsDark = nativeTheme.shouldUseDarkColors
+      ) {
+        const systemIsDark = nativeTheme.shouldUseDarkColors
 
         // Get current values, but prefer the NEW values from the change event
-          let lightModeTheme = preferences.getItem<string>('lightModeTheme')
-          let darkModeTheme = preferences.getItem<string>('darkModeTheme')
+        let lightModeTheme = preferences.getItem<string>('lightModeTheme')
+        let darkModeTheme = preferences.getItem<string>('darkModeTheme')
 
         // If these preferences were just changed, use the new values from the change object
-          if (change.lightModeTheme !== undefined) {
-            lightModeTheme = change.lightModeTheme
-          }
-          if (change.darkModeTheme !== undefined) {
-            darkModeTheme = change.darkModeTheme
-          }
-
-          const newTheme = systemIsDark ? darkModeTheme : lightModeTheme
-
-          log.info(`Theme preference changed, applying: ${newTheme}`)
-          selectTheme(newTheme)
-          preferences.setItem('theme', newTheme)
+        if (change.lightModeTheme !== undefined) {
+          lightModeTheme = change.lightModeTheme
         }
-      })
+        if (change.darkModeTheme !== undefined) {
+          darkModeTheme = change.darkModeTheme
+        }
+
+        const newTheme = systemIsDark ? darkModeTheme : lightModeTheme
+
+        log.info(`Theme preference changed, applying: ${newTheme}`)
+        selectTheme(newTheme)
+        preferences.setItem('theme', newTheme)
+      }
+    })
 
     // Listen for system theme changes and auto-switch if enabled
     if (!this._themeListenerRegistered) {
@@ -669,11 +671,13 @@ class App {
       this._createEditorWindow()
     })
 
-    onInternalChannel('screen-capture', async(win: BrowserWindow) => {
+    // eslint-disable-next-line @stylistic/space-before-function-paren -- Prettier's async-arrow spacing conflicts with the legacy rule.
+    onInternalChannel('screen-capture', async (win: BrowserWindow) => {
       if (isOsx) {
         // Use macOs `screencapture` command line when in macOs system.
         const screenshotFileName = await this.getScreenshotFileName()
-        exec('screencapture -i -c', async(err) => {
+        // eslint-disable-next-line @stylistic/space-before-function-paren -- Prettier compatibility.
+        exec('screencapture -i -c', async (err) => {
           if (err) {
             log.error(err)
             return
@@ -710,7 +714,8 @@ class App {
     })
 
     onInternalChannel('app-open-file-by-id', (windowId: number, filePath: string) => {
-      const openFilesInNewWindow = this._accessor.preferences.getItem<boolean>('openFilesInNewWindow')
+      const openFilesInNewWindow =
+        this._accessor.preferences.getItem<boolean>('openFilesInNewWindow')
       if (openFilesInNewWindow) {
         this._createEditorWindow(null, [filePath])
       } else {
@@ -721,7 +726,8 @@ class App {
       }
     })
     onInternalChannel('app-open-files-by-id', (windowId: number, fileList: string[]) => {
-      const openFilesInNewWindow = this._accessor.preferences.getItem<boolean>('openFilesInNewWindow')
+      const openFilesInNewWindow =
+        this._accessor.preferences.getItem<boolean>('openFilesInNewWindow')
       if (openFilesInNewWindow) {
         this._createEditorWindow(null, fileList)
       } else {
@@ -738,7 +744,8 @@ class App {
     })
 
     onInternalChannel('app-open-markdown-by-id', (windowId: number, data: string) => {
-      const openFilesInNewWindow = this._accessor.preferences.getItem<boolean>('openFilesInNewWindow')
+      const openFilesInNewWindow =
+        this._accessor.preferences.getItem<boolean>('openFilesInNewWindow')
       if (openFilesInNewWindow) {
         this._createEditorWindow(null, [], [data])
       } else {
@@ -772,7 +779,8 @@ class App {
 
     ipcMain.on('mt::open-file-by-window-id', (_e, windowId: number, filePath: string) => {
       const resolvedPath = normalizeAndResolvePath(filePath)
-      const openFilesInNewWindow = this._accessor.preferences.getItem<boolean>('openFilesInNewWindow')
+      const openFilesInNewWindow =
+        this._accessor.preferences.getItem<boolean>('openFilesInNewWindow')
       if (openFilesInNewWindow) {
         this._createEditorWindow(null, [resolvedPath])
       } else {
@@ -783,7 +791,8 @@ class App {
       }
     })
 
-    ipcMain.on('mt::select-default-directory-to-open', async(e) => {
+    // eslint-disable-next-line @stylistic/space-before-function-paren -- Prettier compatibility.
+    ipcMain.on('mt::select-default-directory-to-open', async (e) => {
       const { preferences } = this._accessor
       const { defaultDirectoryToOpen } = preferences.getAll()
       const win = BrowserWindow.fromWebContents(e.sender)
@@ -827,7 +836,8 @@ class App {
       return { defaultKeybindings, userKeybindings }
     })
 
-    ipcMain.handle('mt::keybinding-save-user-keybindings', async(_event, userKeybindings) => {
+    // eslint-disable-next-line @stylistic/space-before-function-paren -- Prettier compatibility.
+    ipcMain.handle('mt::keybinding-save-user-keybindings', async (_event, userKeybindings) => {
       const { keybindings, menu } = this._accessor
       const editorWindows = this._windowManager
         .getWindowsByType(WindowType.EDITOR)
@@ -844,8 +854,12 @@ class App {
       return saved
     })
 
-    ipcMain.handle('mt::fs-trash-item', async(_event, fullPath: string) => {
-      return shell.trashItem(fullPath)
+    // eslint-disable-next-line @stylistic/space-before-function-paren -- Prettier compatibility.
+    ipcMain.handle('mt::fs-trash-item', async () => {
+      // Renderer-supplied paths are not deletion capabilities. This legacy
+      // operation stays disabled until the main process issues an opaque,
+      // owner-bound capability for a canonical project entry.
+      throw new Error('Moving project items to Trash is disabled in this release.')
     })
   }
 }

@@ -1,4 +1,4 @@
-import { shell, ipcMain } from 'electron'
+import { ipcMain } from 'electron'
 import log from 'electron-log'
 import EventEmitter from 'events'
 import fsPromises from 'fs/promises'
@@ -11,6 +11,7 @@ import {
 } from 'native-keymap'
 import os from 'os'
 import path from 'path'
+import { APP_SLUG } from '@shared/brand'
 
 export interface KeyboardInfo {
   layout: IKeyboardLayoutInfo
@@ -59,7 +60,10 @@ class KeyboardLayoutMonitor extends EventEmitter {
   // NOTE: Preserves the pre-existing single-argument override; the original JS
   // also delegated to `this.removeListener(channel, callback)` (recursive).
   override removeListener(eventNameOrCallback: unknown, _listener?: unknown): this {
-    this.removeListener(KEYBOARD_LAYOUT_MONITOR_CHANNEL_ID, eventNameOrCallback as KeyboardInfoListener)
+    this.removeListener(
+      KEYBOARD_LAYOUT_MONITOR_CHANNEL_ID,
+      eventNameOrCallback as KeyboardInfoListener
+    )
     return this
   }
 
@@ -84,19 +88,16 @@ class KeyboardLayoutMonitor extends EventEmitter {
 export const keyboardLayoutMonitor = new KeyboardLayoutMonitor()
 
 export const registerKeyboardListeners = (): void => {
-  ipcMain.handle('mt::keybinding-get-keyboard-info', async() => {
+  // eslint-disable-next-line @stylistic/space-before-function-paren -- Prettier compatibility.
+  ipcMain.handle('mt::keybinding-get-keyboard-info', async () => {
     return getKeyboardInfo()
   })
-  ipcMain.on('mt::keybinding-debug-dump-keyboard-info', async() => {
-    const dumpPath = path.join(os.tmpdir(), 'marktext_keyboard_info.json')
+  // eslint-disable-next-line @stylistic/space-before-function-paren -- Prettier compatibility.
+  ipcMain.on('mt::keybinding-debug-dump-keyboard-info', async () => {
+    const dumpPath = path.join(os.tmpdir(), `${APP_SLUG}_keyboard_info.json`)
     const content = JSON.stringify(getKeyboardInfo(), null, 2)
-    fsPromises
-      .writeFile(dumpPath, content, 'utf8')
-      .then(() => {
-        shell.openPath(dumpPath)
-      })
-      .catch((error: unknown) => {
-        log.error('Error dumping keyboard information:', error)
-      })
+    fsPromises.writeFile(dumpPath, content, 'utf8').catch((error: unknown) => {
+      log.error('Error dumping keyboard information:', error)
+    })
   })
 }

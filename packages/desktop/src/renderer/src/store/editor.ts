@@ -30,6 +30,12 @@ import type {
   PageOptions,
   TabOptions
 } from '@shared/types/files'
+import type { BookEditDto, BookEditSaveRequestDto } from '@shared/types/bookReader'
+import {
+  disposeBookEditDecisions,
+  requestBookEditDecision,
+  type BookEditDecisionOwner
+} from '@/services/bookEditDecision'
 
 // ----------------------------------------------------------------------------
 // Local helper types
@@ -107,6 +113,32 @@ interface ContentChangePayload {
   blocks?: unknown
 }
 
+interface BookTabOperationState {
+  generation: number
+  save: Promise<void> | null
+  reload: Promise<boolean> | null
+}
+
+const bookTabOperations = new Map<string, BookTabOperationState>()
+const bookTabOperation = (tab: IFileState): BookTabOperationState => {
+  let state = bookTabOperations.get(tab.id)
+  if (!state) {
+    state = { generation: 0, save: null, reload: null }
+    bookTabOperations.set(tab.id, state)
+  }
+  return state
+}
+const bookDecisionOwner = (
+  tab: IFileState,
+  operationState: BookTabOperationState,
+  generation: number
+): BookEditDecisionOwner => ({
+  tabId: tab.id,
+  operationGeneration: generation,
+  isCurrent: () =>
+    bookTabOperations.get(tab.id) === operationState && operationState.generation === generation
+})
+
 interface AffiliationEntry {
   type: string
   functionType?: string
@@ -117,7 +149,12 @@ interface AffiliationEntry {
 }
 
 interface SelectionChange {
-  start: { key: string; offset: number; block?: { text?: string; functionType?: string }; type?: string }
+  start: {
+    key: string
+    offset: number
+    block?: { text?: string; functionType?: string }
+    type?: string
+  }
   end: { key: string; offset: number; block?: { functionType?: string }; type?: string }
   affiliation?: AffiliationEntry[]
   hasFrontMatter?: boolean
@@ -207,11 +244,13 @@ export const useEditorStore = defineStore('editor', {
 
       for (const warning of bufferedEditorState.restoreWarnings) {
         const restoredTabId = warning.tabId ? oldIdToNewId[warning.tabId] : null
+        /* eslint-disable @stylistic/indent */
         const tab = restoredTabId
           ? this.tabs.find((t) => t.id === restoredTabId)
           : this.tabs.find((t) =>
-            window.fileUtils.isSamePathSync(t.pathname, warning.pathname ?? '')
-          )
+              window.fileUtils.isSamePathSync(t.pathname, warning.pathname ?? '')
+            )
+        /* eslint-enable @stylistic/indent */
 
         if (!tab) continue
 
@@ -509,9 +548,337 @@ export const useEditorStore = defineStore('editor', {
       bus.emit('flush-active-editor')
     },
 
+    OPEN_BOOK_EDIT(edit: BookEditDto): void {
+      const existing = this.tabs.find(
+        (tab) => tab.bookEdit?.sessionId === edit.sessionId && tab.bookEdit.nodeId === edit.nodeId
+      )
+      if (existing) {
+        const priorEditId = existing.bookEdit?.editId
+        const operationState = bookTabOperation(existing)
+        disposeBookEditDecisions(existing.id)
+        operationState.generation += 1
+        operationState.save = null
+        operationState.reload = null
+        existing.markdown = edit.markdown
+        existing.lineEnding = edit.format.lineEnding
+        existing.encoding = { encoding: 'utf8', isBom: edit.format.bom }
+        existing.isMixedLineEndings = edit.format.mixedLineEndings
+        existing.isSaved = true
+        existing.bookEdit = {
+          editId: edit.editId,
+          sessionId: edit.sessionId,
+          nodeId: edit.nodeId,
+          revision: edit.revision,
+          mixedLineEndings: edit.format.mixedLineEndings,
+          readOnly: false
+        }
+        if (priorEditId && priorEditId !== edit.editId) {
+          window.electron.books.closeEdit(priorEditId).catch(() => undefined)
+        }
+        this.UPDATE_CURRENT_FILE(existing)
+        bus.emit('file-loaded', {
+          id: existing.id,
+          markdown: existing.markdown,
+          cursor: existing.cursor
+        })
+        return
+      }
+      const file = createDocumentState({
+        filename: edit.title,
+        pathname: '',
+        markdown: edit.markdown,
+        isSaved: true,
+        encoding: { encoding: 'utf8', isBom: edit.format.bom },
+        lineEnding: edit.format.lineEnding,
+        adjustLineEndingOnSave: false,
+        isMixedLineEndings: edit.format.mixedLineEndings,
+        tabKind: 'book',
+        bookEdit: {
+          editId: edit.editId,
+          sessionId: edit.sessionId,
+          nodeId: edit.nodeId,
+          revision: edit.revision,
+          mixedLineEndings: edit.format.mixedLineEndings,
+          readOnly: false
+        }
+      })
+      this.SHOW_TAB_VIEW(false)
+      this.UPDATE_CURRENT_FILE(file)
+      bus.emit('file-loaded', { id: file.id, markdown: file.markdown, cursor: file.cursor })
+    },
+
+    async RELOAD_BOOK_EDIT(tab: IFileState): Promise<boolean> {
+      const operationState = bookTabOperation(tab)
+      if (operationState.reload) return operationState.reload
+      if (operationState.save) return false
+      const generation = operationState.generation
+      const operation = this.RELOAD_BOOK_EDIT_OPERATION(tab, generation)
+      operationState.reload = operation
+      try {
+        return await operation
+      } finally {
+        if (operationState.reload === operation) operationState.reload = null
+      }
+    },
+
+    async RELOAD_BOOK_EDIT_OPERATION(tab: IFileState, generation: number): Promise<boolean> {
+      const edit = tab.bookEdit
+      if (!edit) return false
+      const result = await window.electron.books.reloadEdit(edit.editId)
+      const operationState = bookTabOperation(tab)
+      if (
+        operationState.generation !== generation ||
+        (!this.tabs.some((candidate) => candidate.id === tab.id) && this.currentFile?.id !== tab.id)
+      ) {
+        return false
+      }
+      if (!result.ok) {
+        if (
+          result.error.code === 'edit-read-only' ||
+          result.error.code === 'edit-not-found' ||
+          result.error.code === 'edit-commit-uncertain'
+        ) {
+          edit.readOnly = true
+        }
+        await notice.notify({
+          title: 'Chapter could not be reloaded',
+          message: result.error.message,
+          type: 'error',
+          time: 20000
+        })
+        return false
+      }
+      tab.markdown = result.value.markdown
+      tab.lineEnding = result.value.format.lineEnding
+      tab.encoding = { encoding: 'utf8', isBom: result.value.format.bom }
+      tab.isMixedLineEndings = result.value.format.mixedLineEndings
+      tab.isSaved = true
+      edit.revision = result.value.revision
+      edit.mixedLineEndings = result.value.format.mixedLineEndings
+      edit.readOnly = false
+      if (this.currentFile?.id === tab.id) {
+        bus.emit('file-loaded', { id: tab.id, markdown: tab.markdown, cursor: tab.cursor })
+      }
+      debouncedSendBufferedState()
+      return true
+    },
+
+    async SAVE_BOOK_EDIT(
+      tab: IFileState,
+      overwriteToken?: string,
+      confirmMixedLineEndings = false
+    ): Promise<void> {
+      const operationState = bookTabOperation(tab)
+      if (operationState.save) return operationState.save
+      if (operationState.reload) return
+      const generation = operationState.generation
+      const operation = this.SAVE_BOOK_EDIT_OPERATION(
+        tab,
+        generation,
+        overwriteToken,
+        confirmMixedLineEndings
+      )
+      operationState.save = operation
+      try {
+        await operation
+      } finally {
+        if (operationState.save === operation) operationState.save = null
+      }
+    },
+
+    async SAVE_BOOK_EDIT_OPERATION(
+      tab: IFileState,
+      generation: number,
+      overwriteToken?: string,
+      confirmMixedLineEndings = false
+    ): Promise<void> {
+      const edit = tab.bookEdit
+      if (!edit || edit.readOnly) return
+      const markdown = tab.markdown
+      const request: BookEditSaveRequestDto = {
+        editId: edit.editId,
+        revision: edit.revision,
+        markdown,
+        ...(overwriteToken ? { overwriteToken } : {}),
+        ...(confirmMixedLineEndings ? { confirmMixedLineEndings: true } : {})
+      }
+      const result = await window.electron.books.saveEdit(request)
+      const operationState = bookTabOperation(tab)
+      if (
+        !this.tabs.some((candidate) => candidate.id === tab.id) &&
+        this.currentFile?.id !== tab.id
+      ) {
+        return
+      }
+      if (!result.ok) {
+        if (result.error.code === 'edit-mixed-line-endings') {
+          const decision = await requestBookEditDecision(
+            'Mixed line endings',
+            'Save and normalize this chapter to its predominant line ending?',
+            [
+              { id: 'cancel', label: 'Cancel' },
+              { id: 'save', label: 'Save', primary: true }
+            ],
+            'cancel',
+            bookDecisionOwner(tab, operationState, generation)
+          )
+          if (decision === 'save') {
+            if (operationState.generation === generation) {
+              await this.SAVE_BOOK_EDIT_OPERATION(tab, generation, overwriteToken, true)
+            }
+          }
+          return
+        }
+        if (result.error.code === 'edit-conflict' && result.error.overwriteToken) {
+          const decision = await requestBookEditDecision(
+            'Chapter changed on disk',
+            'Choose whether to keep the external version or overwrite it with your editor content.',
+            [
+              { id: 'cancel', label: 'Cancel' },
+              { id: 'reload', label: 'Reload' },
+              { id: 'overwrite', label: 'Overwrite', danger: true }
+            ],
+            'cancel',
+            bookDecisionOwner(tab, operationState, generation)
+          )
+          if (decision === 'reload') {
+            if (operationState.generation === generation) {
+              await this.RELOAD_BOOK_EDIT_OPERATION(tab, generation)
+            }
+          } else if (decision === 'overwrite') {
+            if (operationState.generation === generation) {
+              await this.SAVE_BOOK_EDIT_OPERATION(
+                tab,
+                generation,
+                result.error.overwriteToken,
+                confirmMixedLineEndings
+              )
+            }
+          }
+          return
+        }
+        if (
+          result.error.code === 'edit-read-only' ||
+          result.error.code === 'edit-not-found' ||
+          result.error.code === 'edit-commit-uncertain'
+        ) {
+          edit.readOnly = true
+        }
+        tab.isSaved = false
+        await notice.notify({
+          title: 'Book chapter was not saved',
+          message: result.error.message,
+          type: 'error',
+          time: 20000
+        })
+        return
+      }
+      edit.revision = result.value.revision
+      edit.nodeId = result.value.nodeId ?? edit.nodeId
+      edit.mixedLineEndings = false
+      edit.readOnly = result.value.readOnly
+      tab.isMixedLineEndings = false
+      if (result.value.durabilityUncertain) {
+        await notice.notify({
+          title: 'Chapter saved with uncertain durability',
+          message:
+            'The new content is visible, but the operating system could not confirm the folder metadata was persisted.',
+          type: 'warning',
+          time: 20000
+        })
+      }
+      if (operationState.generation !== generation || tab.markdown !== markdown) {
+        tab.isSaved = false
+        debouncedSendBufferedState()
+        return
+      }
+      const lastEditIndex = tab.history.lastEditIndex
+      const entry =
+        typeof lastEditIndex === 'number' && lastEditIndex >= 0
+          ? tab.history.stack[lastEditIndex]
+          : undefined
+      if (entry && typeof entry.id === 'number') tab.lastSavedHistoryId = entry.id
+      tab.isSaved = true
+      debouncedSendBufferedState()
+    },
+
+    async RESOLVE_BOOK_EDIT_GUARD(
+      candidates: IFileState[],
+      discardMode: 'reload' | 'close'
+    ): Promise<boolean> {
+      this.flushActiveEditor()
+      const scoped = candidates.filter((tab) => tab.tabKind === 'book')
+      // A save response is authoritative for dirty state. Never snapshot dirty
+      // or open a second prompt/save while the exact tab already owns one.
+      for (const tab of scoped) {
+        const existingSave = bookTabOperation(tab).save
+        if (existingSave) await existingSave
+      }
+      const live = scoped.filter(
+        (tab) =>
+          this.tabs.some((candidate) => candidate.id === tab.id) || this.currentFile?.id === tab.id
+      )
+      const dirty = live.filter((tab) => !tab.isSaved)
+      if (!dirty.length) {
+        if (discardMode === 'close') {
+          for (const tab of live) this.FORCE_CLOSE_TAB(tab)
+        }
+        return true
+      }
+      const ownerTab = dirty[0]
+      if (!ownerTab) return true
+      const ownerState = bookTabOperation(ownerTab)
+      const ownerGeneration = ownerState.generation
+      const decision = await requestBookEditDecision(
+        'Unsaved chapter changes',
+        discardMode === 'close'
+          ? 'Save or discard this chapter before closing its tab.'
+          : 'Save or discard changed book chapters before continuing.',
+        [
+          { id: 'cancel', label: 'Cancel' },
+          { id: 'discard', label: 'Discard', danger: true },
+          { id: 'save', label: 'Save', primary: true }
+        ],
+        'cancel',
+        bookDecisionOwner(ownerTab, ownerState, ownerGeneration)
+      )
+      if (decision === 'save') {
+        for (const tab of dirty) {
+          await this.SAVE_BOOK_EDIT(tab)
+          if (!tab.isSaved) return false
+        }
+        if (discardMode === 'close') {
+          for (const tab of live) this.FORCE_CLOSE_TAB(tab)
+        }
+        return true
+      }
+      if (decision === 'discard') {
+        if (discardMode === 'close') {
+          for (const tab of live) this.FORCE_CLOSE_TAB(tab)
+        } else {
+          for (const tab of dirty) {
+            if (!(await this.RELOAD_BOOK_EDIT(tab))) return false
+          }
+        }
+        return true
+      }
+      return false
+    },
+
+    async PREPARE_RETURN_TO_BOOK(): Promise<boolean> {
+      return this.RESOLVE_BOOK_EDIT_GUARD(
+        this.tabs.filter((tab) => tab.tabKind === 'book'),
+        'reload'
+      )
+    },
+
     FILE_SAVE(): void {
       if (!this.currentFile) return
       this.flushActiveEditor()
+      if (this.currentFile.tabKind === 'book') {
+        this.SAVE_BOOK_EDIT(this.currentFile).catch(() => undefined)
+        return
+      }
       const projectStore = useProjectStore()
       const { id, filename, pathname, markdown } = this.currentFile
       const options = getOptionsFromState(this.currentFile)
@@ -541,6 +908,7 @@ export const useEditorStore = defineStore('editor', {
 
     FILE_SAVE_AS(): void {
       if (!this.currentFile) return
+      if (this.currentFile.tabKind === 'book') return
       this.flushActiveEditor()
       const projectStore = useProjectStore()
       const { id, filename, pathname, markdown } = this.currentFile
@@ -645,34 +1013,36 @@ export const useEditorStore = defineStore('editor', {
     LISTEN_FOR_CLOSE(): void {
       const projectStore = useProjectStore()
       const preferencesStore = usePreferencesStore()
-      window.electron.ipcRenderer.on('mt::ask-for-close', () => {
-        sendBufferedState()
-          .catch((err) => {
-            console.error('Failed to update buffered state before closing', err)
-          })
-          .then(() => {
-            const unsavedFiles = this.tabs
-              .filter((file) => !file.isSaved)
-              .map((file) => {
-                const { id, filename, pathname, markdown } = file
-                const options = getOptionsFromState(file)
-                return {
-                  id,
-                  filename,
-                  pathname,
-                  markdown,
-                  options,
-                  defaultPath: getRootFolderFromState(projectStore)
-                }
-              })
-
-            if (unsavedFiles.length && preferencesStore.startUpAction !== 'restoreAll') {
-              // Ignore unsaved files when user has chosen to restore all on startup, as they will be restored anyway.
-              window.electron.ipcRenderer.send('mt::close-window-confirm', deepClone(unsavedFiles))
-            } else {
-              window.electron.ipcRenderer.send('mt::close-window')
+      // eslint-disable-next-line @stylistic/space-before-function-paren
+      window.electron.ipcRenderer.on('mt::ask-for-close', async () => {
+        if (!(await this.PREPARE_RETURN_TO_BOOK())) return
+        try {
+          await sendBufferedState()
+        } catch (err) {
+          console.error('Failed to update buffered state before closing', err)
+        }
+        const unsavedFiles = this.tabs
+          .filter((file) => file.tabKind !== 'book' && !file.isSaved)
+          .map((file) => {
+            const { id, filename, pathname, markdown } = file
+            const options = getOptionsFromState(file)
+            return {
+              id,
+              filename,
+              pathname,
+              markdown,
+              options,
+              defaultPath: getRootFolderFromState(projectStore)
             }
           })
+
+        if (unsavedFiles.length && preferencesStore.startUpAction !== 'restoreAll') {
+          // Ignore ordinary unsaved files when restore-all is enabled. Book
+          // edits were already resolved above and never enter the path-based dialog.
+          window.electron.ipcRenderer.send('mt::close-window-confirm', deepClone(unsavedFiles))
+        } else {
+          window.electron.ipcRenderer.send('mt::close-window')
+        }
       })
     },
 
@@ -688,7 +1058,7 @@ export const useEditorStore = defineStore('editor', {
       const { tabs } = this
       const projectStore = useProjectStore()
       const unsavedFiles = tabs
-        .filter((file) => !(file.isSaved && /[^\n]/.test(file.markdown)))
+        .filter((file) => file.tabKind !== 'book' && !(file.isSaved && /[^\n]/.test(file.markdown)))
         .map((file) => {
           const { id, filename, pathname, markdown } = file
           const options = getOptionsFromState(file)
@@ -703,19 +1073,27 @@ export const useEditorStore = defineStore('editor', {
         })
 
       if (closeTabs) {
+        const dirtyBookTabs = tabs.filter((file) => file.tabKind === 'book' && !file.isSaved)
+        for (const tab of dirtyBookTabs) {
+          this.SAVE_BOOK_EDIT(tab).catch(() => undefined)
+        }
         if (unsavedFiles.length) {
-          this.CLOSE_TABS(tabs.filter((f) => f.isSaved).map((f) => f.id))
+          this.CLOSE_TABS(tabs.filter((f) => f.isSaved && f.tabKind !== 'book').map((f) => f.id))
           window.electron.ipcRenderer.send('mt::save-and-close-tabs', deepClone(unsavedFiles))
         } else {
-          this.CLOSE_TABS(tabs.map((f) => f.id))
+          this.CLOSE_TABS(tabs.filter((f) => f.tabKind !== 'book').map((f) => f.id))
         }
       } else {
+        for (const tab of tabs.filter((file) => file.tabKind === 'book' && !file.isSaved)) {
+          this.SAVE_BOOK_EDIT(tab).catch(() => undefined)
+        }
         window.electron.ipcRenderer.send('mt::save-tabs', deepClone(unsavedFiles))
       }
     },
 
     MOVE_FILE_TO(): void {
       if (!this.currentFile) return
+      if (this.currentFile.tabKind === 'book') return
       this.flushActiveEditor()
       const projectStore = useProjectStore()
       const { id, filename, pathname, markdown } = this.currentFile
@@ -759,6 +1137,7 @@ export const useEditorStore = defineStore('editor', {
 
     RESPONSE_FOR_RENAME(): void {
       if (!this.currentFile) return
+      if (this.currentFile.tabKind === 'book') return
       this.flushActiveEditor()
       const projectStore = useProjectStore()
       const { id, filename, pathname, markdown } = this.currentFile
@@ -872,14 +1251,8 @@ export const useEditorStore = defineStore('editor', {
             project: projectStore
           })
         )
-        bus.emit(
-          'cmd::register-command',
-          new LineEndingCommand(this)
-        )
-        bus.emit(
-          'cmd::register-command',
-          new TrailingNewlineCommand(this)
-        )
+        bus.emit('cmd::register-command', new LineEndingCommand(this))
+        bus.emit('cmd::register-command', new TrailingNewlineCommand(this))
 
         setTimeout(() => {
           window.electron.ipcRenderer.send('mt::request-keybindings')
@@ -1000,6 +1373,13 @@ export const useEditorStore = defineStore('editor', {
     },
 
     FORCE_CLOSE_TAB(file: IFileState): void {
+      if (file.bookEdit) {
+        const operationState = bookTabOperation(file)
+        disposeBookEditDecisions(file.id)
+        operationState.generation += 1
+        bookTabOperations.delete(file.id)
+        window.electron.books.closeEdit(file.bookEdit.editId).catch(() => undefined)
+      }
       const { tabs, currentFile } = this
       const index = tabs.findIndex((t) => t.id === file.id)
       if (index > -1) {
@@ -1051,6 +1431,10 @@ export const useEditorStore = defineStore('editor', {
     },
 
     CLOSE_UNSAVED_TAB(file: IFileState): void {
+      if (file.tabKind === 'book') {
+        this.RESOLVE_BOOK_EDIT_GUARD([file], 'close').catch(() => undefined)
+        return
+      }
       const { id, pathname, filename, markdown } = file
       const options = getOptionsFromState(file)
       window.electron.ipcRenderer.send('mt::save-and-close-tabs', [
@@ -1108,8 +1492,7 @@ export const useEditorStore = defineStore('editor', {
       this.updateTabIdToIndex() // Update before sending it out to prevent stale mappings.
 
       if (this.currentFile == null && this.tabs.length > 0) {
-        this.currentFile =
-          this.tabs[tabIndex] ?? this.tabs[tabIndex - 1] ?? this.tabs[0] ?? null
+        this.currentFile = this.tabs[tabIndex] ?? this.tabs[tabIndex - 1] ?? this.tabs[0] ?? null
         if (this.currentFile && typeof this.currentFile.markdown === 'string') {
           const { id, markdown, cursor, history, pathname, scrollTop, blocks, muyaIndexCursor } =
             this.currentFile
@@ -1242,7 +1625,10 @@ export const useEditorStore = defineStore('editor', {
     NEW_UNTITLED_TAB({
       markdown: markdownString,
       selected
-    }: { markdown?: string; selected?: boolean }): void {
+    }: {
+      markdown?: string
+      selected?: boolean
+    }): void {
       if (selected == null) {
         selected = true
       }
@@ -1416,6 +1802,9 @@ export const useEditorStore = defineStore('editor', {
 
       markdown = adjustTrailingNewlines(markdown, trimTrailingNewline)
       tab.markdown = markdown
+      if (tab.tabKind === 'book' && markdown !== oldMarkdown) {
+        bookTabOperation(tab).generation += 1
+      }
 
       if (oldMarkdown.length === 0 && markdown.length === 1 && markdown[0] === '\n') {
         debouncedSendBufferedState()
@@ -1471,6 +1860,7 @@ export const useEditorStore = defineStore('editor', {
       if (!id || !pathname) {
         throw new Error('HANDLE_AUTO_SAVE: Invalid tab.')
       }
+      if (this.tabs.find((tab) => tab.id === id)?.tabKind === 'book') return
 
       const preferencesStore = usePreferencesStore()
       const projectStore = useProjectStore()
@@ -1603,6 +1993,7 @@ export const useEditorStore = defineStore('editor', {
 
     SET_LINE_ENDING(lineEnding: LineEnding | string): void {
       if (!this.currentFile) return
+      if (this.currentFile.tabKind === 'book') return
       const { lineEnding: oldLineEnding } = this.currentFile
       if (lineEnding !== oldLineEnding) {
         this.currentFile.lineEnding = lineEnding
@@ -1625,6 +2016,7 @@ export const useEditorStore = defineStore('editor', {
     LISTEN_FOR_SET_ENCODING(): void {
       bus.on('mt::set-file-encoding', (encodingName) => {
         if (!this.currentFile) return
+        if (this.currentFile.tabKind === 'book') return
         const { encoding } = this.currentFile.encoding
         if (encoding !== encodingName) {
           this.currentFile.encoding.encoding = encodingName as string
@@ -1638,6 +2030,7 @@ export const useEditorStore = defineStore('editor', {
     LISTEN_FOR_SET_FINAL_NEWLINE(): void {
       bus.on('mt::set-final-newline', (value) => {
         if (!this.currentFile) return
+        if (this.currentFile.tabKind === 'book') return
         const { trimTrailingNewline } = this.currentFile
         if (trimTrailingNewline !== value) {
           this.currentFile.trimTrailingNewline = value as number
@@ -1799,10 +2192,7 @@ const getRootFolderFromState = (projectStore: ProjectStoreLike): string => {
  * @param markdown The text to trim.
  * @param trimTrailingNewlineOption The option how we should trim the final newlines.
  */
-const adjustTrailingNewlines = (
-  markdown: string,
-  trimTrailingNewlineOption: number
-): string => {
+const adjustTrailingNewlines = (markdown: string, trimTrailingNewlineOption: number): string => {
   if (!markdown) {
     return ''
   }
@@ -1975,9 +2365,7 @@ const createApplicationMenuState = ({
 /**
  * Creates a object that contains the formats selection state.
  */
-export const createSelectionFormatState = (
-  formats: SelectionFormat[]
-): Record<string, boolean> => {
+export const createSelectionFormatState = (formats: SelectionFormat[]): Record<string, boolean> => {
   const state: Record<string, boolean> = {}
   for (const item of formats) {
     // Underline/superscript/subscript/highlight are carried as `html_tag`
@@ -2076,27 +2464,35 @@ interface BufferedEditorState {
   restoreWarnings: BufferedRestoreWarning[]
 }
 
+/* eslint-disable @stylistic/indent */
 const createBufferedEditorState = (state: unknown): BufferedEditorState | null => {
   const s = state as
     | {
-      tabs?: unknown
-      currentFileId?: string
-      currentFile?: { id?: string } | null
-      restoreWarnings?: unknown
-    }
+        tabs?: unknown
+        currentFileId?: string
+        currentFile?: { id?: string } | null
+        restoreWarnings?: unknown
+      }
     | null
     | undefined
   if (!s || !Array.isArray(s.tabs)) {
     return null
   }
 
+  const fileTabs = (s.tabs as Array<Partial<IFileState> & { id: string }>).filter(
+    (tab) => tab.tabKind !== 'book' && !tab.bookEdit
+  )
+  const requestedCurrentId = s.currentFileId || s.currentFile?.id || null
   return {
-    currentFileId: s.currentFileId || s.currentFile?.id || null,
-    tabs: (s.tabs as Array<Partial<IFileState> & { id: string }>).map(createBufferedTabState),
+    currentFileId: fileTabs.some((tab) => tab.id === requestedCurrentId)
+      ? requestedCurrentId
+      : (fileTabs[0]?.id ?? null),
+    tabs: fileTabs.map(createBufferedTabState),
     restoreWarnings: Array.isArray(s.restoreWarnings)
       ? (s.restoreWarnings as RestoreWarning[])
-        .map(createBufferedRestoreWarning)
-        .filter((w): w is BufferedRestoreWarning => w !== null)
+          .map(createBufferedRestoreWarning)
+          .filter((w): w is BufferedRestoreWarning => w !== null)
       : []
   }
 }
+/* eslint-enable @stylistic/indent */

@@ -2,7 +2,7 @@ import type Renderer from './index';
 import { CLASS_NAMES } from '../../config';
 import { getUniqueId } from '../../utils';
 import { insertAfter, operateClassName } from '../../utils/dom';
-import { loadImage } from '../../utils/image';
+import { isSafeLocalResource, loadImage } from '../../utils/image';
 
 export default function loadImageAsync(
     this: Renderer,
@@ -20,6 +20,16 @@ export default function loadImageAsync(
     let url: string | undefined;
     let w;
     let h;
+
+    // Opening an arbitrary document is an offline operation in LeafBook.
+    // Preserve the source token for editing/explicit actions, but never assign
+    // a remote URL to Image/fetch during automatic rendering. CSP and the
+    // Electron webRequest policy independently enforce the same boundary.
+    if (/^https?:\/\//i.test(src) || !isSafeLocalResource(src)) {
+        id = getUniqueId();
+        this.loadImageMap.set(src, { id, isSuccess: false });
+        return { id, isSuccess: false, url: undefined, width: undefined, height: undefined };
+    }
 
     const cached = this.loadImageMap.get(src);
     // Retry when the previous load failed: a transient failure should not

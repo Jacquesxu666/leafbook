@@ -1,0 +1,124 @@
+name: Reusable supply-chain evidence
+
+# Callable only: it has no direct trigger. The tag release workflow invokes it
+# after receipt-bound native carrier assembly and before the draft write job.
+on:
+  workflow_call:
+    inputs:
+      candidate-artifact-name:
+        description: Exact Actions artifact containing dist/ release subjects
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  attest-candidate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - name: Check out exact source revision
+        # actions/checkout v4.3.1
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+        with:
+          persist-credentials: false
+
+      - name: Setup frozen dependency graph
+        uses: ./.github/actions/setup
+        with:
+          node-version: '24.14.1'
+
+      - name: Download exact candidate
+        # actions/download-artifact v4.3.0
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: ${{ inputs.candidate-artifact-name }}
+          path: candidate
+
+      - name: Gate formal release notes
+        run: node scripts/verify-release-notes.mjs
+
+      - name: Verify audited carrier checksum set
+        run: |
+          node scripts/release-checksums.mjs verify candidate/dist
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+
+          version = json.load(open('packages/desktop/package.json', encoding='utf-8'))['version']
+          expected = {
+              f'leafbook-linux-x64-{version}.AppImage',
+              f'leafbook-linux-x64-{version}.deb',
+              f'leafbook-linux-x64-{version}.rpm',
+              f'leafbook-linux-x64-{version}.tar.gz',
+              f'leafbook-linux-arm64-{version}.AppImage',
+              f'leafbook-linux-arm64-{version}.deb',
+              f'leafbook-linux-arm64-{version}.rpm',
+              f'leafbook-linux-arm64-{version}.tar.gz',
+              f'leafbook-win-x64-{version}-setup.exe',
+              f'leafbook-win-x64-{version}.zip',
+              f'leafbook-win-arm64-{version}-setup.exe',
+              f'leafbook-win-arm64-{version}.zip',
+              f'leafbook-mac-x64-{version}.dmg',
+              f'leafbook-mac-x64-{version}.zip',
+              f'leafbook-mac-arm64-{version}.dmg',
+              f'leafbook-mac-arm64-{version}.zip',
+          }
+          manifest = open('candidate/dist/SHA256SUMS.txt', encoding='utf-8').read().splitlines()
+          pattern = re.compile(r'^[0-9a-f]{64}  ([A-Za-z0-9][A-Za-z0-9._+-]*)$')
+          declared = {match.group(1) for line in manifest if (match := pattern.fullmatch(line))}
+          if len(manifest) != 16 or declared != expected:
+              raise SystemExit('SBOM subjects are not the exact 16 audited carriers')
+          PY
+
+      - name: Bind SBOM time to exact source commit
+        shell: bash
+        run: |
+          source_date_epoch="$(git show -s --format=%ct "${GITHUB_SHA}^{commit}")"
+          [[ "$source_date_epoch" =~ ^[1-9][0-9]*$ ]]
+          printf 'SOURCE_DATE_EPOCH=%s\n' "$source_date_epoch" >> "$GITHUB_ENV"
+
+      - name: Generate deterministic SPDX SBOM
+        run: |
+          mkdir -p evidence
+          node scripts/generate-release-sbom.mjs evidence/leafbook.spdx.json
+
+      - name: Include formal release notes
+        run: cp docs/RELEASE_NOTES.md evidence/RELEASE_NOTES.md
+
+      - name: Create dedicated SBOM subject manifest
+        run: |
+          cp candidate/dist/SHA256SUMS.txt evidence/SBOM-SUBJECTS.sha256
+          cmp candidate/dist/SHA256SUMS.txt evidence/SBOM-SUBJECTS.sha256
+
+      - name: Attest candidate build provenance
+        # actions/attest v4.2.1
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d
+        with:
+          subject-checksums: candidate/dist/SHA256SUMS.txt
+
+      - name: Attest candidate SBOM
+        # actions/attest v4.2.1
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d
+        with:
+          subject-checksums: evidence/SBOM-SUBJECTS.sha256
+          sbom-path: evidence/leafbook.spdx.json
+
+      - name: Upload audited evidence bundle
+        # actions/upload-artifact v4.6.2
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: leafbook-supply-chain-evidence
+          retention-days: 30
+          if-no-files-found: error
+          path: |
+            candidate/dist/SHA256SUMS.txt
+            evidence/SBOM-SUBJECTS.sha256
+            evidence/leafbook.spdx.json
+            evidence/RELEASE_NOTES.md

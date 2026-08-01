@@ -9,27 +9,14 @@ export default function Support() {
       <div className="wrap">
         <div className="sec-head center reveal">
           <span className="kicker">Support</span>
-          <h2 className="sec-title">Keep MarkText free.</h2>
+          <h2 className="sec-title">Help validate LeafBook.</h2>
           <p className="sec-desc">
-            Built by volunteers. If it earns a place in your workflow, sponsorship keeps development
-            going.
+            Review the source and report issues while the first public release is being prepared.
           </p>
           <div className="hero-cta hero-cta--center">
-            <a className="btn btn-primary btn-lg" href={DOWNLOAD.sponsor} {...EXT_LINK}>
+            <a className="btn btn-primary btn-lg" href={DOWNLOAD.issues} {...EXT_LINK}>
               <HeartIcon />
-              Sponsor on GitHub
-            </a>
-          </div>
-        </div>
-
-        <div className="sponsors-wall reveal d1">
-          <span className="sponsors-label">Sponsored by</span>
-          <div className="sponsor-logos">
-            <a className="sponsor-logo" href={DOWNLOAD.serpapi} {...EXT_LINK} title="SerpApi">
-              <img src="/assets/serpapi.png" alt="SerpApi" loading="lazy" />
-            </a>
-            <a className="sponsor-logo" href={DOWNLOAD.ukey} {...EXT_LINK} title="UKey Wallet">
-              <img className="sponsor-logo-raw" src="/assets/ukey.png" alt="UKey Wallet" loading="lazy" />
+              Report an issue
             </a>
           </div>
         </div>

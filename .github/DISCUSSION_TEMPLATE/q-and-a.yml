@@ -1,0 +1,23 @@
+title: '[Question] '
+labels: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for using LeafBook. Search existing discussions and the
+        [current documentation](https://github.com/Jacquesxu666/leafbook/blob/develop/README.md)
+        before posting.
+  - type: textarea
+    id: question
+    attributes:
+      label: Question
+      description: What are you trying to do, and what result did you expect?
+    validations:
+      required: true
+  - type: input
+    id: leafbook-version
+    attributes:
+      label: LeafBook version
+      placeholder: 'e.g. 1.0.0'
+    validations:
+      required: true

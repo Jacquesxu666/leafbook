@@ -1,3 +1,4 @@
+/* eslint-disable @stylistic/space-before-function-paren */
 import { expect } from '@playwright/test'
 import { _electron, type ElectronApplication, type Page } from 'playwright'
 import * as fs from 'node:fs'
@@ -22,6 +23,9 @@ const getTempPath = (suffix = ''): string => {
 }
 
 export const getElectronPath = (): string => {
+  if (process.env.LEAFBOOK_E2E_EXECUTABLE) {
+    return path.resolve(process.env.LEAFBOOK_E2E_EXECUTABLE)
+  }
   if (process.platform === 'win32') {
     return path.resolve(path.join('node_modules', '.bin', 'electron.cmd'))
   }
@@ -59,9 +63,16 @@ export interface LaunchOptions {
   // should opt in — otherwise existing specs would silently ignore renderer
   // exceptions that previously surfaced as a dialog (a hidden regression risk).
   suppressErrorDialog?: boolean
+  /**
+   * Optional caller-owned profile directory. Privacy-sensitive RC harnesses use
+   * this to keep every writable artifact below one validated temporary root.
+   */
+  userDataDir?: string
+  /** Prefixes removed from the spawned Electron environment. */
+  stripEnvironmentPrefixes?: string[]
 }
 
-export const launchElectron = async(
+export const launchElectron = async (
   userArgs?: string[],
   options: LaunchOptions = {}
 ): Promise<LaunchResult> => {
@@ -69,10 +80,23 @@ export const launchElectron = async(
   const executablePath = getElectronPath()
   // Pass project root as entry so Electron reads package.json and getAppPath() returns project root.
   // Passing out/main/index.js directly bypasses package.json and breaks __static path resolution.
-  const userDataDir = trackTempDir(getTempPath())
-  const args = [projectRoot, '--user-data-dir', userDataDir].concat(userArgs)
+  const userDataDir = options.userDataDir
+    ? path.resolve(options.userDataDir)
+    : trackTempDir(getTempPath())
+  const args = (
+    process.env.LEAFBOOK_E2E_EXECUTABLE
+      ? ['--user-data-dir', userDataDir]
+      : [projectRoot, '--user-data-dir', userDataDir]
+  ).concat(userArgs)
   const env: Record<string, string> = {}
-  for (const [k, v] of Object.entries(process.env)) if (v !== undefined) env[k] = v
+  for (const [k, v] of Object.entries(process.env)) {
+    if (
+      v !== undefined &&
+      !options.stripEnvironmentPrefixes?.some((prefix) => k.startsWith(prefix))
+    ) {
+      env[k] = v
+    }
+  }
   env.PERF_TESTING = 'true'
   if (options.suppressErrorDialog) env.MARKTEXT_ERROR_INTERACTION = '1'
   const app = await _electron.launch({
@@ -94,7 +118,7 @@ export const launchElectron = async(
 // (`mt::handle-renderer-error`) that exceptionHandler.ts listens on, and
 // accumulate the count in a shared global so specs can read it back via
 // `getRendererErrors`. Multiple listeners are allowed on ipcMain.
-const installRendererErrorCounter = async(app: ElectronApplication): Promise<void> => {
+const installRendererErrorCounter = async (app: ElectronApplication): Promise<void> => {
   await app.evaluate(({ ipcMain }) => {
     const g = global as unknown as {
       __mt_renderer_errors__?: Array<{ message?: string; name?: string; stack?: string }>
@@ -109,7 +133,7 @@ const installRendererErrorCounter = async(app: ElectronApplication): Promise<voi
   })
 }
 
-export const getRendererErrors = async(
+export const getRendererErrors = async (
   app: ElectronApplication
 ): Promise<Array<{ message?: string; name?: string; stack?: string }>> => {
   return await app.evaluate(() => {
@@ -120,7 +144,7 @@ export const getRendererErrors = async(
   })
 }
 
-export const clearRendererErrors = async(app: ElectronApplication): Promise<void> => {
+export const clearRendererErrors = async (app: ElectronApplication): Promise<void> => {
   await app.evaluate(() => {
     const g = global as unknown as {
       __mt_renderer_errors__?: Array<unknown>
@@ -131,10 +155,12 @@ export const clearRendererErrors = async(app: ElectronApplication): Promise<void
 
 // Assert that no renderer-process error has been captured since the last clear.
 // On failure, prints the captured stacks so the spec output is actionable.
-export const expectNoRendererErrors = async(app: ElectronApplication): Promise<void> => {
+export const expectNoRendererErrors = async (app: ElectronApplication): Promise<void> => {
   const errors = await getRendererErrors(app)
   if (errors.length > 0) {
-    const summary = errors.map((e) => `- ${e.name ?? 'Error'}: ${e.message}\n${e.stack ?? ''}`).join('\n\n')
+    const summary = errors
+      .map((e) => `- ${e.name ?? 'Error'}: ${e.message}\n${e.stack ?? ''}`)
+      .join('\n\n')
     throw new Error(`Expected no renderer errors, captured ${errors.length}:\n\n${summary}`)
   }
   expect(errors.length).toBe(0)
@@ -143,7 +169,7 @@ export const expectNoRendererErrors = async(app: ElectronApplication): Promise<v
 // Poll until a renderer error matching `predicate` is captured (or timeout).
 // Prefer this over a fixed `waitForTimeout` when waiting for an error to
 // surface — IPC delivery time varies on slower CI runners.
-export const waitForRendererError = async(
+export const waitForRendererError = async (
   app: ElectronApplication,
   predicate: (e: { message?: string; name?: string; stack?: string }) => boolean,
   timeoutMs = 5000,
@@ -159,7 +185,7 @@ export const waitForRendererError = async(
   return null
 }
 
-export const waitForMenuReady = async(
+export const waitForMenuReady = async (
   app: ElectronApplication,
   timeout = 10000
 ): Promise<void> => {
@@ -172,7 +198,7 @@ export const waitForMenuReady = async(
   throw new Error('Application menu was not built within timeout')
 }
 
-export const clickMenuById = async(app: ElectronApplication, id: string): Promise<void> => {
+export const clickMenuById = async (app: ElectronApplication, id: string): Promise<void> => {
   await app.evaluate(({ Menu, BrowserWindow }, menuId) => {
     const menu = Menu.getApplicationMenu()
     if (!menu) throw new Error('Application menu is not built yet')
@@ -196,7 +222,7 @@ export const clickMenuById = async(app: ElectronApplication, id: string): Promis
   }, id)
 }
 
-export const waitForEditor = async(page: Page, timeout = 15000): Promise<void> => {
+export const waitForEditor = async (page: Page, timeout = 15000): Promise<void> => {
   await page.waitForSelector('.editor-component', { state: 'attached', timeout })
   await page.waitForFunction(
     () => {
@@ -208,7 +234,7 @@ export const waitForEditor = async(page: Page, timeout = 15000): Promise<void> =
   )
 }
 
-export const enterSourceMode = async(page: Page, app: ElectronApplication): Promise<void> => {
+export const enterSourceMode = async (page: Page, app: ElectronApplication): Promise<void> => {
   const already = await page.evaluate(() => !!document.querySelector('.source-code .CodeMirror'))
   if (already) return
   await clickMenuById(app, 'sourceCodeModeMenuItem')
@@ -225,7 +251,7 @@ export const enterSourceMode = async(page: Page, app: ElectronApplication): Prom
   )
 }
 
-export const exitSourceMode = async(page: Page, app: ElectronApplication): Promise<void> => {
+export const exitSourceMode = async (page: Page, app: ElectronApplication): Promise<void> => {
   const inSource = await page.evaluate(() => !!document.querySelector('.source-code .CodeMirror'))
   if (!inSource) return
   await clickMenuById(app, 'sourceCodeModeMenuItem')
@@ -234,10 +260,7 @@ export const exitSourceMode = async(page: Page, app: ElectronApplication): Promi
   })
 }
 
-export const getMarkdownContent = async(
-  page: Page,
-  app: ElectronApplication
-): Promise<string> => {
+export const getMarkdownContent = async (page: Page, app: ElectronApplication): Promise<string> => {
   const wasInSource = await page.evaluate(
     () => !!document.querySelector('.source-code .CodeMirror')
   )
@@ -252,9 +275,27 @@ export const getMarkdownContent = async(
   return value
 }
 
-export const typeIntoEditor = async(page: Page, text: string): Promise<void> => {
+export const typeIntoEditor = async (page: Page, text: string): Promise<void> => {
   await page.click('.editor-component', { timeout: 5000 })
-  await page.keyboard.type(text, { delay: 0 })
+  // Muya commits input through DOM input/selection events. A zero-delay burst can
+  // outrun that commit path (especially in a packaged Electron renderer), so
+  // source-mode readback may observe a truncated tail. Keep this as real
+  // keyboard interaction, but allow each event turn to reach Muya's model.
+  await page.keyboard.type(text, { delay: 25 })
+  await page.waitForFunction(
+    (expected) => document.querySelector('.editor-component')?.textContent?.includes(expected),
+    text,
+    { timeout: 5000 }
+  )
+  // Let Muya consume the last real input event before a caller performs a
+  // source-mode round trip. Two rendered frames avoid a fixed wall-clock sleep
+  // while preserving the same user-visible interaction boundary.
+  await page.evaluate(
+    () =>
+      new Promise<void>((resolve) => {
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
+      })
+  )
 }
 
 // The @muyajs/core engine wraps editable paragraph text in
@@ -293,18 +334,18 @@ const commitSelection = (collapse: boolean) => {
   return true
 }
 
-export const focusEditor = async(page: Page): Promise<void> => {
+export const focusEditor = async (page: Page): Promise<void> => {
   await page.evaluate(commitSelection, false)
   // Allow muya's selectionchange listener to commit the selection to its model.
   await page.waitForTimeout(150)
 }
 
-export const placeCaretInEditor = async(page: Page): Promise<void> => {
+export const placeCaretInEditor = async (page: Page): Promise<void> => {
   await page.evaluate(commitSelection, true)
   await page.waitForTimeout(150)
 }
 
-export const setSourceMarkdown = async(
+export const setSourceMarkdown = async (
   page: Page,
   app: ElectronApplication,
   markdown: string
@@ -327,7 +368,7 @@ const writeTempMarkdown = (content: string): string => {
   return filePath
 }
 
-export const launchWithDoc = async(
+export const launchWithDoc = async (
   relativeFixture: string,
   options: LaunchOptions = {}
 ): Promise<LaunchResult> => {
@@ -341,7 +382,7 @@ export interface LaunchWithMarkdownResult extends LaunchResult {
   filePath: string
 }
 
-export const launchWithMarkdown = async(
+export const launchWithMarkdown = async (
   markdown = '',
   options: LaunchOptions = {}
 ): Promise<LaunchWithMarkdownResult> => {
@@ -352,7 +393,7 @@ export const launchWithMarkdown = async(
   return { app, page, filePath }
 }
 
-export const sendIpcToRenderer = async(
+export const sendIpcToRenderer = async (
   app: ElectronApplication,
   channel: string,
   ...args: unknown[]

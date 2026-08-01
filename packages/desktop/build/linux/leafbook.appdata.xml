@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop">
+  <id>com.jacquesxu.leafbook</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <name>LeafBook</name>
+  <summary>Local-first Markdown book reader and editor</summary>
+  <description>
+    <p>
+      LeafBook turns local Markdown collections into books that can be read and
+      edited. It is an independent derivative of the open-source MarkText editor.
+    </p>
+    <p>Features:</p>
+    <ul>
+      <li>Realtime preview and a distraction-free writing experience</li>
+      <li>GitHub Flavored Markdown, math expressions, diagrams, and front matter</li>
+      <li>Local files remain the source of truth</li>
+    </ul>
+  </description>
+  <url type="homepage">https://github.com/Jacquesxu666/leafbook</url>
+  <url type="bugtracker">https://github.com/Jacquesxu666/leafbook/issues</url>
+  <categories>
+    <category>Utility</category>
+    <category>TextEditor</category>
+  </categories>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release date="2026-07-31" version="1.0.0"/>
+  </releases>
+</component>

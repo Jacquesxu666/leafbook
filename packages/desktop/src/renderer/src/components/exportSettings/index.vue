@@ -163,7 +163,7 @@
           </div>
           <cur-select
             :description="t('exportSettings.theme.theme')"
-            more="https://marktext.me/docs/export-themes"
+            :more="DOCUMENTATION_URLS.exportThemes"
             :value="theme"
             :options="themeList"
             :on-change="(value: unknown) => onSelectChange('theme', value)"
@@ -289,6 +289,7 @@
 
 <script setup lang="ts">
 import { ref, onMounted, onBeforeUnmount, watch, type Ref } from 'vue'
+import { DOCUMENTATION_URLS } from '@shared/brand'
 import bus from '../../bus'
 import { loadExportSettings, saveExportSettings } from './persistence'
 import Bool from '@/prefComponents/common/bool/index.vue'

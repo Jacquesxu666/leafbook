@@ -127,7 +127,7 @@ test.describe('options / auto-pair matrix', () => {
         });
         await page.keyboard.type('(');
         await expect(page.locator(editor.paragraph).first()).toContainText('(');
-        expect(await getFirstBlockText(page)).toBe('(');
+        await expect.poll(() => getFirstBlockText(page)).toBe('(');
     });
 
     test('autoPairMarkdownSyntax: on → `*` produces `**`', async ({ page }) => {

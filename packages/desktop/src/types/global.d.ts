@@ -12,6 +12,37 @@ import type {
 } from '@shared/types/ipc'
 import type { MenuTemplate, MenuPopupPosition } from '@shared/types/menu'
 import type { SerializedStat } from '@shared/types/files'
+import type {
+  BookArrangementApplyRequestDto,
+  BookArrangementDto,
+  BookArrangementSaveDto,
+  BookArrangementSaveRequestDto,
+  BookPreparationCommitRequestDto,
+  BookPreparationDraftApplyRequestDto,
+  BookPreparationDto,
+  BookPreparationRecoveryRequestDto,
+  BookPreparationSaveDto,
+  BookExportCommitRequestDto,
+  BookExportSaveDto,
+  BookExportSnapshotDto,
+  BookWebsiteCommitRequestDto,
+  BookWebsiteSaveDto,
+  BookWebsiteSnapshotDto,
+  BookChapterDto,
+  BookEditDto,
+  BookEditSaveDto,
+  BookEditSaveRequestDto,
+  BookLinkNavigationDto,
+  BookReadingProgressDto,
+  BookResourceDto,
+  BookResourceRequestDto,
+  BookReaderResult,
+  BookSearchProgressDto,
+  BookSearchRequestDto,
+  BookSearchResponseDto,
+  BookshelfEntryDto,
+  BookSessionDto
+} from '@shared/types/bookReader'
 
 declare global {
   // ---- Build-time defines (electron-vite `define`) ----
@@ -94,6 +125,73 @@ declare global {
     paths: Partial<BootInfo['paths']>
     isUpdatable: boolean
     windowControl: ElectronWindowControlAPI
+    books: {
+      list(): Promise<BookshelfEntryDto[]>
+      openPicker(): Promise<BookReaderResult<BookSessionDto>>
+      openLibrary(libraryId: string): Promise<BookReaderResult<BookSessionDto>>
+      remove(libraryId: string): Promise<BookReaderResult<true>>
+      refresh(sessionId: string): Promise<BookReaderResult<BookSessionDto>>
+      closeSession(sessionId: string): Promise<BookReaderResult<true>>
+      readChapter(sessionId: string, nodeId: string): Promise<BookReaderResult<BookChapterDto>>
+      readResource(request: BookResourceRequestDto): Promise<BookReaderResult<BookResourceDto>>
+      beginEdit(sessionId: string, nodeId: string): Promise<BookReaderResult<BookEditDto>>
+      saveEdit(request: BookEditSaveRequestDto): Promise<BookReaderResult<BookEditSaveDto>>
+      reloadEdit(editId: string): Promise<BookReaderResult<BookEditDto>>
+      closeEdit(editId: string): Promise<BookReaderResult<true>>
+      beginArrangement(sessionId: string): Promise<BookReaderResult<BookArrangementDto>>
+      applyArrangement(
+        request: BookArrangementApplyRequestDto
+      ): Promise<BookReaderResult<BookArrangementDto>>
+      undoArrangement(arrangementId: string): Promise<BookReaderResult<BookArrangementDto>>
+      saveArrangement(
+        request: BookArrangementSaveRequestDto
+      ): Promise<BookReaderResult<BookArrangementSaveDto>>
+      closeArrangement(arrangementId: string): Promise<BookReaderResult<true>>
+      beginPreparation(sessionId: string): Promise<BookReaderResult<BookPreparationDto>>
+      selectPreparationSource(
+        preparationId: string,
+        sourceNodeId: string
+      ): Promise<BookReaderResult<BookPreparationDto>>
+      applyPreparationDraft(
+        request: BookPreparationDraftApplyRequestDto
+      ): Promise<BookReaderResult<BookPreparationDto>>
+      restorePreparationDraft(
+        request: BookPreparationRecoveryRequestDto
+      ): Promise<BookReaderResult<BookPreparationDto>>
+      discardPreparationDraft(
+        request: BookPreparationRecoveryRequestDto
+      ): Promise<BookReaderResult<BookPreparationDto>>
+      commitPreparation(
+        request: BookPreparationCommitRequestDto
+      ): Promise<BookReaderResult<BookPreparationSaveDto>>
+      closePreparation(preparationId: string): Promise<BookReaderResult<true>>
+      beginExport(sessionId: string): Promise<BookReaderResult<BookExportSnapshotDto>>
+      commitExport(
+        request: BookExportCommitRequestDto
+      ): Promise<BookReaderResult<BookExportSaveDto>>
+      cancelExport(exportId: string): Promise<BookReaderResult<true>>
+      beginWebsite(sessionId: string): Promise<BookReaderResult<BookWebsiteSnapshotDto>>
+      commitWebsite(
+        request: BookWebsiteCommitRequestDto
+      ): Promise<BookReaderResult<BookWebsiteSaveDto>>
+      cancelWebsite(websiteId: string): Promise<BookReaderResult<true>>
+      saveReadingPosition(
+        sessionId: string,
+        nodeId: string,
+        chapterProgress: number
+      ): Promise<BookReaderResult<BookReadingProgressDto>>
+      followLink(
+        sessionId: string,
+        nodeId: string,
+        href: string
+      ): Promise<BookReaderResult<BookLinkNavigationDto | null>>
+      search(
+        sessionId: string,
+        request: BookSearchRequestDto
+      ): Promise<BookReaderResult<BookSearchResponseDto>>
+      cancelSearch(sessionId: string, searchId: string): Promise<BookReaderResult<true>>
+      onSearchProgress(handler: (progress: BookSearchProgressDto) => void): () => void
+    }
   }
 
   interface FileUtilsAPI {

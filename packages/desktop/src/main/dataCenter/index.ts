@@ -8,6 +8,7 @@ import log from 'electron-log'
 import { ensureDirSync } from 'common/filesystem'
 import { IMAGE_EXTENSIONS } from 'common/filesystem/paths'
 import { TypedEmitter } from '@shared/types/typedEmitter'
+import { APP_SLUG } from '@shared/brand'
 
 const DATA_CENTER_NAME = 'dataCenter'
 
@@ -34,7 +35,7 @@ class DataCenter extends TypedEmitter<DataCenterEvents> {
     const { dataCenterPath, userDataPath } = paths
     this.dataCenterPath = dataCenterPath
     this.userDataPath = userDataPath
-    this.serviceName = 'marktext'
+    this.serviceName = APP_SLUG
     this.encryptKeys = []
     this.hasDataCenterFile = fs.existsSync(
       path.join(this.dataCenterPath, `./${DATA_CENTER_NAME}.json`)

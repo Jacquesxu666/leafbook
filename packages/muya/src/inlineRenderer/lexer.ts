@@ -6,7 +6,7 @@ import type {
     Token,
 } from './types';
 import escapeCharactersMap from '../config/escapeCharacter';
-import { isLengthEven, union } from '../utils';
+import { isLengthEven, union } from '../utils/inlinePure';
 import { beginRules, inlineRules, linkValidateRules, validateRules } from './rules';
 import {
     correctUrl,
@@ -675,7 +675,7 @@ function tryHtmlTag(state: ILexState): boolean {
         htmlTo
         && !disallowedHtmlTag.test(htmlTo[3])
         // eslint-disable-next-line no-cond-assign
-        && (attrs = getAttributes(htmlTo[0]))
+        && (attrs = state.options.parseHtmlAttributes === false ? {} : getAttributes(htmlTo[0]))
     ) {
         const tag = htmlTo[3];
         const html = htmlTo[0];

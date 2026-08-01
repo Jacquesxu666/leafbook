@@ -1,8 +1,11 @@
-appId: com.github.marktext.marktext
-productName: marktext
+appId: com.jacquesxu.leafbook
+productName: LeafBook
 directories:
   buildResources: build
   output: ../../dist
+# LeafBook has no trusted updater channel yet. Keep electron-builder from
+# inferring the inherited GitHub repository and embedding app-update.yml.
+publish: null
 files:
   - '!**/.vscode/*'
   - '!src/*'
@@ -27,7 +30,6 @@ files:
   - '!node_modules/mermaid/dist/mermaid.min.js'
   - '!node_modules/mermaid/dist/mermaid.esm.min.mjs'
   - '!node_modules/katex/dist/katex.min.js'
-  - '!node_modules/katex/dist/katex.mjs'
   # Don't bundle Linux build files
   - '!node_modules/ced/build/Release/compact_enc_det.a'
   - '!node_modules/**/{*.vcxproj,*.vcxproj.filters}'
@@ -38,6 +40,12 @@ files:
   - '!jsconfig.json'
   - '!docs/*'
 extraResources:
+  - from: ../../LICENSE
+    to: licenses/LICENSE
+  - from: ../../NOTICE
+    to: licenses/NOTICE
+  - from: build/THIRD-PARTY-LICENSES.txt
+    to: licenses/THIRD-PARTY-LICENSES.txt
   - from: build/icons
     to: icons # ends up at resources/icons/
     filter:
@@ -53,52 +61,20 @@ electronLanguages: # Avoid packaging all chromium locales since our app has in-b
 
 asarUnpack:
   - resources/**
-fileAssociations:
-  - ext: md
-    name: Markdown
-    description: Markdown document
-    mimeType: text/markdown
-    role: Editor
-    icon: icons/md.ico
-  - ext: markdown
-    name: Markdown
-    description: Markdown document
-    mimeType: text/markdown
-    role: Editor
-    icon: icons/md.ico
-  - ext: mmd
-    name: Markdown
-    description: Markdown document
-    mimeType: text/markdown
-    role: Editor
-    icon: icons/md.ico
-  - ext: mdown
-    name: Markdown
-    description: Markdown document
-    mimeType: text/markdown
-    role: Editor
-    icon: icons/md.ico
-  - ext: mdtxt
-    name: Markdown
-    description: Markdown document
-    mimeType: text/markdown
-    role: Editor
-    icon: icons/md.ico
-  - ext: mdtext
-    name: Markdown
-    description: Markdown document
-    mimeType: text/markdown
-    role: Editor
-    icon: icons/md.ico
+# Windows associations are deliberately absent here. electron-builder registers
+# top-level associations before our installer prompt. The custom NSIS include
+# below is the sole Windows owner and writes them only after explicit consent.
 win:
-  executableName: marktext
-  artifactName: 'marktext-win-${arch}-${version}.${ext}'
+  files:
+    - '!node_modules/font-list/libs/darwin/{fontlist,fontlist.m}'
+  executableName: leafbook
+  artifactName: 'leafbook-win-${arch}-${version}.${ext}'
   target:
     - target: 'nsis'
     - target: 'zip'
   icon: static/icon.ico
 nsis:
-  artifactName: 'marktext-win-${arch}-${version}-setup.${ext}'
+  artifactName: 'leafbook-win-${arch}-${version}-setup.${ext}'
   shortcutName: ${productName}
   uninstallDisplayName: ${productName}
   createDesktopShortcut: true
@@ -108,19 +84,30 @@ nsis:
   perMachine: false
   include: windows/installer.nsh
 mac:
-  artifactName: 'marktext-mac-${arch}-${version}.${ext}'
+  artifactName: 'leafbook-mac-${arch}-${version}.${ext}'
   entitlementsInherit: build/mac/entitlements.mac.plist
   extendInfo:
-    - NSCameraUsageDescription: Application requests access to the device's camera.
-    - NSDocumentsFolderUsageDescription: Application requests access to the user's Documents folder.
-    - NSDownloadsFolderUsageDescription: Application requests access to the user's Downloads folder.
+    NSCameraUsageDescription: Application requests access to the device's camera.
+    NSDocumentsFolderUsageDescription: Application requests access to the user's Documents folder.
+    NSDownloadsFolderUsageDescription: Application requests access to the user's Downloads folder.
+    CFBundleDocumentTypes:
+      - CFBundleTypeName: Markdown document
+        CFBundleTypeRole: Editor
+        LSHandlerRank: Alternate
+        CFBundleTypeExtensions:
+          - md
+          - markdown
+          - mkd
+          - mdwn
+          - mdown
+          - mdx
   icon: static/icon.icns
   notarize: false
   target:
     - dmg
     - zip
 dmg:
-  artifactName: 'marktext-mac-${arch}-${version}.${ext}'
+  artifactName: 'leafbook-mac-${arch}-${version}.${ext}'
   contents:
     - x: 410
       y: 240
@@ -130,21 +117,20 @@ dmg:
       y: 240
       type: 'file'
 linux:
-  artifactName: 'marktext-linux-${version}.${ext}'
-  executableName: 'marktext'
-  description: 'A simple and elegant open-source markdown editor that focused on speed and usability.'
-  maintainer: 'MarkText Contributors'
+  files:
+    - '!node_modules/font-list/libs/darwin/{fontlist,fontlist.m}'
+  artifactName: 'leafbook-linux-${arch}-${version}.${ext}'
+  executableName: 'leafbook'
+  description: 'A local-first Markdown book reader and editor.'
+  maintainer: 'LeafBook Contributors'
   category: 'Office;TextEditor;Utility'
-  mimeTypes:
-    - 'text/markdown'
   icon: 'static/icon.png'
   desktop:
     entry:
-      StartupWMClass: 'marktext'
-      Keywords: 'marktext;'
+      StartupWMClass: 'leafbook'
+      Keywords: 'leafbook;markdown;book;'
   target:
     - AppImage
-    - snap
     - deb
     - rpm
     - tar.gz
@@ -152,18 +138,35 @@ linux:
     - ext: 'md'
       name: 'Markdown'
       description: 'Markdown document'
+      mimeType: 'text/markdown'
     - ext: 'markdown'
       name: 'Markdown'
       description: 'Markdown document'
+      mimeType: 'text/markdown'
     - ext: 'mmd'
       name: 'Markdown'
       description: 'Markdown document'
+      mimeType: 'text/markdown'
     - ext: 'mdown'
       name: 'Markdown'
       description: 'Markdown document'
+      mimeType: 'text/markdown'
     - ext: 'mdtxt'
       name: 'Markdown'
       description: 'Markdown document'
+      mimeType: 'text/markdown'
     - ext: 'mdtext'
       name: 'Markdown'
       description: 'Markdown document'
+      mimeType: 'text/markdown'
+    - ext: 'mdx'
+      name: 'Markdown'
+      description: 'Markdown document'
+      mimeType: 'text/markdown'
+rpm:
+  # rpmbuild otherwise injects /usr/lib/.build-id symlinks for ELF files under
+  # /opt/LeafBook. They are debugger conveniences, not application payload,
+  # and make the native carrier differ from the audited canonical app tree.
+  fpm:
+    - '--rpm-rpmbuild-define'
+    - '_build_id_links none'

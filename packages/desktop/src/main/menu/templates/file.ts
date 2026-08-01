@@ -1,3 +1,4 @@
+/* eslint-disable @stylistic/space-before-function-paren */
 import { app, type BrowserWindow, type MenuItemConstructorOptions } from 'electron'
 import * as actions from '../actions/file'
 import { userSetting } from '../actions/marktext'
@@ -6,7 +7,7 @@ import { t } from '../../i18n'
 import type Keybindings from '../../keyboard/shortcutHandler'
 import type Preference from '../../preferences'
 
-export default function(
+export default function (
   keybindings: Keybindings,
   userPreference: Preference,
   recentlyUsedFiles: string[]
@@ -29,6 +30,15 @@ export default function(
     },
     {
       type: 'separator'
+    },
+    {
+      id: 'leafbookOpenBook',
+      label: 'Open Book…',
+      accelerator: 'CmdOrCtrl+Alt+O',
+      click(_menuItem, browserWindow) {
+        const editorWindow = browserWindow as BrowserWindow | undefined
+        editorWindow?.webContents.send('lb::books::open-requested')
+      }
     },
     {
       label: t('menu.file.openFile'),

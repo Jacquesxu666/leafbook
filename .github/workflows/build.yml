@@ -12,18 +12,29 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
   run-on-pr-head:
     permissions:
+      contents: read
       pull-requests: read
       actions: read
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     strategy:
+      fail-fast: false
       matrix:
         include:
-          - name: linux
-            os: ubuntu-latest
+          - name: linux-x64
+            os: ubuntu-24.04
             platform: linux
+            arch: x64
+          - name: linux-arm64
+            os: ubuntu-24.04-arm
+            platform: linux
+            arch: arm64
           - name: windows-x64
             os: windows-latest
             platform: windows
@@ -42,15 +53,31 @@ jobs:
             arch: arm64
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Install Linux Build Dependencies
         if: matrix.platform == 'linux'
-        run: sudo apt-get update && sudo apt-get install -y icnsutils graphicsmagick xz-utils libx11-dev libxkbfile-dev gnome-keyring libsecret-1-dev libfontconfig-dev rpm
+        run: sudo apt-get update && sudo apt-get install -y icnsutils graphicsmagick xz-utils libx11-dev libxkbfile-dev gnome-keyring libsecret-1-dev libfontconfig-dev rpm cpio squashfs-tools
 
       - uses: ./.github/actions/setup
+
+      - name: Verify LeafBook generated metadata
+        run: pnpm verify-leafbook-metadata
+
+      - name: Verify Windows association policy
+        run: pnpm verify-windows-associations
+
+      - name: Regenerate and verify third-party notices
+        run: |
+          pnpm gen-third-party
+          git diff --exit-code -- packages/desktop/build/THIRD-PARTY-LICENSES.txt
+
+      - name: Verify checked-in LeafBook icons
+        if: matrix.platform == 'macos'
+        run: pnpm verify-leafbook-icons
 
       # Must be set before postinstall runs electron-rebuild
       - name: Set C++20 for MacOS
@@ -63,13 +90,12 @@ jobs:
       - name: Run postinstall
         run: pnpm tsx scripts/postinstall.ts
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           npm_config_user_agent: 'pnpm'
           USE_ELECTRON_CLANG: ${{ matrix.platform == 'linux' && '0' || '' }}
 
       - name: build-linux
         if: matrix.platform == 'linux'
-        run: pnpm run build:linux
+        run: pnpm run build:linux:${{ matrix.arch }}
 
       - name: build-mac
         if: matrix.platform == 'macos'
@@ -79,17 +105,29 @@ jobs:
         if: matrix.platform == 'windows'
         run: pnpm run build:win:${{ matrix.arch }}
 
+      - name: Audit LeafBook macOS artifacts
+        if: matrix.platform == 'macos'
+        run: pnpm audit:mac-artifact -- ${{ matrix.arch }}
+
+      - name: Audit LeafBook Linux artifacts
+        if: matrix.platform == 'linux'
+        run: pnpm audit:platform-artifacts -- linux ${{ matrix.arch }}
+
+      - name: Audit LeafBook Windows artifacts
+        if: matrix.platform == 'windows'
+        shell: bash
+        run: pnpm audit:platform-artifacts -- windows ${{ matrix.arch }}
+
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: marktext-${{ matrix.name }}
+          name: leafbook-${{ matrix.name }}
           retention-days: 30
           path: |
             dist/*.exe
             dist/*.zip
             dist/*.dmg
             dist/*.AppImage
-            dist/*.snap
             dist/*.deb
             dist/*.rpm
             dist/*.tar.gz
@@ -100,13 +138,14 @@ jobs:
     needs: run-on-pr-head
     if: github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       pull-requests: write
       actions: read
     steps:
       - name: Build comment body from artifacts
         id: build
-        uses: actions/github-script@v7
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
@@ -143,14 +182,16 @@ jobs:
 
       - name: Find existing artifact comment
         id: find-comment
-        uses: peter-evans/find-comment@v3
+        # peter-evans/find-comment v3
+        uses: peter-evans/find-comment@3eae4d37986fb5a8592848f6a574fdf654e61f9e
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           issue-number: ${{ github.event.pull_request.number }}
           body-includes: 'Build artifacts for PR'
 
       - name: Post or update PR comment
-        uses: peter-evans/create-or-update-comment@v4
+        # peter-evans/create-or-update-comment v4
+        uses: peter-evans/create-or-update-comment@71345be0265236311c031f5c7866368bd1eff043
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           issue-number: ${{ github.event.pull_request.number }}

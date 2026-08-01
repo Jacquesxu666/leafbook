@@ -1,12 +1,12 @@
 import type { Token } from 'marked';
-import type { IMathToken } from './extensions/math';
+import type { ILeafBookMathToken } from './tokenizerContract';
 import type { Heading, ILexOption } from './types';
 
 function isHeadingToken(token: Token | Heading): token is Heading {
     return token.type === 'heading';
 }
 
-function isMathToken(token: Token | IMathToken): token is IMathToken {
+function isMathToken(token: Token | ILeafBookMathToken): token is ILeafBookMathToken {
     return token.type === 'code' && token.lang === 'math';
 }
 
@@ -40,7 +40,7 @@ function walkTokens(options: ILexOption) {
             token.type = 'multiplemath';
             token.mathStyle = 'gitlab';
             token.displayMode = true;
-            const codeFields = token as IMathToken & Partial<{ lang: unknown; codeBlockStyle: unknown }>;
+            const codeFields = token as ILeafBookMathToken & Partial<{ lang: unknown; codeBlockStyle: unknown }>;
             delete codeFields.lang;
             delete codeFields.codeBlockStyle;
         }

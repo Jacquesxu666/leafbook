@@ -50,7 +50,7 @@ if (!fs.existsSync(nativeKeymapDir)) {
   // native-keymap is already in marktext's optionalDependencies; the add
   // re-installs without changing the version range.
   if (isPnpm) {
-    run('pnpm --filter marktext add native-keymap --ignore-scripts')
+    run('pnpm --filter leafbook add native-keymap --ignore-scripts')
   } else {
     run('npm install native-keymap --ignore-scripts --no-save', { cwd: desktopRoot })
   }

@@ -82,17 +82,40 @@ declare module '@muyajs/core' {
     }): Promise<string>
   }
 
+  export function isSafeLocalResource(source: unknown): boolean
+
   export function renderToStaticHTML(...args: any[]): any
 
   export function escapeHTML(str: string): string
   export function unescapeHTML(str: string): string
   export function sanitize(html: string, config?: any, isInline?: boolean): string
   export function generateGithubSlug(text: string): string
-  export function getImageInfo(src: string): { isUnknownType: boolean; src: string; [key: string]: any }
+  export function getImageInfo(src: string): {
+    isUnknownType: boolean
+    src: string
+    [key: string]: any
+  }
   export function wordCount(markdown: string): {
     word: number
     paragraph: number
     character: number
     all: number
   }
+}
+
+declare module 'leafbook-muya-heading-analyzer' {
+  export interface IAtxH1Heading {
+    ordinal: number
+    line: number
+    title: string
+  }
+
+  export type IAtxH1AnalysisResult =
+    | { ok: true; headings: IAtxH1Heading[] }
+    | { ok: false; error: 'source-too-large' | 'heading-limit' | 'line-limit' }
+
+  export function analyzeAtxH1Headings(
+    markdown: string,
+    limits?: { maxBytes?: number; maxHeadings?: number; maxLines?: number }
+  ): IAtxH1AnalysisResult
 }

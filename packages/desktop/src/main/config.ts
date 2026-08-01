@@ -16,7 +16,7 @@ export const editorWinOptions: Readonly<BrowserWindowConstructorOptions> = Objec
     // enable it always and set the HTML spelling attribute to false.
     spellcheck: true,
     nodeIntegration: false,
-    webSecurity: false,
+    webSecurity: true,
     preload: path.join(__dirname, '../preload/index.js')
   },
   useContentSize: true,
@@ -37,7 +37,7 @@ export const preferencesWinOptions: Readonly<BrowserWindowConstructorOptions> = 
     // Always true to access native spellchecker.
     spellcheck: true,
     nodeIntegration: false,
-    webSecurity: false,
+    webSecurity: true,
     preload: path.join(__dirname, '../preload/index.js')
   },
   fullscreenable: false,
@@ -79,7 +79,7 @@ export const LINE_ENDING_REG = /(?:\r\n|\n)/g
 export const LF_LINE_ENDING_REG = /(?:[^\r]\n)|(?:^\n$)/
 export const CRLF_LINE_ENDING_REG = /\r\n/
 
-export const GITHUB_REPO_URL = 'https://github.com/marktext/marktext'
+export { REPOSITORY_URL as GITHUB_REPO_URL } from '@shared/brand'
 // copy from muya
 export const URL_REG =
   /^http(s)?:\/\/([a-z0-9\-._~]+\.[a-z]{2,}|[0-9.]+|localhost|\[[a-f0-9.:]+\])(:[0-9]{1,5})?(\/[\S]+)?/i

@@ -1,9 +1,21 @@
 import fs from 'fs'
 import path from 'path'
+import { brandTranslations } from '@shared/brand'
 
 export type Translations = Record<string, unknown>
 
-const SUPPORTED_LANGUAGES = ['en', 'zh-CN', 'zh-TW', 'es', 'fr', 'de', 'ja', 'ko', 'pt', 'tr'] as const
+const SUPPORTED_LANGUAGES = [
+  'en',
+  'zh-CN',
+  'zh-TW',
+  'es',
+  'fr',
+  'de',
+  'ja',
+  'ko',
+  'pt',
+  'tr'
+] as const
 
 export type SupportedLanguage = (typeof SUPPORTED_LANGUAGES)[number]
 
@@ -38,7 +50,7 @@ function loadTranslations(language: string): Translations | null {
 
     const content = fs.readFileSync(localePath, 'utf8')
 
-    const translationData: Translations = JSON.parse(content)
+    const translationData = brandTranslations<Translations>(JSON.parse(content))
 
     translationsCache[language] = translationData
     return translationData

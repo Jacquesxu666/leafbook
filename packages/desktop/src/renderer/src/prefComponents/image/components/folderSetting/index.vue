@@ -28,7 +28,7 @@
       <template #head>
         <bool
           :description="t('preferences.image.folderSetting.preferRelative')"
-          more="https://marktext.me/docs/images"
+          :more="DOCUMENTATION_URLS.images"
           :bool="imagePreferRelativeDirectory"
           :on-change="(value) => onSelectChange('imagePreferRelativeDirectory', value)"
         />
@@ -59,6 +59,7 @@
 
 <script setup lang="ts">
 import { computed } from 'vue'
+import { DOCUMENTATION_URLS } from '@shared/brand'
 import { storeToRefs } from 'pinia'
 import { useI18n } from 'vue-i18n'
 import { usePreferencesStore } from '@/store/preferences'

@@ -4,10 +4,9 @@ import { EXPORT_DOMPURIFY_CONFIG } from '../../config';
 import { sanitize } from '../index';
 import cjkEmStrongExtension from './extensions/cjkEmStrong';
 import footnoteExtension from './extensions/footnote';
-import mathExtension from './extensions/math';
-import superSubScriptExtension from './extensions/superSubscript';
 import fm, { frontMatterRender } from './frontMatter';
 import { DEFAULT_OPTIONS } from './options';
+import { leafBookTokenizerContract } from './tokenizerContract';
 import walkTokens from './walkTokens';
 
 export function getClipBoardHtml(src: string, options: ILexOption = {}) {
@@ -30,17 +29,7 @@ export function getClipBoardHtml(src: string, options: ILexOption = {}) {
     // clipboard HTML consistent with the static / export render path.
     marked.use(cjkEmStrongExtension());
 
-    if (math) {
-        marked.use(
-            mathExtension({
-                throwOnError: false,
-                useKatexRender: false,
-            }),
-        );
-    }
-
-    if (superSubScript)
-        marked.use(superSubScriptExtension());
+    marked.use(leafBookTokenizerContract({ math, superSubScript }));
 
     if (footnote)
         marked.use(footnoteExtension());

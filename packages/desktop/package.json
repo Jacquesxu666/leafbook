@@ -1,34 +1,23 @@
 {
-  "name": "marktext",
-  "version": "0.20.0-dev",
-  "description": "MarkText",
+  "name": "leafbook",
+  "version": "1.0.0",
+  "description": "LeafBook — a local-first Markdown book reader and editor",
+  "license": "MIT",
   "main": "./out/main/index.js",
   "author": {
-    "name": "Jocs",
-    "email": "ransixi@gmail.com",
-    "url": "https://github.com/Jocs"
+    "name": "Jacquesxu666",
+    "url": "https://github.com/Jacquesxu666"
   },
   "maintainer": [
     {
-      "name": "Jocs",
-      "email": "ransixi@gmail.com",
-      "url": "https://github.com/Jocs"
-    },
-    {
-      "name": "Felix Häusler",
-      "email": "hfelix@protonmail.ch",
-      "url": "https://github.com/fxha"
-    },
-    {
-      "name": "Tkaixiang",
-      "email": "tkaixiang@gmail.com",
-      "url": "https://github.com/Tkaixiang"
+      "name": "Jacquesxu666",
+      "url": "https://github.com/Jacquesxu666"
     }
   ],
-  "homepage": "https://github.com/marktext/marktext",
+  "homepage": "https://github.com/Jacquesxu666/leafbook",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/marktext/marktext.git"
+    "url": "git+https://github.com/Jacquesxu666/leafbook.git"
   },
   "scripts": {
     "minify-locales": "tsx ../../scripts/minify-locales.ts",
@@ -43,21 +32,26 @@
     "build:mac": "tsx ../../scripts/minify-locales.ts && electron-rebuild && electron-vite build && electron-builder --mac --publish never",
     "build:mac:x64": "tsx ../../scripts/minify-locales.ts && electron-rebuild && electron-vite build && electron-builder --mac --x64 --publish never",
     "build:mac:arm64": "tsx ../../scripts/minify-locales.ts && electron-rebuild && electron-vite build && electron-builder --mac --arm64 --publish never",
-    "build:linux": "tsx ../../scripts/minify-locales.ts && electron-rebuild && electron-vite build && electron-builder --linux --publish never",
+    "package:mac:unsigned:dir": "bash ../../scripts/package-mac-unsigned-dir.sh",
+    "build:linux": "tsx ../../scripts/minify-locales.ts && electron-rebuild && electron-vite build && electron-builder --linux --x64 --publish never && node ../../scripts/normalize-linux-artifact-names.mjs x64",
+    "build:linux:x64": "tsx ../../scripts/minify-locales.ts && electron-rebuild && electron-vite build && electron-builder --linux --x64 --publish never && node ../../scripts/normalize-linux-artifact-names.mjs x64",
+    "build:linux:arm64": "tsx ../../scripts/minify-locales.ts && electron-rebuild && electron-vite build && electron-builder --linux --arm64 --publish never && node ../../scripts/normalize-linux-artifact-names.mjs arm64",
     "perf:inspect": "cross-env PERF_TESTING=true electron-vite preview -- --inspect=5858",
     "perf:inspect-brk": "cross-env PERF_TESTING=true electron-vite preview -- --inspect-brk=5858",
     "test": "vitest run",
     "test:unit": "vitest run test/unit",
     "test:e2e": "playwright test test/e2e",
+    "test:real-book:rc": "node scripts/run-real-book-rc.mjs",
+    "test:real-book:svg": "node scripts/run-real-book-svg-harness.mjs",
     "typecheck": "vue-tsc --noEmit -p tsconfig.json",
     "typecheck:watch": "vue-tsc --noEmit -p tsconfig.json --watch"
   },
   "dependencies": {
     "@electron-toolkit/preload": "^3.0.2",
     "@electron-toolkit/utils": "^4.0.0",
-    "@intlify/core-base": "^11.4.6",
     "@element-plus/icons-vue": "^2.3.2",
     "@hfelix/electron-localshortcut": "^4.0.1",
+    "@intlify/core-base": "^11.4.6",
     "@marktext/file-icons": "^1.0.6",
     "@marktext/muyajs": "workspace:*",
     "@muyajs/core": "workspace:*",
@@ -75,7 +69,6 @@
     "dragula": "^3.7.3",
     "electron-log": "^5.4.4",
     "electron-store": "^11.0.2",
-    "electron-updater": "^6.8.9",
     "electron-window-state": "^5.0.3",
     "element-plus": "^2.14.2",
     "element-resize-detector": "^1.2.4",
@@ -91,6 +84,7 @@
     "katex": "^0.17.0",
     "keytar": "^7.9.0",
     "lodash": "^4.18.1",
+    "marked": "^18.0.5",
     "mermaid": "^11.15.0",
     "mitt": "^3.0.1",
     "ms": "^2.1.3",
@@ -99,6 +93,7 @@
     "pinia": "^3.0.4",
     "plist": "^5.0.0",
     "prismjs": "^1.30.0",
+    "saxes": "^6.0.0",
     "snabbdom": "^3.6.4",
     "snabbdom-to-html": "^7.1.0",
     "snapsvg-cjs": "^0.0.6",

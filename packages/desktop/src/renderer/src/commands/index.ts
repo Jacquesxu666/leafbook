@@ -4,6 +4,7 @@ import { delay, isOsx } from '@/util'
 import { isUpdatable } from './utils'
 import getCommandDescriptionById from './descriptions'
 import { t } from '../i18n'
+import { AUTO_UPDATE_ENABLED, DOCUMENTATION_URLS } from '@shared/brand'
 
 export { default as FileEncodingCommand } from './fileEncoding'
 export { default as LineEndingCommand } from './lineEnding'
@@ -632,7 +633,7 @@ const commands: CommandDescriptor[] = [
   },
 
   // --------------------------------------------------------------------------
-  // MarkText
+  // LeafBook
 
   {
     id: 'file.preferences',
@@ -649,17 +650,13 @@ const commands: CommandDescriptor[] = [
   {
     id: 'docs.user-guide',
     execute: async() => {
-      window.electron.shell.openExternal(
-        'https://marktext.me/docs/basics'
-      )
+      window.electron.shell.openExternal(DOCUMENTATION_URLS.userGuide)
     }
   },
   {
     id: 'docs.markdown-syntax',
     execute: async() => {
-      window.electron.shell.openExternal(
-        'https://marktext.me/docs/markdown-syntax'
-      )
+      window.electron.shell.openExternal(DOCUMENTATION_URLS.markdownSyntax)
     }
   },
 
@@ -683,7 +680,7 @@ const commands: CommandDescriptor[] = [
 // --------------------------------------------------------------------------
 // etc
 
-if (isUpdatable()) {
+if (AUTO_UPDATE_ENABLED && isUpdatable()) {
   commands.push({
     id: 'file.check-update',
     description: getCommandDescriptionById('file.check-update'),

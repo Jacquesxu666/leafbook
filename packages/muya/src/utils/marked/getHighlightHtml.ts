@@ -1,15 +1,16 @@
 import type { ILexOption } from './types';
+import katex from 'katex';
 import { Marked } from 'marked';
 import { markedHighlight } from 'marked-highlight';
 import Prism from 'prismjs';
 import cjkEmStrongExtension from './extensions/cjkEmStrong';
 import emojiExtension from './extensions/emoji';
 import footnoteExtension from './extensions/footnote';
-import mathExtension from './extensions/math';
-import superSubScriptExtension from './extensions/superSubscript';
 import fm, { frontMatterRender } from './frontMatter';
 import { DEFAULT_OPTIONS } from './options';
+import { leafBookTokenizerContract } from './tokenizerContract';
 import walkTokens from './walkTokens';
+import 'katex/dist/contrib/mhchem.mjs';
 
 const DIAGRAM_TYPE = [
     'mermaid',
@@ -37,7 +38,14 @@ function highlight(code: string, lang: string) {
 
 export function getHighlightHtml(src: string, options: ILexOption = {}) {
     options = Object.assign({}, DEFAULT_OPTIONS, options);
-    const { footnote, frontMatter, math, isGitlabCompatibilityEnabled, superSubScript }
+    const {
+        footnote,
+        frontMatter,
+        imageRenderer,
+        math,
+        isGitlabCompatibilityEnabled,
+        superSubScript,
+    }
         = options;
 
     // Build a fresh Marked instance per call. `Marked.use({ walkTokens })`
@@ -49,6 +57,13 @@ export function getHighlightHtml(src: string, options: ILexOption = {}) {
     marked.use({
         walkTokens: walkTokens({ math, isGitlabCompatibilityEnabled }),
     });
+    if (imageRenderer) {
+        marked.use({
+            renderer: {
+                image: imageRenderer,
+            },
+        });
+    }
 
     // Treat CJK characters as punctuation for emphasis/strong flanking so
     // `中文**"加粗"**中文` bolds (marktext/marktext#4307). Additive override —
@@ -57,17 +72,14 @@ export function getHighlightHtml(src: string, options: ILexOption = {}) {
 
     marked.use(emojiExtension({ isRenderEmoji: true }));
 
-    if (math) {
-        marked.use(
-            mathExtension({
-                throwOnError: false,
-                useKatexRender: true,
-            }),
-        );
-    }
-
-    if (superSubScript)
-        marked.use(superSubScriptExtension());
+    marked.use(leafBookTokenizerContract({
+        math,
+        superSubScript,
+        renderMath: (token, block) => katex.renderToString(token.text, {
+            throwOnError: false,
+            displayMode: token.displayMode,
+        }) + (block ? '\n' : ''),
+    }));
 
     if (footnote)
         marked.use(footnoteExtension());

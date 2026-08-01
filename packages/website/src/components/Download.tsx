@@ -18,26 +18,27 @@ export default function Download() {
       <div className="wrap">
         <div className="cta reveal">
           <div className="cta-glow" />
-          <span className="kicker kicker--center">Free download</span>
+          <span className="kicker kicker--center">Source only</span>
           <h2>
-            Start writing in <span className="grad-text">two minutes</span>.
+            Public downloads are <span className="grad-text">not available yet</span>.
           </h2>
-          <p>One download. No account, no subscription. Every desktop you write on.</p>
+          <p>
+            LeafBook is in active development. Build from the reviewed source until the first public
+            release is published.
+          </p>
           <div className="platforms">
             {PLATFORMS.map((p) => (
-              <a className="plat" key={p.label} href={DOWNLOAD.releases} {...EXT_LINK}>
+              <a className="plat" key={p.label} href={DOWNLOAD.source} {...EXT_LINK}>
                 {p.icon}
                 <div>
                   <b>{p.label}</b>
-                  <span>{p.sub}</span>
+                  <span>Planned: {p.sub}</span>
                 </div>
               </a>
             ))}
           </div>
           <div className="hero-note hero-note--cta">
-            <span>
-              Or install via Homebrew: <code className="inline">brew install --cask mark-text</code>
-            </span>
+            <span>No public LeafBook release or package-manager installation is available.</span>
           </div>
         </div>
       </div>

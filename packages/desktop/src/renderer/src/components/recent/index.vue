@@ -1,15 +1,12 @@
+<!-- eslint-disable vue/max-attributes-per-line, vue/singleline-html-element-content-newline -->
 <template>
   <div class="recent-files-projects">
     <div class="centered-group">
       {{ t('recent.noTabsOpen') }}
-      <el-button
-        text
-        bg
-        type="primary"
-        @click="newFile"
-      >
+      <el-button text bg type="primary" @click="newFile">
         {{ t('recent.newFile') }}
       </el-button>
+      <el-button text bg @click="openBook"> Open Book… </el-button>
     </div>
   </div>
 </template>
@@ -17,11 +14,17 @@
 <script setup lang="ts">
 import { useEditorStore } from '@/store/editor'
 import { t } from '../../i18n'
+import { useBooksStore } from '@/store/books'
 
 const editorStore = useEditorStore()
+const booksStore = useBooksStore()
 
 const newFile = () => {
   editorStore.NEW_UNTITLED_TAB({})
+}
+const openBook = async (): Promise<void> => {
+  await booksStore.showBookshelf()
+  await booksStore.openPicker()
 }
 </script>
 

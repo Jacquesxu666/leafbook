@@ -165,11 +165,11 @@ describe('getImageSrc — relative local image paths anchored to window.DIRNAME'
         });
     });
 
-    it('falls back to bare `file://` when window.DIRNAME is absent', () => {
+    it('fails closed when window.DIRNAME is absent', () => {
         withDirname(undefined, () => {
             expect(getImageSrc('assets/foo.png')).toEqual({
                 isUnknownType: false,
-                src: 'file://assets/foo.png',
+                src: '',
             });
         });
     });
@@ -177,7 +177,7 @@ describe('getImageSrc — relative local image paths anchored to window.DIRNAME'
     it('resolves Windows-drive base dirs with forward slashes', () => {
         withDirname('C:\\Users\\me\\docs', () => {
             expect(getImageSrc('assets\\foo.png').src).toBe(
-                'file://C:/Users/me/docs/assets/foo.png',
+                'file:///C:/Users/me/docs/assets/foo.png',
             );
         });
     });
@@ -195,7 +195,7 @@ describe('getImageSrc — non-relative sources are left unchanged', () => {
 
     it('leaves an absolute Windows-drive path as a single `file://`', () => {
         withDirname(DIRNAME, () => {
-            expect(getImageSrc('C:/img/pic.png').src).toBe('file://C:/img/pic.png');
+            expect(getImageSrc('C:/img/pic.png').src).toBe('file:///C:/img/pic.png');
         });
     });
 
@@ -241,37 +241,53 @@ describe('getImageSrc — non-relative sources are left unchanged', () => {
 describe('getImageSrc — Windows drive + UNC base directories (Phase G review)', () => {
     it('preserves the drive when resolving `..`', () => {
         withDirname('C:/Users/me/docs', () => {
-            expect(getImageSrc('../img/a.png').src).toBe('file://C:/Users/me/img/a.png');
+            expect(getImageSrc('../img/a.png').src).toBe('file:///C:/Users/me/img/a.png');
         });
     });
 
     it('clamps `..` at the drive root so the drive is never lost', () => {
         withDirname('C:/docs', () => {
-            expect(getImageSrc('../../../a.png').src).toBe('file://C:/a.png');
+            expect(getImageSrc('../../../a.png').src).toBe('file:///C:/a.png');
         });
     });
 
     it('normalises a Windows-backslash base dir', () => {
         withDirname('C:\\docs', () => {
-            expect(getImageSrc('a.png').src).toBe('file://C:/docs/a.png');
+            expect(getImageSrc('a.png').src).toBe('file:///C:/docs/a.png');
         });
     });
 
-    it('resolves against a UNC share base directory', () => {
+    it('rejects a UNC share base directory', () => {
         withDirname('//server/share/docs', () => {
-            expect(getImageSrc('a.png').src).toBe('file:////server/share/docs/a.png');
+            expect(getImageSrc('a.png').src).toBe('');
         });
     });
 
-    it('normalises a backslash UNC base', () => {
+    it('rejects a backslash UNC base', () => {
         withDirname('\\\\server\\share', () => {
-            expect(getImageSrc('sub/a.png').src).toBe('file:////server/share/sub/a.png');
+            expect(getImageSrc('sub/a.png').src).toBe('');
         });
     });
 
-    it('clamps `..` at the UNC share root', () => {
+    it('rejects traversal from a UNC share root', () => {
         withDirname('//server/share/docs', () => {
-            expect(getImageSrc('../../../a.png').src).toBe('file:////server/share/a.png');
+            expect(getImageSrc('../../../a.png').src).toBe('');
         });
+    });
+
+    it.each([
+        '\\\\server\\share\\image.png',
+        '//server/share/image.png',
+        '\\/server/share/image.png',
+        '%2F%2Fserver%2Fshare%2Fimage.png',
+        '%5C%5Cserver%5Cshare%5Cimage.png',
+        '%252F%252Fserver%252Fshare%252Fimage.png',
+        'file://server/share/image.png',
+        'file://localhost/share/image.png',
+        'file://user:password@server/share/image.png',
+        'file://[::1]/share/image.png',
+        'file:%2F%2Fserver%2Fshare%2Fimage.png',
+    ])('rejects network-file image source %s', (source) => {
+        expect(getImageSrc(source).src).toBe('');
     });
 });

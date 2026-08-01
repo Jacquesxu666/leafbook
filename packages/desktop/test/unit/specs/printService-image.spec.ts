@@ -20,12 +20,16 @@ vi.hoisted(() => {
     sep: '/',
     join: (...parts: string[]) => parts.join('/'),
     resolve: (...parts: string[]) =>
-      parts.join('/').replace(/\/\.\//g, '/').replace(/\/{2,}/g, '/')
+      parts
+        .join('/')
+        .replace(/\/\.\//g, '/')
+        .replace(/\/{2,}/g, '/')
   }
   w.window.DIRNAME = '/docs'
 })
 
 import { resolveLocalImageSrc } from '@/util/resolveImageSrc'
+import MarkdownPrint from '@/services/printService'
 
 // Branch coverage the exportHtml.spec.ts wrapper does NOT exercise (it only
 // covers the relative-resolve and http-untouched paths). Driving the exported
@@ -36,14 +40,23 @@ describe('resolveLocalImageSrc — branch coverage', () => {
     expect(resolveLocalImageSrc('/tmp/b.png')).toBe('file:///tmp/b.png')
   })
 
-  it('(b) Windows drive image path → file:// preserving backslashes', () => {
-    expect(resolveLocalImageSrc('C:\\pics\\b.png')).toBe('file://C:\\pics\\b.png')
+  it('(b) Windows drive image path → empty-authority file URL', () => {
+    expect(resolveLocalImageSrc('C:\\pics\\b.png')).toBe('file:///C:/pics/b.png')
   })
 
-  it('(c) UNC image path → file:// preserving the \\\\host prefix', () => {
-    expect(resolveLocalImageSrc('\\\\host\\share\\c.png')).toBe(
-      'file://\\\\host\\share\\c.png'
-    )
+  it.each([
+    '\\\\host\\share\\c.png',
+    '//host/share/c.png',
+    '\\/host/share/c.png',
+    '%2F%2Fhost%2Fshare%2Fc.png',
+    '%5C%5Chost%5Cshare%5Cc.png',
+    'file://host/share/c.png',
+    'file://localhost/share/c.png',
+    'file://user:password@host/share/c.png',
+    'file://[::1]/share/c.png',
+    'file:%2F%2Fhost%2Fshare%2Fc.png'
+  ])('(c) rejects network-file image source %s', (source) => {
+    expect(resolveLocalImageSrc(source)).toBe('')
   })
 
   it('(d) data: URI is left untouched (no file:// prefix)', () => {
@@ -62,9 +75,7 @@ describe('resolveLocalImageSrc — branch coverage', () => {
   })
 
   it('(g) https URL is left untouched', () => {
-    expect(resolveLocalImageSrc('https://example.com/a.png')).toBe(
-      'https://example.com/a.png'
-    )
+    expect(resolveLocalImageSrc('https://example.com/a.png')).toBe('https://example.com/a.png')
   })
 
   it('absolute path with a query keeps its extension recognised (POSIX → file://)', () => {
@@ -74,5 +85,22 @@ describe('resolveLocalImageSrc — branch coverage', () => {
 
   it('empty / falsy src is returned as-is', () => {
     expect(resolveLocalImageSrc('')).toBe('')
+  })
+
+  it.each([
+    '\\\\host\\share\\c.png',
+    '//host/share/c.png',
+    'file://host/share/c.png',
+    'file:%2F%2Fhost%2Fshare%2Fc.png'
+  ])('static print creates an inert placeholder before DOM connection for %s', (source) => {
+    const printer = new MarkdownPrint()
+    printer.renderMarkdown(`<p>before</p><img src="${source}"><p>after</p>`, true)
+    const container = document.querySelector('.print-container')
+    expect(container?.querySelector('img')).toBeNull()
+    expect(container?.querySelector('.leafbook-image-placeholder')?.textContent).toBe(
+      '[Image unavailable]'
+    )
+    expect(container?.innerHTML).not.toContain(source)
+    printer.clearup()
   })
 })

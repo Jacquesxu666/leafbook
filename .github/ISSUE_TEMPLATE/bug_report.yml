@@ -1,12 +1,12 @@
 name: Bug Report
-description: Create a bug report to help us improve MarkText
+description: Create a bug report to help us improve LeafBook
 title: '[Bug] '
 labels: ['bug', 'triage']
 body:
   - type: markdown
     attributes:
       value: |
-        **Before reporting:** Search [existing issues](https://github.com/marktext/marktext/issues) to avoid duplicates. If you find a match, use 👍 instead of opening a new issue.
+        **Before reporting:** Search [existing issues](https://github.com/Jacquesxu666/leafbook/issues) to avoid duplicates. If you find a match, use 👍 instead of opening a new issue.
 
   - type: textarea
     id: description
@@ -65,10 +65,10 @@ body:
       required: true
 
   - type: input
-    id: marktext-version
+    id: leafbook-version
     attributes:
-      label: MarkText Version
-      placeholder: 'e.g. 0.17.1'
+      label: LeafBook Version
+      placeholder: 'e.g. 1.0.0'
     validations:
       required: true
 

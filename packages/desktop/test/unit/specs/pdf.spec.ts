@@ -8,9 +8,12 @@ import { describe, it, expect, beforeEach, vi } from 'vitest'
 vi.hoisted(() => {
   const w = globalThis as unknown as {
     window?: {
-      path?: { sep: string, join: (...parts: string[]) => string }
+      path?: { sep: string; join: (...parts: string[]) => string }
       marktext?: { paths: { userDataPath: string } }
-      fileUtils?: { isFile: (p: string) => Promise<boolean>, readFile: (p: string) => Promise<unknown> }
+      fileUtils?: {
+        isFile: (p: string) => Promise<boolean>
+        readFile: (p: string) => Promise<unknown>
+      }
     }
   }
   w.window ??= {}
@@ -37,7 +40,10 @@ describe('getCssForOptions', () => {
     const w = globalThis as unknown as {
       window: {
         marktext: { paths: { userDataPath: string } }
-        fileUtils: { isFile: (p: string) => Promise<boolean>, readFile: (p: string) => Promise<unknown> }
+        fileUtils: {
+          isFile: (p: string) => Promise<boolean>
+          readFile: (p: string) => Promise<unknown>
+        }
       }
     }
     w.window.marktext = { paths: { userDataPath: '/userData' } }
@@ -45,16 +51,28 @@ describe('getCssForOptions', () => {
   })
 
   it('academic/liber take the inline-theme branch (no disk access required)', async() => {
-    const { getCssForOptions } = await loadPdf()
-    // Remove the disk surfaces entirely: if academic/liber tried a disk read
-    // these would throw. They must not.
     const w = globalThis as unknown as { window: Record<string, unknown> }
-    delete w.window.marktext
-    delete w.window.fileUtils
+    const hadMarktext = Object.prototype.hasOwnProperty.call(w.window, 'marktext')
+    const hadFileUtils = Object.prototype.hasOwnProperty.call(w.window, 'fileUtils')
+    const originalMarktext = w.window.marktext
+    const originalFileUtils = w.window.fileUtils
 
-    await expect(getCssForOptions({ theme: 'academic' })).resolves.toBeTypeOf('string')
-    await expect(getCssForOptions({ theme: 'liber' })).resolves.toBeTypeOf('string')
-  })
+    try {
+      const { getCssForOptions } = await loadPdf()
+      // Remove the disk surfaces entirely: if academic/liber tried a disk
+      // read these would throw. They must not.
+      delete w.window.marktext
+      delete w.window.fileUtils
+
+      await expect(getCssForOptions({ theme: 'academic' })).resolves.toBeTypeOf('string')
+      await expect(getCssForOptions({ theme: 'liber' })).resolves.toBeTypeOf('string')
+    } finally {
+      if (hadMarktext) w.window.marktext = originalMarktext
+      else delete w.window.marktext
+      if (hadFileUtils) w.window.fileUtils = originalFileUtils
+      else delete w.window.fileUtils
+    }
+  }, 30_000)
 
   it('appends no theme CSS for theme:"default" (disk lookup misses) or {}', async() => {
     const { getCssForOptions } = await loadPdf()
@@ -73,7 +91,7 @@ describe('getCssForOptions', () => {
     const isFile = vi.fn(async() => true)
     const readFile = vi.fn(async() => '.custom{}')
     const w = globalThis as unknown as {
-      window: { fileUtils: { isFile: typeof isFile, readFile: typeof readFile } }
+      window: { fileUtils: { isFile: typeof isFile; readFile: typeof readFile } }
     }
     w.window.fileUtils = { isFile, readFile }
 
@@ -86,7 +104,7 @@ describe('getCssForOptions', () => {
 
   it('omits the disk theme CSS when the theme file is absent', async() => {
     const w = globalThis as unknown as {
-      window: { fileUtils: { isFile: () => Promise<boolean>, readFile: () => Promise<unknown> } }
+      window: { fileUtils: { isFile: () => Promise<boolean>; readFile: () => Promise<unknown> } }
     }
     w.window.fileUtils = { isFile: async() => false, readFile: async() => '.custom{}' }
 
@@ -100,7 +118,7 @@ describe('getCssForOptions', () => {
     // The whole stylesheet is escapeHTML → sanitize → unescapeHTML'd, so a `>`
     // in a theme selector must survive the round-trip unmangled.
     const w = globalThis as unknown as {
-      window: { fileUtils: { isFile: () => Promise<boolean>, readFile: () => Promise<string> } }
+      window: { fileUtils: { isFile: () => Promise<boolean>; readFile: () => Promise<string> } }
     }
     w.window.fileUtils = { isFile: async() => true, readFile: async() => '.a > .b{color:red}' }
 
@@ -128,7 +146,7 @@ describe('getCssForOptions', () => {
     // AFTER the theme block (same specificity → later wins), otherwise the theme
     // silently clobbers the user's font size / line height / family.
     const w = globalThis as unknown as {
-      window: { fileUtils: { isFile: () => Promise<boolean>, readFile: () => Promise<string> } }
+      window: { fileUtils: { isFile: () => Promise<boolean>; readFile: () => Promise<string> } }
     }
     w.window.fileUtils = {
       isFile: async() => true,

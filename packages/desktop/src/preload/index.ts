@@ -17,6 +17,19 @@ import type {
   IpcMainEventChannels,
   BootInfo
 } from '@shared/types/ipc'
+import type {
+  BookArrangementApplyRequestDto,
+  BookArrangementSaveRequestDto,
+  BookPreparationCommitRequestDto,
+  BookPreparationDraftApplyRequestDto,
+  BookPreparationRecoveryRequestDto,
+  BookExportCommitRequestDto,
+  BookWebsiteCommitRequestDto,
+  BookEditSaveRequestDto,
+  BookResourceRequestDto,
+  BookSearchProgressDto,
+  BookSearchRequestDto
+} from '@shared/types/bookReader'
 
 type RendererEventListener<K extends keyof IpcMainEventChannels> = (
   event: IpcRendererEvent,
@@ -226,6 +239,66 @@ const fontsAPI = {
   list: () => invoke('mt::fonts::list')
 }
 
+const booksAPI = {
+  list: () => invoke('lb::books::list'),
+  openPicker: () => invoke('lb::books::open-picker'),
+  openLibrary: (libraryId: string) => invoke('lb::books::open-library', libraryId),
+  remove: (libraryId: string) => invoke('lb::books::remove', libraryId),
+  refresh: (sessionId: string) => invoke('lb::books::refresh', sessionId),
+  closeSession: (sessionId: string) => invoke('lb::books::close-session', sessionId),
+  readChapter: (sessionId: string, nodeId: string) =>
+    invoke('lb::books::read-chapter', sessionId, nodeId),
+  readResource: (request: BookResourceRequestDto) => invoke('lb::books::read-resource', request),
+  beginEdit: (sessionId: string, nodeId: string) =>
+    invoke('lb::books::begin-edit', sessionId, nodeId),
+  saveEdit: (request: BookEditSaveRequestDto) => invoke('lb::books::save-edit', request),
+  reloadEdit: (editId: string) => invoke('lb::books::reload-edit', editId),
+  closeEdit: (editId: string) => invoke('lb::books::close-edit', editId),
+  beginArrangement: (sessionId: string) => invoke('lb::books::begin-arrangement', sessionId),
+  applyArrangement: (request: BookArrangementApplyRequestDto) =>
+    invoke('lb::books::apply-arrangement', request),
+  undoArrangement: (arrangementId: string) => invoke('lb::books::undo-arrangement', arrangementId),
+  saveArrangement: (request: BookArrangementSaveRequestDto) =>
+    invoke('lb::books::save-arrangement', request),
+  closeArrangement: (arrangementId: string) =>
+    invoke('lb::books::close-arrangement', arrangementId),
+  beginPreparation: (sessionId: string) => invoke('lb::books::begin-preparation', sessionId),
+  selectPreparationSource: (preparationId: string, sourceNodeId: string) =>
+    invoke('lb::books::select-preparation-source', preparationId, sourceNodeId),
+  applyPreparationDraft: (request: BookPreparationDraftApplyRequestDto) =>
+    invoke('lb::books::apply-preparation-draft', request),
+  restorePreparationDraft: (request: BookPreparationRecoveryRequestDto) =>
+    invoke('lb::books::restore-preparation-draft', request),
+  discardPreparationDraft: (request: BookPreparationRecoveryRequestDto) =>
+    invoke('lb::books::discard-preparation-draft', request),
+  commitPreparation: (request: BookPreparationCommitRequestDto) =>
+    invoke('lb::books::commit-preparation', request),
+  closePreparation: (preparationId: string) =>
+    invoke('lb::books::close-preparation', preparationId),
+  beginExport: (sessionId: string) => invoke('lb::books::begin-export', sessionId),
+  commitExport: (request: BookExportCommitRequestDto) =>
+    invoke('lb::books::commit-export', request),
+  cancelExport: (exportId: string) => invoke('lb::books::cancel-export', exportId),
+  beginWebsite: (sessionId: string) => invoke('lb::books::begin-website', sessionId),
+  commitWebsite: (request: BookWebsiteCommitRequestDto) =>
+    invoke('lb::books::commit-website', request),
+  cancelWebsite: (websiteId: string) => invoke('lb::books::cancel-website', websiteId),
+  saveReadingPosition: (sessionId: string, nodeId: string, chapterProgress: number) =>
+    invoke('lb::books::save-reading-position', sessionId, nodeId, chapterProgress),
+  followLink: (sessionId: string, nodeId: string, href: string) =>
+    invoke('lb::books::follow-link', sessionId, nodeId, href),
+  search: (sessionId: string, request: BookSearchRequestDto) =>
+    invoke('lb::books::search', sessionId, request),
+  cancelSearch: (sessionId: string, searchId: string) =>
+    invoke('lb::books::cancel-search', sessionId, searchId),
+  onSearchProgress: (handler: (progress: BookSearchProgressDto) => void) => {
+    const listener = (_event: IpcRendererEvent, progress: BookSearchProgressDto) =>
+      handler(progress)
+    ipcRenderer.on('lb::books::search-progress', listener)
+    return () => ipcRenderer.removeListener('lb::books::search-progress', listener)
+  }
+}
+
 const electronAPI = {
   ipcRenderer: ipcWrapper,
   shell: shellAPI,
@@ -242,7 +315,8 @@ const electronAPI = {
   },
   paths: bootInfo?.paths || {},
   isUpdatable: !!bootInfo?.isUpdatable,
-  windowControl: windowControlAPI
+  windowControl: windowControlAPI,
+  books: booksAPI
 }
 
 // Expose a Node-`path`-compatible API to the renderer. `pathe` is a

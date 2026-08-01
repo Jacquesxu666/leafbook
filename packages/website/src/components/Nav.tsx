@@ -40,8 +40,8 @@ export default function Nav() {
         <a className="icon-btn" href={DOWNLOAD.repo} {...EXT_LINK} aria-label="GitHub">
           <GitHubIcon />
         </a>
-        <a className="btn btn-primary" href={DOWNLOAD.releases} {...EXT_LINK}>
-          Download
+        <a className="btn btn-primary" href={DOWNLOAD.source} {...EXT_LINK}>
+          Source
         </a>
       </div>
     </nav>
