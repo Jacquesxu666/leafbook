@@ -6988,3 +6988,29 @@ book_structure_ready=true code=0`. The harness verified the original sample
   hosted Windows must validate the corrected path handoff; formal publication
   still requires the protected signing credentials.
 - Git commit: pending.
+
+### 2026-07-31 Native package metadata and ASAR audit portability
+
+- User goal: keep fixing every hosted failure and advance LeafBook 1.0 to a
+  formally releasable state without relaxing carrier security checks.
+- Completed: matched electron-builder's exact multiline RFC822 DEB description
+  and verified it against a real locally built LeafBook 1.0.0 DEB.
+- Completed: replaced Windows-incompatible pnpm batch-wrapper launches with the
+  fixed `@electron/asar` Node API under the same time, output, and extraction
+  bounds.
+- Completed: generated a real ARM64 RPM probe in Debian and pinned its exact
+  `POSTIN`/`POSTUN` payload hashes and `/bin/sh` interpreters while continuing
+  to reject every other script and trigger-script header before extraction.
+- Files: `scripts/preflight-archive.py`,
+  `scripts/audit-platform-artifacts.sh`,
+  `packages/desktop/test/unit/specs/release-gate-static.spec.ts`, and this log.
+- Tests: focused static release suite passed 35/35; the real DEB preflight,
+  direct bounded ASAR list/extract probe, real RPM metadata probe,
+  release-notes and generated-metadata gates, targeted ESLint, Prettier, Bash
+  syntax, and `git diff --check` passed.
+- Key decision: model the deterministic package-manager transformations
+  explicitly, including RPM's removal of the final `POSTIN` newline, instead
+  of disabling package scripts that provide required desktop integration.
+- Remaining issues: hosted runners must advance through the remaining carrier
+  tree checks; stable signing/notarization credentials remain unconfigured.
+- Git commit: pending.

@@ -96,18 +96,28 @@ preflight_rpm() {
 
 preflight_rpm_scriptlets() {
   local artifact="$1"
-  local surface output tag
-  for surface in scripts triggers filetriggers transfiletriggers; do
-    output="$temporary_root/rpm-$surface.txt"
+  local output tag expected_hash interpreter
+  for tag in POSTIN POSTUN; do
+    output="$temporary_root/rpm-header-$tag.txt"
     python3 "$repository_root/scripts/run-bounded.py" 60 30 67108864 -- \
-      rpm -qp "--$surface" "$artifact" > "$output"
-    if grep -q '[^[:space:]]' "$output"; then
-      echo "RPM carrier contains unapproved $surface." >&2
+      rpm -qp --queryformat "%{$tag}" "$artifact" > "$output"
+    if [[ "$tag" == "POSTIN" ]]; then
+      expected_hash="186dbbc5713b15cfafdc6b1d74df9ae8d25a396ca00ccd07dbf68266eb033d28"
+    else
+      expected_hash="6cad66957fed4a5d34f1cce633e7d90184bcd1cc5999f913d134420ffa25a83f"
+    fi
+    if [[ "$(sha256sum "$output" | awk '{print $1}')" != "$expected_hash" ]]; then
+      echo "RPM carrier contains a non-canonical $tag scriptlet." >&2
+      exit 1
+    fi
+    interpreter="$(rpm -qp --queryformat "%{${tag}PROG}" "$artifact")"
+    if [[ "$interpreter" != "/bin/sh" ]]; then
+      echo "RPM carrier contains a non-canonical ${tag}PROG interpreter." >&2
       exit 1
     fi
   done
   for tag in \
-    PREIN POSTIN PREUN POSTUN PRETRANS POSTTRANS VERIFYSCRIPT \
+    PREIN PREUN PRETRANS POSTTRANS VERIFYSCRIPT \
     TRIGGERSCRIPTS FILETRIGGERSCRIPTS TRANSFILETRIGGERSCRIPTS; do
     output="$temporary_root/rpm-header-$tag.txt"
     python3 "$repository_root/scripts/run-bounded.py" 60 30 67108864 -- \
@@ -199,14 +209,18 @@ audit_extracted_tree() {
   python3 "$repository_root/scripts/run-bounded.py" 60 30 67108864 -- \
     node "$repository_root/scripts/preflight-asar.mjs" "$asar"
   python3 "$repository_root/scripts/run-bounded.py" 120 90 536870912 -- \
-    pnpm --filter leafbook exec asar list "$asar" > "$asar_listing"
+    node -e \
+    'const { listPackage } = require("@electron/asar"); for (const item of listPackage(process.argv[1])) console.log(item)' \
+    "$asar" > "$asar_listing"
   "$repository_root/scripts/check-asar-listing-no-updater.sh" "$asar_listing"
   grep -qx '/node_modules/katex/dist/katex.mjs' "$asar_listing" || {
     echo "$carrier ASAR is missing the required KaTeX ESM runtime." >&2
     exit 1
   }
   python3 "$repository_root/scripts/run-bounded.py" 120 90 536870912 -- \
-    pnpm --filter leafbook exec asar extract "$asar" "$asar_extract"
+    node -e \
+    'require("@electron/asar").extractAll(process.argv[1], process.argv[2])' \
+    "$asar" "$asar_extract"
   node - "$asar_extract/package.json" "$version" "$carrier" <<'NODE'
 const fs = require('node:fs')
 const [packagePath, expectedVersion, carrier] = process.argv.slice(2)

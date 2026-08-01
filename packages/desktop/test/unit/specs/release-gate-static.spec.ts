@@ -1325,7 +1325,7 @@ gh release create "\${GITHUB_REF_NAME}" final-release/assets/* "\${release_flags
           '   out.write(header.encode("ascii")); out.write(body)',
           '   if len(body)%2: out.write(b"\\n")',
           'postinst=open(sys.argv[3],"rb").read(); postrm=open(sys.argv[4],"rb").read()',
-          'fields=["Package: leafbook","Version: 0.1.0","License: MIT","Vendor: LeafBook Contributors","Architecture: amd64","Maintainer: LeafBook Contributors","Installed-Size: 1024","Depends: libgtk-3-0, libnotify4, libnss3, libxss1, libxtst6, xdg-utils, libatspi2.0-0, libuuid1, libsecret-1-0","Recommends: libappindicator3-1","Section: default","Priority: optional","Homepage: https://github.com/Jacquesxu666/leafbook","Description: A local-first Markdown book reader and editor."]',
+          'fields=["Package: leafbook","Version: 0.1.0","License: MIT","Vendor: LeafBook Contributors","Architecture: amd64","Maintainer: LeafBook Contributors","Installed-Size: 1024","Depends: libgtk-3-0, libnotify4, libnss3, libxss1, libxtst6, xdg-utils, libatspi2.0-0, libuuid1, libsecret-1-0","Recommends: libappindicator3-1","Section: default","Priority: optional","Homepage: https://github.com/Jacquesxu666/leafbook","Description: ","  A local-first Markdown book reader and editor."]',
           'body=("\\n".join(fields)+"\\n").encode()',
           'fixed=[("./md5sums",b"d41d8cd98f00b204e9800998ecf8427e  opt/LeafBook/resources/app.asar\\n",0o644),("./postinst",postinst,0o755),("./postrm",postrm,0o755)]',
           'control=tar([("./control",body,0o644),*fixed])',
@@ -1461,18 +1461,11 @@ gh release create "\${GITHUB_REF_NAME}" final-release/assets/* "\${release_flags
     }
   })
 
-  it('fails closed when RPM scriptlet or trigger inspection reports any command', () => {
+  it('allows only pinned RPM install/remove scriptlets and rejects every trigger script', () => {
     const audit = read('scripts/audit-platform-artifacts.sh')
-    for (const surface of ['scripts', 'triggers', 'filetriggers', 'transfiletriggers']) {
-      expect(audit).toContain('scripts triggers filetriggers transfiletriggers')
-      expect(audit).toContain('rpm -qp "--$surface"')
-      expect(surface).toBeTruthy()
-    }
     for (const tag of [
       'PREIN',
-      'POSTIN',
       'PREUN',
-      'POSTUN',
       'PRETRANS',
       'POSTTRANS',
       'VERIFYSCRIPT',
@@ -1482,7 +1475,10 @@ gh release create "\${GITHUB_REF_NAME}" final-release/assets/* "\${release_flags
     ]) {
       expect(audit).toContain(tag)
     }
-    expect(audit).toContain('RPM carrier contains unapproved $surface.')
+    expect(audit).toContain('186dbbc5713b15cfafdc6b1d74df9ae8d25a396ca00ccd07dbf68266eb033d28')
+    expect(audit).toContain('6cad66957fed4a5d34f1cce633e7d90184bcd1cc5999f913d134420ffa25a83f')
+    expect(audit).toContain('rpm -qp --queryformat "%{$' + '{tag}PROG}"')
+    expect(audit).toContain('RPM carrier contains a non-canonical $tag scriptlet.')
     const rpmFixture = 'preflight_rpm_scriptlets "$dist_dir/$' + '{expected[2]}"'
     expect(audit.indexOf(rpmFixture)).toBeLessThan(audit.indexOf('rpm2cpio "$2"'))
   })

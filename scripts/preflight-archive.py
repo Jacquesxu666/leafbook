@@ -254,10 +254,7 @@ def validate_deb_control(fields: dict[str, str], expected_version: str, expected
             raise ValueError(f"Debian control has non-canonical {name}")
     if fields["Section"] not in ("default", "editors", "office", "utils"):
         raise ValueError("Debian control has non-canonical Section")
-    if fields["Description"] not in (
-        "A local-first Markdown book reader and editor.",
-        "\nA local-first Markdown book reader and editor.",
-    ):
+    if fields["Description"] != "\n A local-first Markdown book reader and editor.":
         raise ValueError("Debian control has non-canonical Description")
     installed_size = fields["Installed-Size"]
     if not installed_size.isascii() or not installed_size.isdigit():
