@@ -29,3 +29,6 @@ runs:
         git_hosted_store="$RUNNER_TEMP/leafbook-pnpm-store/v10/https+++codeload.github.com+file-icons+atom+tar.gz+28520868aee66e576145a0b18aa2cde5444a897a"
         rm -rf -- "$git_hosted_store"
         pnpm install --frozen-lockfile --ignore-scripts
+        if [[ -f "$git_hosted_store/integrity-not-built.json" ]]; then
+          cp "$git_hosted_store/integrity-not-built.json" "$git_hosted_store/integrity.json"
+        fi
