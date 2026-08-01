@@ -1,36 +1,75 @@
-# LeafBook
+<p align="center">
+  <img src="packages/desktop/build/icons/leafbook.svg" alt="LeafBook logo" width="112" height="112">
+</p>
 
-LeafBook is a local-first Markdown book reader and editor. Its goal is simple:
-open a folder of Markdown documents and make it feel like reading and writing a
-book.
+<h1 align="center">LeafBook</h1>
 
-The project is under active development. The current application version is
-defined only in `packages/desktop/package.json`. The first foundation release
-establishes an independent application identity; book-library, `SUMMARY.md`
-navigation, reading progress, and whole-book search will follow.
+<p align="center">
+  <strong>Read a folder of Markdown files like a book.</strong><br>
+  A local-first Markdown book reader and editor for macOS, Windows, and Linux.<br>
+  <sub>把一整个 Markdown 文件夹，变成一本可以阅读、整理和编辑的书。</sub>
+</p>
 
-## Install and operate safely
+<p align="center">
+  <a href="https://github.com/Jacquesxu666/leafbook/actions/workflows/build.yml"><img src="https://github.com/Jacquesxu666/leafbook/actions/workflows/build.yml/badge.svg?branch=develop" alt="Build status"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/Jacquesxu666/leafbook" alt="MIT license"></a>
+  <img src="https://img.shields.io/badge/version-1.0.0-2f855a" alt="Version 1.0.0">
+  <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-334155" alt="macOS, Windows and Linux">
+</p>
 
-Public, signed installers are not available yet. Current local macOS artifacts
-are unsigned and unnotarized development candidates; do not treat them as a
-formal release. Platform-specific install, upgrade, uninstall, data-location,
-and checksum instructions are in [docs/INSTALLATION.md](docs/INSTALLATION.md).
+---
 
-Before using LeafBook with sensitive manuscripts, read
-[docs/PRIVACY_SECURITY.md](docs/PRIVACY_SECURITY.md). Release readiness and
-known evidence gaps are tracked in
-[docs/RELEASE_CHECKLIST.md](docs/RELEASE_CHECKLIST.md) and
-[docs/RELEASE_GATE.md](docs/RELEASE_GATE.md).
+LeafBook turns an ordinary directory of Markdown documents into a focused book
+workspace. Your manuscripts stay in folders you control; LeafBook discovers the
+chapters, builds navigation, remembers where you stopped, and lets you move
+between reading and editing without uploading the book to a service.
 
-## Development
+## What you can do
 
-Requirements and LeafBook-specific safe packaging notes are in
-[docs/BUILD.md](docs/BUILD.md). The inherited
-[developer documentation](packages/website/content/docs/dev/BUILD.md)
-remains transitional reference.
-The documents under `packages/website/content/docs` originated in MarkText and
-are retained as transitional reference material; LeafBook-specific guides will
-replace them as features diverge.
+- **Open a book folder** — use an existing `SUMMARY.md` or let LeafBook infer a
+  deterministic chapter tree from the directory.
+- **Prepare a manuscript** — turn the top-level headings in one long Markdown
+  document into a reviewed `SUMMARY.md` without changing the source document.
+- **Read with context** — navigate chapters, restore reading progress and scroll
+  position, and search across the whole book.
+- **Arrange the contents** — reorder and nest existing `SUMMARY.md` entries with
+  keyboard, buttons, drag-and-drop, undo, cancel, and explicit save.
+- **Edit a chapter** — switch from Reader to the Markdown editor, save locally,
+  detect external changes, and return to the same reading position.
+- **Export the book** — create a self-contained offline HTML file or a local
+  static website with deterministic assets and manifests.
+- **Keep local media local** — render bounded local raster images and safe SVGs
+  while remote renderer network access remains denied by default.
+
+## Local-first by design
+
+LeafBook does not require an account or a hosted workspace. Book discovery,
+reading, editing, preparation drafts, search, and export run on your computer.
+Opening a folder grants the app access to that folder, and edits write directly
+to your manuscript files, so normal backups still matter.
+
+See [Privacy and security](docs/PRIVACY_SECURITY.md) for the complete trust and
+data-handling model.
+
+## Release status
+
+LeafBook 1.0.0 has passed the project test suite and cross-platform packaging
+audits. Public installers are not posted yet because the macOS and Windows
+packages still need project-owned code-signing and notarization credentials.
+
+| Platform | Planned formats            | Current status                                       |
+| -------- | -------------------------- | ---------------------------------------------------- |
+| macOS    | DMG, ZIP                   | Packaging verified; signing and notarization pending |
+| Windows  | NSIS installer, ZIP        | Packaging verified; Authenticode signing pending     |
+| Linux    | AppImage, tar.gz, DEB, RPM | Packaging and carrier audits verified                |
+
+Do not treat an unsigned development artifact as a formal release. Installation,
+upgrade, uninstall, checksum, and data-location guidance lives in
+[Installation](docs/INSTALLATION.md).
+
+## Run from source
+
+LeafBook uses Node.js, pnpm, Electron, Vue, and the Muya editing engine.
 
 ```bash
 corepack enable
@@ -38,64 +77,47 @@ pnpm install
 pnpm dev
 ```
 
-Common checks:
+Common validation commands:
 
 ```bash
 pnpm typecheck
 pnpm test:unit
 pnpm lint
 pnpm build
-SOURCE_DATE_EPOCH="$(git show -s --format=%ct HEAD)" \
-  pnpm generate:release-sbom -- /tmp/leafbook.spdx.json
-pnpm verify:release-notes
 ```
 
-The SBOM timestamp and namespace contract is documented in
-[docs/BUILD.md](docs/BUILD.md).
+Platform dependencies and safe packaging commands are documented in
+[Building LeafBook](docs/BUILD.md).
 
-The application icons are generated deterministically from
-`packages/desktop/build/icons/leafbook.svg` on macOS:
+## Documentation
 
-```bash
-pnpm generate-leafbook-icons
-pnpm verify-leafbook-icons
-```
-
-Icon generation currently requires macOS `sips` and `iconutil`. The checked-in
-inputs are explicit per platform: `static/icon.icns` for macOS,
-`static/icon.ico` for Windows, and `static/icon.png` for Linux. The verification
-script regenerates twice, checks hashes and dimensions, and fails if the outputs
-are not reproducible.
-
-After a macOS arm64 package build, audit the real app, ZIP, and DMG:
-
-```bash
-pnpm audit:mac-artifact
-# or: pnpm audit:mac-artifact -- x64
-```
-
-This macOS-only audit checks bundle metadata, shipped `LICENSE`/`NOTICE`,
-packaged dependency metadata, and confirms the app ASAR does not contain
-`electron-updater`.
+| Guide                                      | Covers                                                    |
+| ------------------------------------------ | --------------------------------------------------------- |
+| [Reader workspace](docs/BOOK_READER.md)    | Bookshelf, discovery, navigation, search, and progress    |
+| [Prepare Book](docs/PREPARE_BOOK.md)       | Converting a long manuscript into reviewed navigation     |
+| [Arrange book](docs/BOOK_ARRANGEMENT.md)   | Safe `SUMMARY.md` reordering and save behavior            |
+| [Chapter editing](docs/BOOK_EDITING.md)    | Reader/editor transitions and conflict handling           |
+| [Single-file export](docs/BOOK_EXPORT.md)  | Offline semantic HTML export                              |
+| [Website generation](docs/BOOK_WEBSITE.md) | Deterministic local static-site output                    |
+| [Release gate](docs/RELEASE_GATE.md)       | Signing, carrier audits, evidence, and publication policy |
 
 ## Project identity
 
-- Product name: **LeafBook**
+- Product: **LeafBook**
 - Application ID: `com.jacquesxu.leafbook`
-- Executable and package prefix: `leafbook`
-- Local user-data directory: `leafbook`
-- Automatic updates: disabled until LeafBook has a signed, project-owned
-  release channel
-
-Internal `marktext`, `@marktext`, and Muya identifiers are intentionally
-retained where they are implementation details. This keeps upstream merges
-reviewable and does not affect the installed product identity.
-
-## Attribution and license
+- Package and executable prefix: `leafbook`
+- License: MIT
 
 LeafBook is an independent derivative of
 [MarkText](https://github.com/marktext/marktext). It is not affiliated with or
-endorsed by the MarkText project.
+endorsed by the MarkText project. Upstream copyright and attribution are
+preserved in [LICENSE](LICENSE) and [NOTICE](NOTICE).
 
-MarkText is Copyright (c) 2018-present MarkText Contributors and is distributed
-under the MIT License. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
+## Contributing
+
+Issues and focused pull requests are welcome. Please read the relevant design
+guide before changing book parsing, filesystem access, export, or release code;
+those boundaries deliberately fail closed.
+
+If LeafBook is useful to you, starring the repository is a simple way to help
+the project become easier to discover.

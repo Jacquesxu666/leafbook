@@ -7151,3 +7151,26 @@ book_structure_ready=true code=0`. The harness verified the original sample
 - Remaining issues: hosted E2E must confirm the timing correction; formal
   signing/notarization credentials remain unconfigured.
 - Git commit: pending.
+
+### 2026-07-31 GitHub project homepage refresh
+
+- User goal: make the LeafBook GitHub page feel like a complete, useful project
+  instead of an empty or inherited repository.
+- Completed: replaced the stale foundation README with a polished LeafBook
+  homepage containing the project logo, bilingual positioning, build/license/
+  version/platform badges, current 1.0 features, local-first privacy model,
+  honest signing status, platform matrix, source quick start, documentation
+  map, independent project identity, attribution, and contribution guidance.
+- Completed: replaced the inherited MarkText GitHub description and homepage,
+  and added focused discovery topics for Markdown, books, Electron, Vue,
+  local-first software, and GitBook alternatives.
+- Files: `README.md` and this log. GitHub repository metadata was updated
+  directly through the authenticated repository administration API.
+- Tests: all README-relative file targets exist; Prettier and
+  `git diff --check` passed.
+- Key decision: describe the full implemented LeafBook 1.0 feature set while
+  clearly separating packaging verification from the still-pending signed
+  public installers.
+- Remaining issues: a real product screenshot and signed-download section can
+  be added after signing credentials and formal release artifacts exist.
+- Git commit: pending.
