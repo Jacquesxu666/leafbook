@@ -14,6 +14,10 @@ runs:
       # pnpm/action-setup v4.4.0
       uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320
 
+    - name: Configure pnpm store
+      shell: bash
+      run: pnpm config set store-dir "$RUNNER_TEMP/leafbook-pnpm-store"
+
     - name: Install Node.js
       # actions/setup-node v4.4.0
       uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
@@ -24,6 +28,4 @@ runs:
 
     - name: Install Dependencies
       shell: bash
-      run: |
-        pnpm config set store-dir "$RUNNER_TEMP/leafbook-pnpm-store"
-        pnpm install --frozen-lockfile --ignore-scripts
+      run: pnpm install --frozen-lockfile --ignore-scripts
