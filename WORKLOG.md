@@ -6770,6 +6770,23 @@ book_structure_ready=true code=0`. The harness verified the original sample
 - Remaining issues: hosted CI must validate the refreshed candidate.
 - Git commit: pending.
 
+#### Linux ARM64 RPM carrier-name remediation
+
+- Completed: normalized electron-builder's RPM-specific `aarch64` filename to
+  LeafBook's canonical `arm64` carrier name after a verified atomic rename;
+  retained the exact 16-carrier release contract.
+- Files: `scripts/normalize-linux-artifact-names.mjs`,
+  `packages/desktop/package.json`,
+  `packages/desktop/test/unit/specs/linux-artifact-names.spec.ts`, and this log.
+- Tests: focused normalization, Phase 10C readiness, and static release-gate
+  suites passed 59/59; targeted ESLint, Prettier, and `git diff --check`
+  passed.
+- Key decision: normalize the one tool-specific RPM alias instead of weakening
+  downstream audit, evidence, checksum, SBOM, or release filename expectations.
+- Remaining issues: hosted Linux ARM64 packaging must validate the normalized
+  carrier alongside the other platform jobs.
+- Git commit: pending.
+
 #### Hosted CI follow-up
 
 - Completed: updated the native-evidence regression test to validate the
