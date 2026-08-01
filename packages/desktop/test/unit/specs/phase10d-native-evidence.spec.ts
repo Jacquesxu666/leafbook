@@ -326,11 +326,15 @@ describe('Phase 10D native release evidence', () => {
     }
     const setupText = read('.github/actions/setup/action.yml')
     expect(setupText).not.toMatch(/github\.token|GITHUB_TOKEN/u)
+    const store = action.runs.steps.find(({ name }) => name === 'Configure pnpm store')
+    expect(store?.name).toBe('Configure pnpm store')
+    expect(store?.shell).toBe('bash')
+    expect(store?.run).toBe('pnpm config set store-dir "$RUNNER_TEMP/leafbook-pnpm-store"')
+    expect(JSON.stringify(store)).not.toContain('GITHUB_TOKEN')
     const install = action.runs.steps.find(({ name }) => name === 'Install Dependencies')
     expect(install?.name).toBe('Install Dependencies')
     expect(install?.shell).toBe('bash')
     expect(install?.run).toContain('pnpm install --frozen-lockfile --ignore-scripts')
-    expect(install?.run).toContain('pnpm config set store-dir "$RUNNER_TEMP/leafbook-pnpm-store"')
     expect(JSON.stringify(install)).not.toContain('GITHUB_TOKEN')
     for (const workflow of [
       '.github/workflows/build.yml',

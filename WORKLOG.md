@@ -6756,6 +6756,19 @@ book_structure_ready=true code=0`. The harness verified the original sample
   are ready.
 - Git commit: pending.
 
+#### Hosted CI follow-up
+
+- Completed: updated the native-evidence regression test to validate the
+  dedicated pnpm-store configuration step introduced to make setup-node cache
+  finalization reliable on hosted runners.
+- Files: `packages/desktop/test/unit/specs/phase10d-native-evidence.spec.ts` and
+  this log.
+- Tests: focused native-evidence suite passed 10/10; targeted Prettier and
+  `git diff --check` passed.
+- Remaining issues: the refreshed hosted run must finish successfully before
+  the release branch can advance to tagging.
+- Git commit: pending.
+
 ### 2026-07-31 LeafBook 1.0 release blocker remediation
 
 - User goal: clear every CI failure and continue through the formal LeafBook
